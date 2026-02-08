@@ -12,10 +12,17 @@ FetchContent_MakeAvailable(googletest)
 
 include(GoogleTest)
 
+# Fetch fast_float (needed for beast_json)
+FetchContent_Declare(
+    fast_float
+    URL https://github.com/fastfloat/fast_float/archive/refs/tags/v6.1.1.tar.gz
+)
+FetchContent_MakeAvailable(fast_float)
+
 # Legacy test function (keeps own main)
 function(add_beast_legacy_test name)
     add_executable(${name} ${name}.cpp)
-    target_link_libraries(${name} PRIVATE beast_json::beast_json)
+    target_link_libraries(${name} PRIVATE beast_json::beast_json fast_float)
     target_compile_features(${name} PRIVATE cxx_std_17)
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
@@ -57,7 +64,7 @@ add_beast_gtest(test_bitmap)
 add_beast_gtest(test_bitmap_offsets)
 add_beast_gtest(test_simple_debug)
 add_beast_gtest(test_parallel_debug)
-
+add_beast_legacy_test(test_tape_features)
 # Download benchmark data
 set(BENCHMARK_DATA_DIR ${CMAKE_CURRENT_BINARY_DIR})
 if(NOT EXISTS ${BENCHMARK_DATA_DIR}/twitter.json)
@@ -71,3 +78,6 @@ endif()
 
 # Copy test data to build directory
 file(COPY ${PROJECT_SOURCE_DIR}/data/ DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+
+# Benchmark Executable
+

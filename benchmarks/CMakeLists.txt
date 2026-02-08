@@ -63,9 +63,25 @@ if(NOT EXISTS ${BENCHMARK_DATA_DIR}/twitter.json)
     )
 endif()
 
+# Optimization and PGO
+if(NOT CMAKE_BUILD_TYPE MATCHES "Debug")
+    add_compile_options(-O3 -march=native -flto)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
+set(PGO_MODE "" CACHE STRING "PGO mode: GENERATE or USE")
+if(PGO_MODE STREQUAL "GENERATE")
+    add_compile_options(-fprofile-generate)
+    add_link_options(-fprofile-generate)
+elseif(PGO_MODE STREQUAL "USE")
+    add_compile_options(-fprofile-use=${CMAKE_SOURCE_DIR}/default.profdata -fprofile-correction)
+    add_link_options(-fprofile-use=${CMAKE_SOURCE_DIR}/default.profdata -fprofile-correction)
+endif()
+
 # C++17 Benchmarks
 add_executable(bench_file_io bench_file_io.cpp)
-target_link_libraries(bench_file_io PRIVATE 
+target_link_libraries(bench_file_io PRIVATE fast_float
+ 
     beast_json::beast_json 
     nlohmann_json::nlohmann_json
     simdjson
@@ -75,7 +91,8 @@ target_include_directories(bench_file_io PRIVATE ${rapidjson_SOURCE_DIR}/include
 target_compile_features(bench_file_io PRIVATE cxx_std_17)
 
 add_executable(bench_simple_struct bench_simple_struct.cpp)
-target_link_libraries(bench_simple_struct PRIVATE 
+target_link_libraries(bench_simple_struct PRIVATE fast_float
+ 
     beast_json::beast_json 
     nlohmann_json::nlohmann_json
     yyjson
@@ -84,7 +101,8 @@ target_include_directories(bench_simple_struct PRIVATE ${rapidjson_SOURCE_DIR}/i
 target_compile_features(bench_simple_struct PRIVATE cxx_std_17)
 
 add_executable(bench_complex_struct bench_complex_struct.cpp)
-target_link_libraries(bench_complex_struct PRIVATE 
+target_link_libraries(bench_complex_struct PRIVATE fast_float
+ 
     beast_json::beast_json 
     nlohmann_json::nlohmann_json
     yyjson
@@ -94,15 +112,18 @@ target_compile_features(bench_complex_struct PRIVATE cxx_std_17)
 
 # C++23 Glaze Benchmark
 add_executable(bench_glaze bench_glaze.cpp)
-target_link_libraries(bench_glaze PRIVATE 
+target_link_libraries(bench_glaze PRIVATE fast_float
+ 
     beast_json::beast_json
     glaze::glaze
+    fast_float
 )
 target_compile_features(bench_glaze PRIVATE cxx_std_23)
 
 # Profiling Benchmark (Multi-file)
 add_executable(bench_profiling bench_profiling.cpp)
-target_link_libraries(bench_profiling PRIVATE 
+target_link_libraries(bench_profiling PRIVATE fast_float
+ 
     beast_json::beast_json 
     nlohmann_json::nlohmann_json
     simdjson
