@@ -33,19 +33,26 @@ int main() {
     bench::Timer parse_timer, serialize_timer;
     size_t iterations = 10000;
 
+    // Reuse arena across iterations (like yyjson/simdjson)
+    beast::json::FastArena arena(json_content.size() * 2);
+    beast::json::tape::Document doc(&arena);
+
     parse_timer.start();
     for (size_t i = 0; i < iterations; ++i) {
-      beast::json::FastArena arena(json_content.size() * 2);
-      beast::json::tape::Document doc(&arena);
+      arena.reset();
+      doc.tape.clear();
+      doc.string_buffer.clear();
+
       beast::json::tape::Parser parser(doc, json_content.data(),
                                        json_content.size());
       parser.parse();
     }
     double parse_ns = parse_timer.elapsed_ns() / iterations;
 
-    // Prepare for Serialize
-    beast::json::FastArena arena(json_content.size() * 2);
-    beast::json::tape::Document doc(&arena);
+    // Prepare for Serialize (reuse same doc from last parse)
+    arena.reset();
+    doc.tape.clear();
+    doc.string_buffer.clear();
     beast::json::tape::Parser parser(doc, json_content.data(),
                                      json_content.size());
     auto res = parser.parse();
@@ -84,27 +91,34 @@ int main() {
       inputs.push_back(std::move(s));
     }
 
+    // Reuse arena across iterations
+    beast::json::FastArena arena_insitu(json_content.size() * 2);
+    beast::json::tape::Document doc_insitu(&arena_insitu);
+
     parse_timer.start();
     for (size_t i = 0; i < iterations; ++i) {
-      beast::json::FastArena arena(json_content.size() * 2); // reuse size hint
-      beast::json::tape::Document doc(&arena);
+      arena_insitu.reset();
+      doc_insitu.tape.clear();
+      doc_insitu.string_buffer.clear();
+
       // Pass mutable char*
       beast::json::tape::Parser parser(
-          doc, &inputs[i][0], inputs[i].size(),
+          doc_insitu, &inputs[i][0], inputs[i].size(),
           {true, true, true, false, false, true}); // last true = insitu
       parser.parse();
     }
     double parse_ns = parse_timer.elapsed_ns() / iterations;
 
-    // Verification?
-    // Just check one
-    beast::json::FastArena arena(json_content.size() * 2);
-    beast::json::tape::Document doc(&arena);
+    // Verification (reuse arena/doc from above)
+    arena_insitu.reset();
+    doc_insitu.tape.clear();
+    doc_insitu.string_buffer.clear();
+
     std::string mutable_input = json_content;
-    beast::json::tape::Parser parser(doc, &mutable_input[0],
-                                     mutable_input.size(),
-                                     {true, true, true, false, false, true});
-    auto res = parser.parse();
+    beast::json::tape::Parser parser_verify(
+        doc_insitu, &mutable_input[0], mutable_input.size(),
+        {true, true, true, false, false, true});
+    auto res = parser_verify.parse();
     bool correct = (res.error == beast::json::Error::Ok);
     if (!correct) {
       std::cout << "Insitu Failed: " << (int)res.error << " at " << res.offset

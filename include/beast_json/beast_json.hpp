@@ -5037,8 +5037,7 @@ BEAST_INLINE CopyResult<CharT> scan_copy_string(CharT *src, CharT *src_end,
 
       // Perform partial copy for the valid prefix
       if (!no_write) {
-        for (int i = 0; i < idx; ++i)
-          dst[i] = src[i];
+        std::memcpy(dst, src, idx);
       }
 
       if (vmaxvq_u8(chunk) >= 0x80)
@@ -6205,27 +6204,46 @@ public:
 
     switch (*p) {
     case '{':
+      return parse_object_impl<Padded>(p);
+    case '[':
+      return parse_array_impl<Padded>(p);
+    case '"':
+      return parse_string(p);
     case 't':
       if (BEAST_LIKELY(p + 4 <= end_)) {
-        // We can just check the chars? Check "rue"
-        // But the previous code checked length.
-        // Let's stick to previous logic + pointer arithmetic
-        push_tape(Element(Type::True, 0).data);
-        return p + 4;
+        // SWAR: validate "true" with single 32-bit comparison
+        uint32_t word;
+        std::memcpy(&word, p, 4);
+        // "true" = 0x65757274 (little-endian)
+        if (BEAST_LIKELY(word == 0x65757274)) {
+          push_tape(Element(Type::True, 0).data);
+          return p + 4;
+        }
       }
       p_ = end_;
       return nullptr;
     case 'f':
       if (BEAST_LIKELY(p + 5 <= end_)) {
-        push_tape(Element(Type::False, 0).data);
-        return p + 5;
+        // SWAR: validate "false"
+        uint32_t word;
+        std::memcpy(&word, p, 4);
+        if (BEAST_LIKELY(word == 0x736C6166 && p[4] == 'e')) {
+          push_tape(Element(Type::False, 0).data);
+          return p + 5;
+        }
       }
       p_ = end_;
       return nullptr;
     case 'n':
       if (BEAST_LIKELY(p + 4 <= end_)) {
-        push_tape(Element(Type::Null, 0).data);
-        return p + 4;
+        // SWAR: validate "null" with single 32-bit comparison
+        uint32_t word;
+        std::memcpy(&word, p, 4);
+        // "null" = 0x6C6C756E (little-endian)
+        if (BEAST_LIKELY(word == 0x6C6C756E)) {
+          push_tape(Element(Type::Null, 0).data);
+          return p + 4;
+        }
       }
       p_ = end_;
       return nullptr;
