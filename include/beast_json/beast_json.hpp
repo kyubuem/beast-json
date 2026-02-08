@@ -5025,14 +5025,13 @@ BEAST_INLINE CopyResult<CharT> scan_copy_string(CharT *src, CharT *src_end,
     uint8x16_t mask = vorrq_u8(vorrq_u8(m1, m2), m3);
 
     if (vmaxvq_u8(mask) != 0) {
-      // Found match
       uint64_t low = vgetq_lane_u64(vreinterpretq_u64_u8(mask), 0);
       int idx;
       if (low != 0) {
         idx = __builtin_ctzll(low) / 8;
       } else {
-        low = vgetq_lane_u64(vreinterpretq_u64_u8(mask), 1);
-        idx = 8 + (__builtin_ctzll(low) / 8);
+        uint64_t high = vgetq_lane_u64(vreinterpretq_u64_u8(mask), 1);
+        idx = 8 + __builtin_ctzll(high) / 8;
       }
 
       // Perform partial copy for the valid prefix
@@ -5097,8 +5096,8 @@ BEAST_INLINE const char *scan_string(const char *src, const char *src_end,
       if (low != 0) {
         idx = __builtin_ctzll(low) / 8;
       } else {
-        low = vgetq_lane_u64(vreinterpretq_u64_u8(mask), 1);
-        idx = 8 + (__builtin_ctzll(low) / 8);
+        uint64_t high = vgetq_lane_u64(vreinterpretq_u64_u8(mask), 1);
+        idx = 8 + __builtin_ctzll(high) / 8;
       }
 
       if (vmaxvq_u8(accumulator) >= 0x80)
@@ -6248,7 +6247,7 @@ public:
       p_ = end_;
       return nullptr;
     case '-':
-      return parse_number_impl<true>(p + 1); // TODO: Padded
+      return parse_number_impl<true>(p + 1);
     case '0':
     case '1':
     case '2':
@@ -6259,9 +6258,9 @@ public:
     case '7':
     case '8':
     case '9':
-      return parse_number_impl<false>(p); // TODO: Padded
+      return parse_number_impl<false>(p);
     default:
-      p_ = (char *)p; // Error at p
+      p_ = (char *)p;
       return nullptr;
     }
   }
