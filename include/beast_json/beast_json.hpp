@@ -3177,471 +3177,6 @@ template <typename CharT> BEAST_INLINE CharT *scan_string(CharT *p, CharT *end);
 
 BEAST_INLINE size_t fill_bitmap(const char *src, size_t len, BitmapIndex &idx);
 } // namespace simd
-
-// Scan JSON and extract structural character positions
-inline StructuralIndex scan_structure(const char *json, size_t len) {
-  StructuralIndex idx;
-  idx.reserve(len / 8); // Heuristic: ~12.5% of chars are structural
-
-  const char *p = json;
-  const char *end = json + len;
-  uint32_t offset = 0;
-
-  bool in_string = false;
-  bool escaped = false;
-  bool after_value_separator = false; // Track if we just saw : or [ or ,
-
-  while (p < end) {
-    char c = *p;
-
-    if (in_string) {
-      if (escaped) {
-        escaped = false;
-      } else {
-        // SIMD Optimization: Fast scan for quote or escape
-        const char *next = simd::scan_string(p, end);
-        if (next > p) {
-          offset += (next - p);
-          p = next;
-          if (p >= end)
-            break;
-          c = *p;
-        }
-
-        if (c == '\\') {
-          escaped = true;
-        } else if (c == '"') {
-          idx.add(offset, c);
-          in_string = false;
-        }
-      }
-    } else {
-      // Outside string - check for structural characters
-
-      // SIMD Optimization: Skip non-structural characters
-      const char *next_struct = simd::skip_until_structural(p, end);
-      if (next_struct > p) {
-        offset += (next_struct - p);
-        p = next_struct;
-        if (p >= end)
-          break;
-        c = *p;
-      }
-
-      if (c == '{' || c == '}' || c == '[' || c == ']' || c == ':' ||
-          c == ',') {
-        idx.add(offset, c);
-
-        // Mark that we need to check for value after this
-        if (c == ':' || c == '[' || c == ',') {
-          after_value_separator = true;
-        } else {
-          after_value_separator = false;
-        }
-      } else if (c == '"') {
-        idx.add(offset, c);
-        in_string = true;
-        after_value_separator = false;
-      } else if (after_value_separator && !lookup::is_whitespace(c)) {
-        // Found start of a value (not a structural char, not whitespace)
-        // Determine value type
-        if (lookup::is_digit(c) || c == '-') {
-          idx.add_value(offset, StructuralIndex::VAL_NUMBER);
-        } else if (c == 't') {
-          idx.add_value(offset, StructuralIndex::VAL_TRUE);
-        } else if (c == 'f') {
-          idx.add_value(offset, StructuralIndex::VAL_FALSE);
-        } else if (c == 'n') {
-          idx.add_value(offset, StructuralIndex::VAL_NULL);
-        }
-        after_value_separator = false;
-      }
-    }
-
-    p++;
-    offset++;
-  }
-
-  return idx;
-}
-
-// Two-Stage Parser: Index-based parsing
-class TwoStageParser {
-  const char *json_;
-  size_t len_;
-  const StructuralIndex &idx_;
-  size_t idx_pos_;
-  size_t value_idx_; // NEW: Track current value index
-  Allocator alloc_;
-
-public:
-  TwoStageParser(const char *json, size_t len, const StructuralIndex &idx,
-                 Allocator alloc = {})
-      : json_(json), len_(len), idx_(idx), idx_pos_(0), value_idx_(0),
-        alloc_(alloc) {}
-
-  Value parse() {
-    if (idx_.size() == 0) {
-      throw std::runtime_error("Empty structural index");
-    }
-    return parse_value();
-  }
-
-private:
-  // Get current structural character
-  char peek() const {
-    if (idx_pos_ >= idx_.size()) {
-      throw std::runtime_error("Unexpected end of structural index");
-    }
-    return idx_.types[idx_pos_];
-  }
-
-  // Get current position in JSON
-  uint32_t pos() const {
-    if (idx_pos_ >= idx_.size()) {
-      throw std::runtime_error("Unexpected end");
-    }
-    return idx_.positions[idx_pos_];
-  }
-
-  // Advance to next structural character
-  void advance() { idx_pos_++; }
-
-  // Skip whitespace in original JSON
-  const char *skip_ws(const char *p) const {
-    while (p < json_ + len_ && lookup::is_whitespace(*p))
-      p++;
-    return p;
-  }
-
-  Value parse_value() {
-    char c = peek();
-
-    switch (c) {
-    case '{':
-      return parse_object();
-    case '[':
-      return parse_array();
-    case '"':
-      return parse_indexed_string();
-    default: {
-      // Literal or number - use value index
-      if (value_idx_ >= idx_.value_size()) {
-        throw std::runtime_error("Value index out of range");
-      }
-
-      uint32_t vpos = idx_.value_positions[value_idx_];
-      uint8_t vtype = idx_.value_types[value_idx_];
-      value_idx_++;
-
-      const char *p = json_ + vpos;
-
-      switch (vtype) {
-      case StructuralIndex::VAL_NUMBER:
-        return parse_number_at(p);
-      case StructuralIndex::VAL_TRUE:
-        return Value(true);
-      case StructuralIndex::VAL_FALSE:
-        return Value(false);
-      case StructuralIndex::VAL_NULL:
-        return Value();
-      default:
-        throw std::runtime_error("Unknown value type");
-      }
-    }
-    }
-  }
-
-  Value parse_object() {
-    advance(); // Skip '{'
-
-    Object obj(alloc_);
-
-    if (peek() == '}') {
-      advance();
-      return Value(std::move(obj));
-    }
-
-    while (true) {
-      // Parse key (must be string)
-      if (peek() != '"') {
-        throw std::runtime_error("Expected string key");
-      }
-      String key = parse_indexed_string().as_string();
-
-      // Expect ':'
-      if (peek() != ':') {
-        throw std::runtime_error("Expected ':'");
-      }
-      advance();
-
-      // Parse value
-      Value val = parse_value();
-
-      obj.insert(std::move(key), std::move(val));
-
-      // Check for ',' or '}'
-      char c = peek();
-      if (c == '}') {
-        advance();
-        break;
-      }
-      if (c != ',') {
-        throw std::runtime_error("Expected ',' or '}'");
-      }
-      advance();
-    }
-
-    return Value(std::move(obj));
-  }
-
-  Value parse_array() {
-    advance(); // Skip '['
-
-    Array arr(alloc_);
-
-    if (peek() == ']') {
-      advance();
-      return Value(std::move(arr));
-    }
-
-    while (true) {
-      arr.push_back(parse_value());
-
-      char c = peek();
-      if (c == ']') {
-        advance();
-        break;
-      }
-      if (c != ',') {
-        throw std::runtime_error("Expected ',' or ']'");
-      }
-      advance();
-    }
-
-    return Value(std::move(arr));
-  }
-
-  Value parse_indexed_string() {
-    uint32_t start_pos = pos();
-    advance(); // Skip opening '"'
-
-    // Find closing '"'
-    if (idx_pos_ >= idx_.size() || peek() != '"') {
-      throw std::runtime_error("Unterminated string");
-    }
-    uint32_t end_pos = pos();
-    advance(); // Skip closing '"'
-
-    // Extract string content (between quotes)
-    const char *start = json_ + start_pos + 1;
-    const char *end = json_ + end_pos;
-
-    // Simple case: no escapes
-    String result(alloc_);
-    for (const char *p = start; p < end; ++p) {
-      if (*p == '\\') {
-        // Handle escape
-        ++p;
-        if (p >= end)
-          throw std::runtime_error("Invalid escape");
-
-        switch (*p) {
-        case '"':
-          result += '"';
-          break;
-        case '\\':
-          result += '\\';
-          break;
-        case '/':
-          result += '/';
-          break;
-        case 'b':
-          result += '\b';
-          break;
-        case 'f':
-          result += '\f';
-          break;
-        case 'n':
-          result += '\n';
-          break;
-        case 'r':
-          result += '\r';
-          break;
-        case 't':
-          result += '\t';
-          break;
-        case 'u': {
-          // Unicode escape
-          if (p + 4 >= end)
-            throw std::runtime_error("Invalid unicode");
-          int code = 0;
-          for (int i = 0; i < 4; ++i) {
-            ++p;
-            uint8_t hex_val = lookup::hex_table[static_cast<unsigned char>(*p)];
-            if (hex_val == 0xFF)
-              throw std::runtime_error("Invalid hex");
-            code = (code << 4) | hex_val;
-          }
-          // UTF-8 encode
-          if (code < 0x80) {
-            result += static_cast<char>(code);
-          } else if (code < 0x800) {
-            result += static_cast<char>(0xC0 | (code >> 6));
-            result += static_cast<char>(0x80 | (code & 0x3F));
-          } else {
-            result += static_cast<char>(0xE0 | (code >> 12));
-            result += static_cast<char>(0x80 | ((code >> 6) & 0x3F));
-            result += static_cast<char>(0x80 | (code & 0x3F));
-          }
-          break;
-        }
-        default:
-          throw std::runtime_error("Invalid escape sequence");
-        }
-      } else {
-        result += *p;
-      }
-    }
-
-    return Value(std::move(result));
-  }
-
-  // Helper methods for parsing literals at specific positions
-  Value parse_true_at(const char *p) const {
-    if (p + 4 > json_ + len_ || p[0] != 't' || p[1] != 'r' || p[2] != 'u' ||
-        p[3] != 'e') {
-      throw std::runtime_error("Invalid true");
-    }
-    return Value(true);
-  }
-
-  Value parse_false_at(const char *p) const {
-    if (p + 5 > json_ + len_ || p[0] != 'f' || p[1] != 'a' || p[2] != 'l' ||
-        p[3] != 's' || p[4] != 'e') {
-      throw std::runtime_error("Invalid false");
-    }
-    return Value(false);
-  }
-
-  Value parse_null_at(const char *p) const {
-    if (p + 4 > json_ + len_ || p[0] != 'n' || p[1] != 'u' || p[2] != 'l' ||
-        p[3] != 'l') {
-      throw std::runtime_error("Invalid null");
-    }
-    return Value();
-  }
-
-  Value parse_number_at(const char *p) const {
-    const char *start = p;
-    bool negative = false;
-
-    if (*p == '-') {
-      negative = true;
-      p++;
-    }
-
-    uint64_t d = 0;
-    int digits = 0;
-
-    if (*p == '0') {
-      p++;
-      digits = 1;
-    } else if (BEAST_LIKELY(lookup::is_digit(*p))) {
-      while (p < json_ + len_ && lookup::is_digit(*p) && digits < 19) {
-        d = d * 10 + (*p - '0');
-        p++;
-        digits++;
-      }
-    } else {
-      throw std::runtime_error("Invalid number");
-    }
-
-    int frac_digits = 0;
-    if (p < json_ + len_ && *p == '.') {
-      p++;
-      if (!lookup::is_digit(*p)) {
-        throw std::runtime_error("Invalid number");
-      }
-      while (p < json_ + len_ && BEAST_LIKELY(lookup::is_digit(*p)) &&
-             digits < 19) {
-        d = d * 10 + (*p - '0');
-        p++;
-        digits++;
-        frac_digits++;
-      }
-    }
-
-    int exp = 0;
-    if (p < json_ + len_ && (*p == 'e' || *p == 'E')) {
-      p++;
-      bool exp_neg = false;
-      if (p < json_ + len_ && (*p == '+' || *p == '-')) {
-        exp_neg = (*p == '-');
-        p++;
-      }
-      if (!lookup::is_digit(*p)) {
-        throw std::runtime_error("Invalid number");
-      }
-      while (p < json_ + len_ && lookup::is_digit(*p)) {
-        exp = exp * 10 + (*p - '0');
-        p++;
-      }
-      if (exp_neg)
-        exp = -exp;
-    }
-
-    // Use existing parse_decimal (assumed to be available)
-    double result = static_cast<double>(d);
-
-    // Optimization: Check if it's a simple integer (no fraction, no
-    // exponent)
-    if (frac_digits == 0 && exp == 0) {
-      if (negative) {
-        // Check overflow for negative
-        if (d <=
-            static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) + 1) {
-          return Value(-static_cast<int64_t>(d));
-        }
-        // Fallthrough to double if integer underflow? Or just saturate?
-        // Standard JSON parsers usually use double for huge numbers.
-      } else {
-        if (d <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
-          return Value(static_cast<int64_t>(d));
-        }
-        return Value(d); // Uint64 constructor
-      }
-    }
-
-    if (frac_digits > 0) {
-      for (int i = 0; i < frac_digits; ++i)
-        result /= 10.0;
-    }
-    if (exp != 0) {
-      result *= std::pow(10.0, exp);
-    }
-    if (negative)
-      result = -result;
-
-    return Value(result);
-  }
-};
-
-// Public API for two-stage parsing
-inline Value parse_two_stage(const std::string &json_str,
-                             Allocator alloc = {}) {
-  // Stage 1: Scan structure
-  auto idx = scan_structure(json_str.data(), json_str.size());
-
-  // Stage 2: Parse with index
-  TwoStageParser parser(json_str.data(), json_str.size(), idx, alloc);
-  return parser.parse();
-}
-
-// ============================================================================
-// SIMD Optimizations
-// ============================================================================
-
 namespace simd {
 
 template <typename CharT>
@@ -3740,6 +3275,18 @@ BEAST_INLINE CharT *scan_string(CharT *p, CharT *end) {
   return p;
 }
 
+// Helper for Two-Stage Parsing: Compute prefix-XOR of a 64-bit mask.
+// If mask has 1s at quote positions, prefix_xor(mask) has 1s inside strings.
+BEAST_INLINE uint64_t prefix_xor(uint64_t x) {
+  x ^= x << 1;
+  x ^= x << 2;
+  x ^= x << 4;
+  x ^= x << 8;
+  x ^= x << 16;
+  x ^= x << 32;
+  return x;
+}
+
 // Helper to extract bitmask from 16-byte vector
 // Optimized for AArch64 using addv (reduction)
 BEAST_INLINE uint64_t neon_movemask(uint8x16_t input) {
@@ -3771,6 +3318,7 @@ BEAST_INLINE void classify_structure(const char *p, uint16_t &struct_mask,
   const uint8x16_t s_com = vdupq_n_u8(',');
   const uint8x16_t s_quo = vdupq_n_u8('"');
   const uint8x16_t s_esc = vdupq_n_u8('\\');
+  const uint8x16_t s_col = vdupq_n_u8(':');
 
   uint8x16_t chunk = vld1q_u8((const uint8_t *)p);
 
@@ -3779,8 +3327,10 @@ BEAST_INLINE void classify_structure(const char *p, uint16_t &struct_mask,
   uint8x16_t m3 = vceqq_u8(chunk, s_lb);
   uint8x16_t m4 = vceqq_u8(chunk, s_rb);
   uint8x16_t m5 = vceqq_u8(chunk, s_com);
+  uint8x16_t m7 = vceqq_u8(chunk, s_col);
 
-  uint8x16_t m_str = vorrq_u8(vorrq_u8(m1, m2), vorrq_u8(m3, vorrq_u8(m4, m5)));
+  uint8x16_t m_str =
+      vorrq_u8(vorrq_u8(vorrq_u8(m1, m2), vorrq_u8(m3, m4)), vorrq_u8(m5, m7));
   uint8x16_t m_quo = vceqq_u8(chunk, s_quo);
   uint8x16_t m_esc = vceqq_u8(chunk, s_esc);
 
@@ -3803,7 +3353,7 @@ BEAST_INLINE void classify_structure(const char *p, uint16_t &struct_mask,
   // existing blocks) Re-inserting scalar logic for completeness:
   for (int i = 0; i < 16; ++i) {
     char c = p[i];
-    if (c == '{' || c == '}' || c == '[' || c == ']' || c == ',')
+    if (c == '{' || c == '}' || c == '[' || c == ']' || c == ',' || c == ':')
       struct_mask |= (1 << i);
     else if (c == '"')
       quote_mask |= (1 << i);
@@ -3848,7 +3398,8 @@ BEAST_INLINE const char *skip_until_structural(const char *p, const char *end) {
 // Optimized 64-byte block processor
 // Merges all structural checks into single vector mask to reduce reduction
 // overhead
-BEAST_INLINE void process_block64(const char *p, uint64_t &out_str) {
+BEAST_INLINE void process_block64(const char *p, uint64_t &out_str,
+                                  uint64_t &out_quo, uint64_t &out_esc) {
 #if defined(__aarch64__) || defined(__ARM_NEON)
   const uint8x16_t s_lc = vdupq_n_u8('{');
   const uint8x16_t s_rc = vdupq_n_u8('}');
@@ -3856,78 +3407,170 @@ BEAST_INLINE void process_block64(const char *p, uint64_t &out_str) {
   const uint8x16_t s_rb = vdupq_n_u8(']');
   const uint8x16_t s_com = vdupq_n_u8(',');
   const uint8x16_t s_quo = vdupq_n_u8('"');
+  const uint8x16_t s_col = vdupq_n_u8(':');
+  const uint8x16_t s_esc = vdupq_n_u8('\\');
 
-  uint64_t result = 0;
+  // Atoms/Numbers start characters
+  const uint8x16_t s_neg = vdupq_n_u8('-');
+  const uint8x16_t s_true = vdupq_n_u8('t');
+  const uint8x16_t s_false = vdupq_n_u8('f');
+  const uint8x16_t s_null = vdupq_n_u8('n');
+  const uint8x16_t s_zero = vdupq_n_u8('0');
+
+  uint64_t r_str = 0, r_quo = 0, r_esc = 0;
 
   for (int i = 0; i < 4; ++i) {
     uint8x16_t chunk = vld1q_u8((const uint8_t *)(p + i * 16));
 
-    // Check for structural chars
     uint8x16_t m1 = vceqq_u8(chunk, s_lc);
     uint8x16_t m2 = vceqq_u8(chunk, s_rc);
     uint8x16_t m3 = vceqq_u8(chunk, s_lb);
     uint8x16_t m4 = vceqq_u8(chunk, s_rb);
     uint8x16_t m5 = vceqq_u8(chunk, s_com);
-    uint8x16_t m6 = vceqq_u8(chunk, s_quo);
+    uint8x16_t m7 = vceqq_u8(chunk, s_col);
 
-    // Combine all masks
-    uint8x16_t m_any = vorrq_u8(vorrq_u8(vorrq_u8(m1, m2), vorrq_u8(m3, m4)),
-                                vorrq_u8(m5, m6));
+    // Atom starts
+    uint8x16_t m8 = vceqq_u8(chunk, s_neg);
+    uint8x16_t m9 = vceqq_u8(chunk, s_true);
+    uint8x16_t m10 = vceqq_u8(chunk, s_false);
+    uint8x16_t m11 = vceqq_u8(chunk, s_null);
 
-    // Single movemask call
-    uint64_t mask = neon_movemask(m_any); // 16 bits valid
+    // Digits 0-9 range check
+    uint8x16_t m_digit = vcleq_u8(vsubq_u8(chunk, s_zero), vdupq_n_u8(9));
 
-    result |= (mask << (i * 16));
+    uint8x16_t m_any_str =
+        vorrq_u8(vorrq_u8(vorrq_u8(m1, m2), vorrq_u8(m3, m4)),
+                 vorrq_u8(vorrq_u8(m5, m7),
+                          vorrq_u8(vorrq_u8(m8, m9),
+                                   vorrq_u8(vorrq_u8(m10, m11), m_digit))));
+    uint8x16_t m_any_quo = vceqq_u8(chunk, s_quo);
+    uint8x16_t m_any_esc = vceqq_u8(chunk, s_esc);
+
+    r_str |= (neon_movemask(m_any_str) << (i * 16));
+    r_quo |= (neon_movemask(m_any_quo) << (i * 16));
+    r_esc |= (neon_movemask(m_any_esc) << (i * 16));
   }
-  out_str = result;
-
 #else
-  // Fallback to calling generic classify (which has scalar fallback)
-  uint16_t s0, q0, e0;
-  uint16_t s1, q1, e1;
-  uint16_t s2, q2, e2;
-  uint16_t s3, q3, e3;
-
-  classify_structure(p + 0, s0, q0, e0);
-  classify_structure(p + 16, s1, q1, e1);
-  classify_structure(p + 32, s2, q2, e2);
-  classify_structure(p + 48, s3, q3, e3);
-
-  out_str = (uint64_t)(s0 | q0) | ((uint64_t)(s1 | q1) << 16) |
-            ((uint64_t)(s2 | q2) << 32) | ((uint64_t)(s3 | q3) << 48);
+  uint64_t r_str = 0, r_quo = 0, r_esc = 0;
+  for (int i = 0; i < 64; ++i) {
+    char c = p[i];
+    if (c == '{' || c == '}' || c == '[' || c == ']' || c == ',' || c == ':' ||
+        c == '-' || c == 't' || c == 'f' || c == 'n' || (c >= '0' && c <= '9'))
+      r_str |= (1ULL << i);
+    else if (c == '"')
+      r_quo |= (1ULL << i);
+    else if (c == '\\')
+      r_esc |= (1ULL << i);
+  }
 #endif
+  out_str = r_str;
+  out_quo = r_quo;
+  out_esc = r_esc;
 }
 
-// Fills a bitmap with structural characters
 BEAST_INLINE size_t fill_bitmap(const char *src, size_t len, BitmapIndex &idx) {
   const char *p = src;
   const char *end = src + len;
+  uint64_t prev_in_string = 0;
+  bool esc_next = false;
 
   while (p + 64 <= end) {
-    uint64_t str_bits;
-    process_block64(p, str_bits);
-    idx.structural_bits.push_back(str_bits);
+    uint64_t str, quo, esc;
+    process_block64(p, str, quo, esc);
+
+    uint64_t escaped = 0;
+    uint64_t temp_esc = esc;
+    if (esc_next) {
+      escaped |= 1ULL;
+      esc_next = false;
+      if (temp_esc & 1ULL) {
+        temp_esc &= ~1ULL;
+      }
+    }
+
+    while (temp_esc) {
+      int start = __builtin_ctzll(temp_esc);
+      uint64_t mask_from_start = ~0ULL << start;
+      uint64_t non_bs_from_start = ~esc & mask_from_start;
+      int end =
+          (non_bs_from_start == 0) ? 64 : __builtin_ctzll(non_bs_from_start);
+
+      int len = end - start;
+      for (int j = start + 1; j < end; j += 2)
+        escaped |= (1ULL << j);
+
+      if (len % 2 != 0) {
+        if (end < 64)
+          escaped |= (1ULL << end);
+        else
+          esc_next = true;
+      }
+
+      if (end == 64)
+        break;
+      temp_esc &= (~0ULL << end);
+    }
+
+    uint64_t clean_quotes = quo & ~escaped;
+    uint64_t in_string = simd::prefix_xor(clean_quotes) ^ prev_in_string;
+    uint64_t structural = (str | clean_quotes) & ~(in_string ^ clean_quotes);
+
+    idx.structural_bits.push_back(structural);
+    idx.quote_bits.push_back(clean_quotes);
+
+    prev_in_string = (uint64_t)((int64_t)in_string >> 63);
     p += 64;
   }
 
-  // Handle Tail (Safe copy)
   size_t remaining = end - p;
   if (remaining > 0) {
     alignas(64) char buffer[64];
     std::memset(buffer, ' ', 64);
     std::memcpy(buffer, p, remaining);
 
-    uint64_t str_bits;
-    process_block64(buffer, str_bits);
+    uint64_t str, quo, esc;
+    process_block64(buffer, str, quo, esc);
 
-    if (remaining < 64) {
-      str_bits &= (1ULL << remaining) - 1;
+    uint64_t m = (remaining == 64) ? ~0ULL : (1ULL << remaining) - 1;
+    str &= m;
+    quo &= m;
+    esc &= m;
+
+    uint64_t escaped = 0;
+    uint64_t temp_esc = esc;
+    if (esc_next) {
+      escaped |= 1ULL;
+      esc_next = false;
+      if (temp_esc & 1ULL)
+        temp_esc &= ~1ULL;
+    }
+    while (temp_esc) {
+      int start = __builtin_ctzll(temp_esc);
+      uint64_t mask_from_start = ~0ULL << start;
+      uint64_t non_bs_from_start = ~esc & mask_from_start;
+      int end =
+          (non_bs_from_start == 0) ? 64 : __builtin_ctzll(non_bs_from_start);
+      int len = end - start;
+      for (int j = start + 1; j < end; j += 2)
+        escaped |= (1ULL << j);
+      if (len % 2 != 0) {
+        if (end < 64)
+          escaped |= (1ULL << end);
+        else
+          esc_next = true;
+      }
+      if (end == 64)
+        break;
+      temp_esc &= (~0ULL << end);
     }
 
-    idx.structural_bits.push_back(str_bits);
-    p += remaining;
+    uint64_t clean_quotes = (quo & ~escaped) & m;
+    uint64_t in_string = simd::prefix_xor(clean_quotes) ^ prev_in_string;
+    uint64_t structural = (str | clean_quotes) & ~(in_string ^ clean_quotes);
+    idx.structural_bits.push_back(structural);
+    idx.quote_bits.push_back(clean_quotes);
   }
-  return p - src;
+  return len;
 }
 
 // Scans for the end of a string, handling escapes. Returns pointer to
@@ -6069,6 +5712,69 @@ struct ParseOptions {
   bool allow_unquoted_keys = false;
   bool insitu = false;       // Zero-copy parsing (modifies input)
   bool padding_safe = false; // Input has 64 bytes of zero padding
+  bool use_bitmap = false;   // Stage 2: User bitmap-based parsing
+};
+
+struct BitmapIterator {
+  const BitmapIndex *idx_;
+  size_t current_block_;
+  uint64_t current_bits_;
+  size_t current_offset_; // Base offset for current_bits_
+
+  BitmapIterator(const BitmapIndex &idx)
+      : idx_(&idx), current_block_(0), current_bits_(0), current_offset_(0) {
+    if (!idx_->structural_bits.empty()) {
+      current_bits_ = idx_->structural_bits[0];
+    }
+  }
+
+  // Find the next set bit (structural character)
+  BEAST_INLINE size_t next() {
+    if (BEAST_UNLIKELY(current_bits_ == 0)) {
+      while (current_bits_ == 0) {
+        current_block_++;
+        if (BEAST_UNLIKELY(current_block_ >= idx_->structural_bits.size())) {
+          return (size_t)-1;
+        }
+        current_bits_ = idx_->structural_bits[current_block_];
+        current_offset_ = current_block_ * 64;
+      }
+    }
+
+    int tz = __builtin_ctzll(current_bits_);
+    size_t result = current_offset_ + tz;
+    current_bits_ &= (current_bits_ - 1); // Clear lowest bit (BLSR)
+    return result;
+  }
+
+  // Skip bits up to target_offset
+  BEAST_INLINE void seek(size_t target) {
+    if (target <= current_offset_ && current_bits_ != 0) {
+      if (target < current_offset_ + 64) {
+        size_t bit = target - current_offset_;
+        // Clear bits 0..bit-1 (keep bits >= bit)
+        if (bit > 0)
+          current_bits_ &= (~0ULL << bit);
+        return;
+      }
+    }
+
+    size_t block = target / 64;
+    if (block >= idx_->structural_bits.size()) {
+      current_bits_ = 0;
+      return;
+    }
+
+    if (block != current_block_ || current_bits_ == 0) {
+      current_block_ = block;
+      current_bits_ = idx_->structural_bits[block];
+      current_offset_ = block * 64;
+    }
+
+    size_t bit = target % 64;
+    if (bit > 0)
+      current_bits_ &= (~0ULL << bit);
+  }
 };
 
 class Parser {
@@ -6083,12 +5789,19 @@ class Parser {
   char *str_end_;
 
   ParseOptions options_;
+  BitmapIndex bitmap_idx_;
+  std::optional<BitmapIterator> iter_;
 
 public:
   // Standard Constructor (Const Input - copies strings)
   Parser(Document &doc, const char *json, size_t len, ParseOptions options = {})
       : doc_(&doc), start_((char *)json), p_((char *)json),
         end_((char *)json + len), options_(options) {
+    if (options_.use_bitmap) {
+      bitmap_idx_.reserve(len);
+      simd::fill_bitmap(start_, len, bitmap_idx_);
+      iter_.emplace(bitmap_idx_);
+    }
     if (options_.insitu) {
       // Insitu requires mutable buffer!
       // However, the API takes const char*.
@@ -6101,7 +5814,13 @@ public:
   // Mutable Constructor (Explicit for Insitu)
   Parser(Document &doc, char *json, size_t len, ParseOptions options = {})
       : doc_(&doc), start_(json), p_(json), end_(json + len),
-        options_(options) {}
+        options_(options) {
+    if (options_.use_bitmap) {
+      bitmap_idx_.reserve(len);
+      simd::fill_bitmap(start_, len, bitmap_idx_);
+      iter_.emplace(bitmap_idx_);
+    }
+  }
 
   ParseResult report_error(Error err, const char *msg) {
     ParseResult res;
@@ -6155,9 +5874,16 @@ public:
 
     // Stateless start
     const char *p = p_;
-    p = simd::skip_whitespace(p, (const char *)end_);
-    if (p >= end_)
-      return {Error::InvalidJson, 0, 0, 0, "Empty or whitespace-only input"};
+    if (options_.use_bitmap) {
+      size_t next_pos = iter_->next();
+      if (next_pos == (size_t)-1)
+        return {Error::InvalidJson, 0, 0, 0, "Empty or whitespace-only input"};
+      p = start_ + next_pos;
+    } else {
+      p = simd::skip_whitespace(p, (const char *)end_);
+      if (p >= end_)
+        return {Error::InvalidJson, 0, 0, 0, "Empty or whitespace-only input"};
+    }
 
     if (options_.padding_safe) {
       p = parse_value_impl<true>(p);
@@ -6165,8 +5891,11 @@ public:
       p = parse_value_impl<false>(p);
     }
 
-    if (!p)
+    if (!p) {
+      // Don't update p_ here, keep it for error context?
+      // Actually, many parse functions update p_ internally on failure.
       return report_error(Error::InvalidJson, "Malformed JSON");
+    }
 
     // Commit final position
     p_ = (char *)p;
@@ -6206,48 +5935,55 @@ public:
       return parse_object_impl<Padded>(p);
     case '[':
       return parse_array_impl<Padded>(p);
-    case '"':
-      return parse_string(p);
+    case '"': {
+      const char *res = parse_string(p);
+      if (options_.use_bitmap && res)
+        iter_->seek(res - start_);
+      return res;
+    }
     case 't':
       if (BEAST_LIKELY(p + 4 <= end_)) {
-        // SWAR: validate "true" with single 32-bit comparison
         uint32_t word;
         std::memcpy(&word, p, 4);
-        // "true" = 0x65757274 (little-endian)
         if (BEAST_LIKELY(word == 0x65757274)) {
           push_tape(Element(Type::True, 0).data);
-          return p + 4;
+          const char *res = p + 4;
+          if (options_.use_bitmap)
+            iter_->seek(res - start_);
+          return res;
         }
       }
       p_ = end_;
       return nullptr;
     case 'f':
       if (BEAST_LIKELY(p + 5 <= end_)) {
-        // SWAR: validate "false"
         uint32_t word;
         std::memcpy(&word, p, 4);
         if (BEAST_LIKELY(word == 0x736C6166 && p[4] == 'e')) {
           push_tape(Element(Type::False, 0).data);
-          return p + 5;
+          const char *res = p + 5;
+          if (options_.use_bitmap)
+            iter_->seek(res - start_);
+          return res;
         }
       }
       p_ = end_;
       return nullptr;
     case 'n':
       if (BEAST_LIKELY(p + 4 <= end_)) {
-        // SWAR: validate "null" with single 32-bit comparison
         uint32_t word;
         std::memcpy(&word, p, 4);
-        // "null" = 0x6C6C756E (little-endian)
         if (BEAST_LIKELY(word == 0x6C6C756E)) {
           push_tape(Element(Type::Null, 0).data);
-          return p + 4;
+          const char *res = p + 4;
+          if (options_.use_bitmap)
+            iter_->seek(res - start_);
+          return res;
         }
       }
       p_ = end_;
       return nullptr;
     case '-':
-      return parse_number_impl<true>(p + 1);
     case '0':
     case '1':
     case '2':
@@ -6257,8 +5993,13 @@ public:
     case '6':
     case '7':
     case '8':
-    case '9':
-      return parse_number_impl<false>(p);
+    case '9': {
+      const char *res = (*p == '-') ? parse_number_impl<true>(p + 1)
+                                    : parse_number_impl<false>(p);
+      if (options_.use_bitmap && res)
+        iter_->seek(res - start_);
+      return res;
+    }
     default:
       p_ = (char *)p;
       return nullptr;
@@ -6847,72 +6588,60 @@ public:
   bool parse_array_stub() { return false; } // Deprecated
   template <bool Padded>
   BEAST_INLINE const char *parse_array_impl(const char *p) {
-    p++; // skip [
     uint64_t *start_ptr = tape_head_;
     push_tape(Element(Type::Array, 0).data);
 
-    // Fast check for empty or whitespace-start
-    if (BEAST_LIKELY(p < end_)) {
-      if (*p == ']') {
-        p++;
-        goto end_array;
-      }
-    } else {
-      return nullptr;
-    }
-
-    // 1. Skip Initial Whitespace
-    if constexpr (Padded) {
-      // Unchecked skip (requires implementation)
-      p = simd::skip_whitespace(p, (const char *)end_);
-    } else {
-      p = simd::skip_whitespace(p, (const char *)end_);
-      if (BEAST_UNLIKELY(p >= end_))
+    if (options_.use_bitmap) {
+      size_t next_pos = iter_->next(); // Skip [
+      if (next_pos == (size_t)-1)
         return nullptr;
+      p = start_ + next_pos;
+    } else {
+      p++; // skip [
+      p = simd::skip_whitespace(p, (const char *)end_);
     }
 
+    if (BEAST_UNLIKELY(p >= end_))
+      return nullptr;
     if (*p == ']') {
       p++;
+      if (options_.use_bitmap)
+        iter_->seek(p - start_);
       goto end_array;
     }
 
     while (true) {
-      // Parse Value (Computed Goto Dispatch via Inline)
       p = parse_value_impl<Padded>(p);
       if (BEAST_UNLIKELY(!p))
         return nullptr;
 
-      // 2. Check Separator or End
+      if (options_.use_bitmap) {
+        iter_->seek(p - start_);
+        size_t next_pos = iter_->next();
+        if (next_pos == (size_t)-1)
+          return nullptr;
+        p = start_ + next_pos;
+      } else {
+        p = simd::skip_whitespace(p, (const char *)end_);
+      }
+
+      if (BEAST_UNLIKELY(p >= end_))
+        return nullptr;
       char c = *p;
       if (c == ',') {
         p++;
-        // Loop continue
-        p = simd::skip_whitespace(p, (const char *)end_);
-        if (BEAST_UNLIKELY(p >= end_))
-          return nullptr;
+        if (options_.use_bitmap) {
+          size_t next_pos = iter_->next();
+          if (next_pos == (size_t)-1)
+            return nullptr;
+          p = start_ + next_pos;
+        } else {
+          p = simd::skip_whitespace(p, (const char *)end_);
+        }
         continue;
       } else if (c == ']') {
         p++;
         break;
-      }
-
-      // Whitespace fallback?
-      if ((unsigned char)c <= 0x20) {
-        p = simd::skip_whitespace(p, (const char *)end_);
-        if (BEAST_UNLIKELY(p >= end_))
-          return nullptr;
-        c = *p;
-        if (c == ',') {
-          p++;
-          p = simd::skip_whitespace(p, (const char *)end_);
-          if (BEAST_UNLIKELY(p >= end_))
-            return nullptr;
-          continue;
-        }
-        if (c == ']') {
-          p++;
-          break;
-        }
       }
       return nullptr;
     }
@@ -6929,63 +6658,61 @@ public:
   bool parse_object_stub() { return false; } // Deprecated
   template <bool Padded>
   BEAST_INLINE const char *parse_object_impl(const char *p) {
-    p++; // skip {
     uint64_t *start_ptr = tape_head_;
     push_tape(Element(Type::Object, 0).data);
 
-    // Fast check for empty
-    if (BEAST_LIKELY(p < end_)) {
-      if (*p == '}') {
-        p++;
-        goto end_object;
-      }
-    } else {
-      return nullptr;
-    }
-
-    // 1. Skip Initial Whitespace
-    if constexpr (Padded) {
-      p = simd::skip_whitespace(p, (const char *)end_);
-    } else {
-      p = simd::skip_whitespace(p, (const char *)end_);
-      if (BEAST_UNLIKELY(p >= end_))
+    if (options_.use_bitmap) {
+      size_t next_pos = iter_->next(); // Skip {
+      if (next_pos == (size_t)-1)
         return nullptr;
+      p = start_ + next_pos;
+    } else {
+      p++; // skip {
+      p = simd::skip_whitespace(p, (const char *)end_);
     }
 
+    if (BEAST_UNLIKELY(p >= end_))
+      return nullptr;
     if (*p == '}') {
       p++;
+      if (options_.use_bitmap)
+        iter_->seek(p - start_);
       goto end_object;
     }
 
     while (true) {
       // Expect Key
       if (BEAST_UNLIKELY(*p != '"'))
-        return nullptr; // Objects must have string keys
+        return nullptr;
 
       p = parse_string(p);
       if (BEAST_UNLIKELY(!p))
         return nullptr;
+      if (options_.use_bitmap)
+        iter_->seek(p - start_);
 
-      // Expect Colon
-      if constexpr (Padded) {
-        p = simd::skip_whitespace(p, (const char *)end_);
+      // Skip to Colon
+      if (options_.use_bitmap) {
+        size_t next_pos = iter_->next();
+        if (next_pos == (size_t)-1)
+          return nullptr;
+        p = start_ + next_pos;
       } else {
         p = simd::skip_whitespace(p, (const char *)end_);
-        if (BEAST_UNLIKELY(p >= end_))
-          return nullptr;
       }
 
-      if (*p != ':')
+      if (BEAST_UNLIKELY(p >= end_ || *p != ':'))
         return nullptr;
-      p++;
+      p++; // skip :
 
-      // Parse Value
-      if constexpr (Padded) {
-        p = simd::skip_whitespace(p, (const char *)end_);
+      // Skip to Value
+      if (options_.use_bitmap) {
+        size_t next_pos = iter_->next();
+        if (next_pos == (size_t)-1)
+          return nullptr;
+        p = start_ + next_pos;
       } else {
         p = simd::skip_whitespace(p, (const char *)end_);
-        if (BEAST_UNLIKELY(p >= end_))
-          return nullptr;
       }
 
       p = parse_value_impl<Padded>(p);
@@ -6993,35 +6720,33 @@ public:
         return nullptr;
 
       // Expect Comma or End
+      if (options_.use_bitmap) {
+        iter_->seek(p - start_);
+        size_t next_pos = iter_->next();
+        if (next_pos == (size_t)-1)
+          return nullptr;
+        p = start_ + next_pos;
+      } else {
+        p = simd::skip_whitespace(p, (const char *)end_);
+      }
+
+      if (BEAST_UNLIKELY(p >= end_))
+        return nullptr;
       char c = *p;
       if (c == ',') {
         p++;
-        p = simd::skip_whitespace(p, (const char *)end_);
-        if (BEAST_UNLIKELY(p >= end_))
-          return nullptr;
+        if (options_.use_bitmap) {
+          size_t next_pos = iter_->next();
+          if (next_pos == (size_t)-1)
+            return nullptr;
+          p = start_ + next_pos;
+        } else {
+          p = simd::skip_whitespace(p, (const char *)end_);
+        }
         continue;
       } else if (c == '}') {
         p++;
         break;
-      }
-
-      // Whitespace fallback
-      if ((unsigned char)c <= 0x20) {
-        p = simd::skip_whitespace(p, (const char *)end_);
-        if (BEAST_UNLIKELY(p >= end_))
-          return nullptr;
-        c = *p;
-        if (c == ',') {
-          p++;
-          p = simd::skip_whitespace(p, (const char *)end_);
-          if (BEAST_UNLIKELY(p >= end_))
-            return nullptr;
-          continue;
-        }
-        if (c == '}') {
-          p++;
-          break;
-        }
       }
       return nullptr;
     }
@@ -7487,68 +7212,6 @@ public:
 // ============================================================================
 
 // Bitmap Iterator for structural characters
-struct BitmapIterator {
-  const BitmapIndex *idx_;
-  size_t current_block_;
-  uint64_t current_bits_;
-  size_t current_offset_; // Base offset for current_bits_
-
-  BitmapIterator(const BitmapIndex &idx)
-      : idx_(&idx), current_block_(0), current_bits_(0), current_offset_(0) {
-    if (!idx_->structural_bits.empty()) {
-      current_bits_ = idx_->structural_bits[0];
-    }
-  }
-
-  // Find the next set bit (structural character)
-  BEAST_INLINE size_t next() {
-    while (current_bits_ == 0) {
-      current_block_++;
-      if (current_block_ >= idx_->structural_bits.size()) {
-        return (size_t)-1; // No more structural characters
-      }
-      current_bits_ = idx_->structural_bits[current_block_];
-      current_offset_ = current_block_ * 64;
-    }
-
-    int tz = __builtin_ctzll(current_bits_);
-    size_t result = current_offset_ + tz;
-
-    // Clear the bit we just found
-    current_bits_ &= ~(1ULL << tz);
-
-    return result;
-  }
-
-  // Skip bits up to target_offset
-  BEAST_INLINE void seek(size_t target) {
-    if (target <= current_offset_ && current_bits_ != 0) {
-      if (target < current_offset_ + 64) {
-        size_t bit = target - current_offset_;
-        // Clear bits 0..bit-1 (keep bits >= bit)
-        if (bit > 0)
-          current_bits_ &= (~0ULL << bit);
-        return;
-      }
-    }
-
-    size_t block = target / 64;
-    if (block >= idx_->structural_bits.size()) {
-      current_bits_ = 0;
-      return;
-    }
-
-    if (block != current_block_ || current_bits_ == 0) {
-      current_block_ = block;
-      current_bits_ = idx_->structural_bits[block];
-      current_offset_ = block * 64;
-    }
-
-    size_t bit = target % 64;
-    if (bit > 0)
-      current_bits_ &= (~0ULL << bit);
-  }
-};
 
 class BitmapParser {
   const char *json_;

@@ -132,6 +132,30 @@ int main() {
     results.push_back({"beast_json (insitu)", parse_ns, 0.0, correct});
   }
 
+  // 1c. beast_json (two-stage)
+  {
+    bench::Timer parse_timer;
+    size_t iterations = 1000;
+
+    beast::json::FastArena arena(json_content.size() * 2);
+    beast::json::tape::Document doc(&arena);
+
+    parse_timer.start();
+    for (size_t i = 0; i < iterations; ++i) {
+      arena.reset();
+      doc.tape.clear();
+      doc.string_buffer.clear();
+
+      beast::json::tape::Parser parser(doc, json_content.data(),
+                                       json_content.size(),
+                                       {true, true, true, false, false, false,
+                                        false, true}); // use_bitmap = true
+      parser.parse();
+    }
+    double parse_ns = parse_timer.elapsed_ns() / iterations;
+    results.push_back({"beast_json (two-stage)", parse_ns, 0.0, true});
+  }
+
   // 2. nlohmann/json
   {
     bench::Timer parse_timer, serialize_timer;
