@@ -5844,6 +5844,124 @@ public:
     return res;
   }
 
+  BEAST_INLINE const char *parse_bitmap_flat(const char *p) {
+    uint64_t *stack[256];
+    Type types[256];
+    int depth = -1;
+
+    const char *curr = p; // Initialize curr
+
+    while (true) {
+      char c = *curr;
+      switch (c) {
+      case '{': {
+        if (BEAST_UNLIKELY(depth >= 255))
+          return nullptr;
+        stack[++depth] = tape_head_;
+        types[depth] = Type::Object;
+        push_tape(Element(Type::Object, 0).data);
+        break;
+      }
+      case '[': {
+        if (BEAST_UNLIKELY(depth >= 255))
+          return nullptr;
+        stack[++depth] = tape_head_;
+        types[depth] = Type::Array;
+        push_tape(Element(Type::Array, 0).data);
+        break;
+      }
+      case '}': {
+        if (BEAST_UNLIKELY(depth < 0 || types[depth] != Type::Object))
+          return nullptr;
+        size_t start_idx = stack[depth] - doc_->tape.data();
+        size_t end_idx = tape_head_ - doc_->tape.data();
+        *stack[depth] = Element(Type::Object, end_idx).data;
+        push_tape(Element(Type::Object, start_idx).data);
+        depth--;
+        break;
+      }
+      case ']': {
+        if (BEAST_UNLIKELY(depth < 0 || types[depth] != Type::Array))
+          return nullptr;
+        size_t start_idx = stack[depth] - doc_->tape.data();
+        size_t end_idx = tape_head_ - doc_->tape.data();
+        *stack[depth] = Element(Type::Array, end_idx).data;
+        push_tape(Element(Type::Array, start_idx).data);
+        depth--;
+        break;
+      }
+      case '"': {
+        const char *next = parse_string(curr);
+        if (BEAST_UNLIKELY(!next))
+          return nullptr;
+        iter_->seek(next - start_);
+        break;
+      }
+      case 't': {
+        if (BEAST_LIKELY(curr + 4 <= end_)) {
+          uint32_t word;
+          std::memcpy(&word, curr, 4);
+          if (BEAST_LIKELY(word == 0x65757274)) {
+            push_tape(Element(Type::True, 0).data);
+            iter_->seek((curr + 4) - start_);
+            break;
+          }
+        }
+        return nullptr;
+      }
+      case 'f': {
+        if (BEAST_LIKELY(curr + 5 <= end_)) {
+          uint32_t word;
+          std::memcpy(&word, curr, 4);
+          if (BEAST_LIKELY(word == 0x736C6166 && curr[4] == 'e')) {
+            push_tape(Element(Type::False, 0).data);
+            iter_->seek((curr + 5) - start_);
+            break;
+          }
+        }
+        return nullptr;
+      }
+      case 'n': {
+        if (BEAST_LIKELY(curr + 4 <= end_)) {
+          uint32_t word;
+          std::memcpy(&word, curr, 4);
+          if (BEAST_LIKELY(word == 0x6C6C756E)) {
+            push_tape(Element(Type::Null, 0).data);
+            iter_->seek((curr + 4) - start_);
+            break;
+          }
+        }
+        return nullptr;
+      }
+      case ':':
+      case ',':
+        break;
+      default: {
+        if (BEAST_LIKELY((*curr >= '0' && *curr <= '9') || *curr == '-')) {
+          const char *next = (*curr == '-') ? parse_number_impl<true>(curr + 1)
+                                            : parse_number_impl<false>(curr);
+          if (BEAST_UNLIKELY(!next))
+            return nullptr;
+          iter_->seek(next - start_);
+          break;
+        }
+        return nullptr;
+      }
+      }
+
+      size_t next_pos = iter_->next();
+      if (next_pos == (size_t)-1) {
+        if (depth < 0)
+          return (const char *)end_; // Successfully reached end
+        return nullptr;
+      }
+      curr = start_ + next_pos;
+      if (depth < 0)
+        break;
+    }
+    return curr;
+  }
+
   ParseResult parse() {
     size_t input_len = (size_t)(end_ - p_);
 
@@ -5874,27 +5992,31 @@ public:
 
     // Stateless start
     const char *p = p_;
+
     if (options_.use_bitmap) {
       size_t next_pos = iter_->next();
       if (next_pos == (size_t)-1)
         return {Error::InvalidJson, 0, 0, 0, "Empty or whitespace-only input"};
       p = start_ + next_pos;
+      p = parse_bitmap_flat(p);
     } else {
       p = simd::skip_whitespace(p, (const char *)end_);
       if (p >= end_)
         return {Error::InvalidJson, 0, 0, 0, "Empty or whitespace-only input"};
-    }
 
-    if (options_.padding_safe) {
-      p = parse_value_impl<true>(p);
-    } else {
-      p = parse_value_impl<false>(p);
+      if (options_.padding_safe) {
+        p = parse_value_impl<true>(p);
+      } else {
+        p = parse_value_impl<false>(p);
+      }
     }
 
     if (!p) {
-      // Don't update p_ here, keep it for error context?
-      // Actually, many parse functions update p_ internally on failure.
-      return report_error(Error::InvalidJson, "Malformed JSON");
+      std::string msg = "Malformed JSON";
+      if (options_.use_bitmap) {
+        msg += " (flat-loop fail at char: " + std::to_string((int)*p_) + ")";
+      }
+      return report_error(Error::InvalidJson, msg.c_str());
     }
 
     // Commit final position
