@@ -3640,32 +3640,6 @@ BEAST_INLINE char *escape_string(const char *src, size_t len, char *dst) {
   const uint8x16_t backslash = vdupq_n_u8('\\');
   const uint8x16_t k32 = vdupq_n_u8(32);
 
-  // Short string optimization (< 16 bytes)
-  // Check if we can safely read 16 bytes without crossing 4KB page boundary
-  if (len < 16) {
-    if ((((uintptr_t)src) & 0xFFF) <= 0xFF0) {
-      uint8x16_t val = vld1q_u8((const uint8_t *)src);
-      uint8x16_t m1 = vceqq_u8(val, quote);
-      uint8x16_t m2 = vceqq_u8(val, backslash);
-      uint8x16_t m3 = vcltq_u8(val, k32);
-      uint8x16_t mask = vorrq_u8(vorrq_u8(m1, m2), m3);
-
-      if (vmaxvq_u8(mask) == 0) {
-        // All clean (including potential garbage at tail, implying safe)
-        // Even if garbage was clean, we only copy 'len' bytes
-        // But we can do a 16-byte store if dst is large enough?
-        // TapeSerializer guarantees +128 space.
-        // So unsafe 16-byte write is safe for memory, but we must advance dst
-        // by len only. Actually, small memcpy might be better than unaligned
-        // load/store if len is very small. Let's rely on memcpy compiler
-        // intrinsic for small N.
-        std::memcpy(dst, src, len);
-        return dst + len;
-      }
-    }
-    // Fallback to scalar if unsafe or dirty
-  }
-
   // Main loop for >= 16 bytes
   while (src + 16 <= end) {
     uint8x16_t val = vld1q_u8((const uint8_t *)src);
@@ -3681,28 +3655,20 @@ BEAST_INLINE char *escape_string(const char *src, size_t len, char *dst) {
       continue;
     }
 
-    // Dirty block found: Process THIS block via scalar to handle escapes
-    // correctly, then continue loop to resume SIMD!
-
-    // --- SIMD ESCAPE OPTIMIZATION START ---
-    // Use the mask to skip directly to special characters, avoiding checking
-    // every byte.
+    // Dirty block found: Process via scalar
     uint64_t mask64 = neon_movemask(mask);
     const char *block_start = src;
 
     while (mask64) {
-      int idx = __builtin_ctzll(
-          mask64); // Index of special char relative to block_start
+      int idx = __builtin_ctzll(mask64);
       int len = idx - (int)(src - block_start);
 
-      // Copy clean bytes
       if (len > 0) {
         std::memcpy(dst, src, len);
         dst += len;
         src += len;
       }
 
-      // Handle special char
       uint8_t c = (uint8_t)*src++;
       if (c == '"') {
         *dst++ = '\\';
@@ -3726,7 +3692,6 @@ BEAST_INLINE char *escape_string(const char *src, size_t len, char *dst) {
         *dst++ = '\\';
         *dst++ = 't';
       } else {
-        // Control char < 32 (and not one of the above)
         *dst++ = '\\';
         *dst++ = 'u';
         *dst++ = '0';
@@ -3734,31 +3699,120 @@ BEAST_INLINE char *escape_string(const char *src, size_t len, char *dst) {
         *dst++ = "0123456789abcdef"[(c >> 4) & 0xF];
         *dst++ = "0123456789abcdef"[c & 0xF];
       }
-
-      // Clear this bit
       mask64 &= ~(1ULL << idx);
     }
 
-    // Copy remaining bytes in this 16-byte block
     int rem = (int)((block_start + 16) - src);
     if (rem > 0) {
       std::memcpy(dst, src, rem);
       dst += rem;
       src += rem;
     }
-    continue;
   }
-  // --- SIMD ESCAPE OPTIMIZATION END ---
+#elif defined(__SSE2__) || defined(__x86_64__) || defined(_M_X64)
+  const __m128i quote = _mm_set1_epi8('"');
+  const __m128i backslash = _mm_set1_epi8('\\');
+  const __m128i k32 = _mm_set1_epi8(32);
+  const __m128i zero = _mm_setzero_si128();
+
+  // Short string optimization (< 16 bytes)
+  if (len < 16) {
+    if ((((uintptr_t)src) & 0xFFF) <= 0xFF0) {
+      __m128i val = _mm_loadu_si128((const __m128i *)src);
+      __m128i m_quote = _mm_cmpeq_epi8(val, quote);
+      __m128i m_bs = _mm_cmpeq_epi8(val, backslash);
+      __m128i m_lt32 = _mm_cmplt_epi8(val, k32);
+      __m128i m_pos = _mm_cmpgt_epi8(val, _mm_set1_epi8(-1));
+      __m128i m_ctrl = _mm_and_si128(m_lt32, m_pos);
+
+      __m128i mask = _mm_or_si128(m_quote, _mm_or_si128(m_bs, m_ctrl));
+      int mask_bits = _mm_movemask_epi8(mask); // 16 bits
+
+      // Mask out bits beyond len
+      // We only care if the first 'len' bytes are clean.
+      // create a mask of valid bits: (1 << len) - 1
+      int valid_mask = (1 << len) - 1;
+
+      if ((mask_bits & valid_mask) == 0) {
+        std::memcpy(dst, src, len);
+        return dst + len;
+      }
+    }
+  }
+
+  while (src + 16 <= end) {
+    __m128i val = _mm_loadu_si128((const __m128i *)src);
+    __m128i m_quote = _mm_cmpeq_epi8(val, quote);
+    __m128i m_bs = _mm_cmpeq_epi8(val, backslash);
+    __m128i m_lt32 = _mm_cmplt_epi8(val, k32);
+    __m128i m_pos = _mm_cmpgt_epi8(
+        val, _mm_set1_epi8(-1)); // signed > -1 means >= 0 case (ASCII)
+    __m128i m_ctrl = _mm_and_si128(
+        m_lt32, m_pos); // Control chars < 32 and positive (not UTF8)
+
+    __m128i mask = _mm_or_si128(m_quote, _mm_or_si128(m_bs, m_ctrl));
+    int mask_bits = _mm_movemask_epi8(mask);
+
+    if (mask_bits == 0) {
+      _mm_storeu_si128((__m128i *)dst, val);
+      src += 16;
+      dst += 16;
+      continue;
+    }
+
+    // Handle Dirty Block
+    const char *block_start = src;
+    while (mask_bits) {
+      int idx = __builtin_ctz(mask_bits);
+      int len = idx - (int)(src - block_start);
+
+      if (len > 0) {
+        std::memcpy(dst, src, len);
+        dst += len;
+        src += len;
+      }
+
+      uint8_t c = (uint8_t)*src++;
+      if (c == '"') {
+        *dst++ = '\\';
+        *dst++ = '"';
+      } else if (c == '\\') {
+        *dst++ = '\\';
+        *dst++ = '\\';
+      } else if (c == '\b') {
+        *dst++ = '\\';
+        *dst++ = 'b';
+      } else if (c == '\f') {
+        *dst++ = '\\';
+        *dst++ = 'f';
+      } else if (c == '\n') {
+        *dst++ = '\\';
+        *dst++ = 'n';
+      } else if (c == '\r') {
+        *dst++ = '\\';
+        *dst++ = 'r';
+      } else if (c == '\t') {
+        *dst++ = '\\';
+        *dst++ = 't';
+      } else {
+        *dst++ = '\\';
+        *dst++ = 'u';
+        *dst++ = '0';
+        *dst++ = '0';
+        *dst++ = "0123456789abcdef"[(c >> 4) & 0xF];
+        *dst++ = "0123456789abcdef"[c & 0xF];
+      }
+      mask_bits &= ~(1 << idx);
+    }
+
+    int rem = (int)((block_start + 16) - src);
+    if (rem > 0) {
+      std::memcpy(dst, src, rem);
+      dst += rem;
+      src += rem;
+    }
+  }
 #endif
-
-  // Optimization: Handle short strings / tail with SIMD check?
-  // Only safe if we can read 16 bytes from src.
-  // Assuming src buffer is padded or we accept risk for benchmark.
-  // For production, would need `if (src + 16 <= safe_limit)`.
-  // Let's stick to scalar for tail to avoid segfaults for now.
-  // But if `src` was < 16 to begin with (Keys!), we are SLOW.
-
-  // Scalar loop for remainder
   while (src < end) {
     uint8_t c = (uint8_t)*src++;
     if (c == '"') {
@@ -5595,6 +5649,8 @@ enum Type : uint8_t {
   UInt64 = 'u',
   Double = 'd',
   String = '"',
+  StringInline = 's',    // Payload: [Len(1)|Chars(6)]
+  StringInlineExt = 'S', // Payload: [Len(1)|Chars(6)] + Next[Chars(8)]
   Array = '[',
   Object = '{'
 };
@@ -5615,6 +5671,18 @@ struct Element {
   void set_payload(uint64_t p) {
     Type t = type();
     data = (static_cast<uint64_t>(t) << 56) | (p & 0x00FFFFFFFFFFFFFFULL);
+  }
+
+  // Inline String Helpers
+  // Layout: [Type(8) | Len(8) | Char0 | Char1 | ... | Char5]
+  uint8_t inline_len() const { return (data >> 48) & 0xFF; }
+
+  const char *inline_data() const {
+    // Returns pointer to byte 2 (inside the uint64_t)
+    // CAUTION: This returns a pointer to the internal stack/register copy if
+    // called on rvalue! But we usually call this on a loaded 64-bit value or
+    // reference. Actually, for serialization, we extract bytes by shifting.
+    return (const char *)&data;
   }
 };
 
@@ -6573,6 +6641,45 @@ public:
       // Fast Path: Simple String (No escapes)
       size_t len = scanned_end - p;
 
+      // Inline String Optimization (Phase 13)
+      if (len <= 14) {
+        if (len <= 5) {
+          // Type::StringInline [Type(8)|Len(8)|Chars(48)]
+          uint64_t payload = (uint64_t)len << 48;
+          uint64_t chars = 0;
+          // Safe copy for short strings (register/stack based)
+          // We can just memcpy to uint64 and mask?
+          // Or just loop? Loop is fine for 5 bytes.
+          // Actually, memcpy to a local uint64 is safest/fastest on 64-bit.
+          std::memcpy(&chars, p, len);
+          // Little Endian: bytes 0..len-1 are at bottom.
+          // We want bytes 0..5 at [16..63]? NO.
+          // Element constructor shifts Type to top 8 bits.
+          // Payload is lower 56 bits.
+          // We want: [Type(8) | Len(8) | Char0 | Char1 ... ]
+          // payload arg to Element is 56 bits.
+          // So payload = (len << 48) | (chars & 0xFFFFFFFFFFFF)
+          payload |= (chars & 0xFFFFFFFFFFFFULL);
+          push_tape(Element(Type::StringInline, payload).data);
+          return const_cast<char *>(scanned_end) + 1;
+        } else {
+          // Type::StringInlineExt [Type(8)|Len(8)|Chars(48)] + [Chars(64)]
+          // Total 14 chars max.
+          // Element 1: Len + first 6 chars
+          uint64_t payload1 = (uint64_t)len << 48;
+          uint64_t chars1 = 0;
+          std::memcpy(&chars1, p, 6);
+          payload1 |= (chars1 & 0xFFFFFFFFFFFFULL);
+          push_tape(Element(Type::StringInlineExt, payload1).data);
+
+          // Element 2: Remaining 8 chars (max)
+          uint64_t chars2 = 0;
+          std::memcpy(&chars2, p + 6, len - 6);
+          push_tape(chars2); // Raw payload, no type header for 2nd slot
+          return const_cast<char *>(scanned_end) + 1;
+        }
+      }
+
       // Ensure space in output buffer
       if (BEAST_LIKELY(str_head_ + len + 1 <= str_end_)) {
         std::memcpy(str_head_, p, len);
@@ -7136,102 +7243,62 @@ BEAST_INLINE char *to_chars(char *buffer, uint64_t val) {
   // Optimized integer to string conversion (Jeaiii-style / LUT)
   // Writes directly to buffer and returns end pointer.
 
-  if (val < 100) {
-    if (val < 10) {
-      *buffer++ = '0' + (char)val;
-      return buffer;
-    }
-    const char *d = digits_lz + val * 2;
-    *buffer++ = d[0];
-    *buffer++ = d[1];
+  if (val == 0) {
+    *buffer++ = '0';
     return buffer;
   }
 
-  // Full algorithm for larger numbers
-  // Identify number of digits
-  uint64_t temp = val;
   int digits = 0;
+  uint64_t temp = val;
 
   // Fast digit counting
-  if (val < 10000) {
-    if (val < 1000)
-      digits = 3;
-    else
-      digits = 4;
-  } else if (val < 100000000) {
-    if (val < 1000000) {
-      if (val < 100000)
-        digits = 5;
-      else
-        digits = 6;
-    } else {
-      if (val < 10000000)
-        digits = 7;
-      else
-        digits = 8;
-    }
-  } else {
-    // > 8 digits
-    // Full count or handle recursively?
-    // Let's use scalar loop writing backwards for simplicity and speed > 8
-    // digits Or just use std::to_chars for very large numbers? No, standard
-    // loop is fine.
-    char *p = buffer;
-    int n = 0;
-    // Calculate length
-    uint64_t v = val;
-    do {
-      v /= 10;
-      n++;
-    } while (v > 0);
-    digits = n;
-  }
-
-  // Actually, computing digits first is only good if we write forward.
-  // Let's use the 'write backward' trick but we know the length?
-  // Or write backward to a local small buffer and copy?
-  // Or just write backward from end pointer?
-  // We receive 'buffer', we return end. We don't know end yet.
-
-  // Let's use 'write backward' from a computed end.
-  // Count digits first.
-  if (val < 100000000ULL) {
-    // 1..8 digits
-    int n;
-    if (val < 10000ULL) {
+  if (val < 10000000000ULL) { // 1..10 digits
+    if (val < 100000ULL) {    // 1..5
       if (val < 100ULL)
-        n = (val < 10ULL) ? 1 : 2;
+        digits = (val < 10ULL) ? 1 : 2;
       else
-        n = (val < 1000ULL) ? 3 : 4;
-    } else {
-      if (val < 1000000ULL)
-        n = (val < 100000ULL) ? 5 : 6;
+        digits = (val < 1000ULL) ? 3 : (val < 10000ULL) ? 4 : 5;
+    } else { // 6..10
+      if (val < 10000000ULL)
+        digits = (val < 1000000ULL) ? 6 : 7;
       else
-        n = (val < 10000000ULL) ? 7 : 8;
+        digits = (val < 100000000ULL) ? 8 : (val < 1000000000ULL) ? 9 : 10;
     }
-
-    char *p = buffer + n;
-    char *end = p;
-    while (val >= 100) {
-      uint64_t index = (val % 100) * 2;
-      val /= 100;
-      p -= 2;
-      // Use memcpy (compiler optimizes to u16 load/store)
-      std::memcpy(p, digits_lz + index, 2);
+  } else {                           // 11..20 digits
+    if (val < 1000000000000000ULL) { // 11..15
+      if (val < 10000000000000ULL)
+        digits = (val < 100000000000ULL)    ? 11
+                 : (val < 1000000000000ULL) ? 12
+                                            : 13;
+      else
+        digits = (val < 100000000000000ULL) ? 14 : 15;
+    } else { // 16..20
+      if (val < 100000000000000000ULL)
+        digits = (val < 10000000000000000ULL) ? 16 : 17;
+      else
+        digits = (val < 1000000000000000000ULL)    ? 18
+                 : (val < 10000000000000000000ULL) ? 19
+                                                   : 20;
     }
-    if (val < 10) {
-      *--p = '0' + (char)val;
-    } else {
-      p -= 2;
-      std::memcpy(p, digits_lz + val * 2, 2);
-    }
-    return end;
   }
 
-  // > 8 Digits: Fallback to std::to_chars for correctness
-  // The previous manual loop was modifying val before calling std::to_chars.
-  auto res = std::to_chars(buffer, buffer + 32, val);
-  return res.ptr;
+  char *p = buffer + digits;
+  char *end = p;
+
+  while (val >= 100) {
+    uint64_t index = (val % 100) * 2;
+    val /= 100;
+    p -= 2;
+    std::memcpy(p, digits_lz + index, 2);
+  }
+  if (val < 10) {
+    *--p = '0' + (char)val;
+  } else {
+    p -= 2;
+    std::memcpy(p, digits_lz + val * 2, 2);
+  }
+
+  return end;
 }
 
 } // namespace u64toa
@@ -7242,8 +7309,10 @@ BEAST_INLINE char *to_chars(char *buffer, uint64_t val) {
 class TapeSerializerExtreme {
   const Document &doc_;
   std::string &out_;
+  char buffer_[16384];
+  char *cursor;
+  char *limit;
 
-  // 0-99 Lookup Table for fast integer writing
   static constexpr char digits_lz[201] = "00010203040506070809"
                                          "10111213141516171819"
                                          "20212223242526272829"
@@ -7255,38 +7324,49 @@ class TapeSerializerExtreme {
                                          "80818283848586878889"
                                          "90919293949596979899";
 
+  // State Machine Lookup Tables
+  static constexpr char state_prefix[8] = {0, ',', 0, ',', ':', 0, 0, 0};
+  static constexpr uint8_t next_state[8] = {1, 1, 4, 4, 3, 0, 0, 0};
+
 public:
   TapeSerializerExtreme(const Document &doc, std::string &out)
-      : doc_(doc), out_(out) {}
+      : doc_(doc), out_(out) {
+    cursor = buffer_;
+    limit = buffer_ + 16384;
+  }
+
+  BEAST_INLINE void flush() {
+    size_t len = cursor - buffer_;
+    if (len > 0) {
+      out_.append(buffer_, len);
+      cursor = buffer_;
+    }
+  }
 
   void serialize() {
     if (doc_.tape.empty())
       return;
 
-    // 1. Manually Manage Buffer to avoid std::string zero-init overhead
-    size_t cap = doc_.tape.size() * 16;
-    if (cap < 4096)
-      cap = 4096;
+    // 1. Reserve Output capacity (Estimate)
+    // Estimate: Tape metadata overhead + String content
+    // Tape elements: ~8 bytes overhead each (comma, quotes, brackets)
+    // Strings: The actual bulk of the JSON
+    size_t estimated = doc_.tape.size() * 8 + doc_.string_buffer.size();
+    if (out_.capacity() < out_.size() + estimated) {
+      out_.reserve(std::max(out_.capacity() * 2, out_.size() + estimated));
+    }
 
-    char *start = (char *)std::malloc(cap);
-    if (!start)
-      return; // OOM check
-
-    char *cursor = start;
-    char *limit = start + cap;
-
-    // 2. Depth Stack (for comma handling)
-    // Single malloc-managed stack for speed (no vector check overhead)
+    // 2. Stack
     size_t stack_cap = 4096;
     char *stack_start = (char *)std::malloc(stack_cap);
-    if (!stack_start) {
-      std::free(start);
+    if (!stack_start)
       return;
-    }
+
     char *stack_ptr = stack_start;
     char *stack_limit = stack_start + stack_cap;
 
-    *stack_ptr = 0; // Root state
+    // Use local state variable
+    uint8_t state = 0; // Root state
 
     const uint64_t *tape = doc_.tape.data();
     size_t n = doc_.tape.size();
@@ -7297,78 +7377,36 @@ public:
 
     // 3. Main Loop
     for (size_t i = 0; i < n; /* inc inside */) {
-      // Capacity Check (Hot Path)
+      // Hot Path Check
       if (BEAST_UNLIKELY(cursor + 512 > limit)) {
-        size_t used = cursor - start;
-        size_t new_cap = used * 2;
-        if (new_cap < used + 4096)
-          new_cap = used + 4096;
-
-        char *new_start = (char *)std::realloc(start, new_cap);
-        if (!new_start) {
-          std::free(start);
-          return;
-        }
-        start = new_start;
-        cursor = start + used;
-        limit = start + new_cap;
+        flush();
       }
 
       uint64_t val = tape[i];
       Type type = (Type)((val >> 56) & 0xFF);
 
-      bool is_closing = false;
+      // Handle Closing (End of Container)
       if (type == Type::Array || type == Type::Object) {
         uint64_t p = val & 0x00FFFFFFFFFFFFFFULL;
-        if (p < i)
-          is_closing = true;
+        if (p < i) {
+          // Pop Stack
+          if (stack_ptr > stack_start) {
+            stack_ptr--;
+            state = *stack_ptr;
+          }
+          *cursor++ = (type == Type::Array) ? ']' : '}';
+          i++;
+          continue;
+        }
       }
 
-      if (is_closing) {
-        // Pop Stack
-        if (stack_ptr > stack_start)
-          stack_ptr--;
+      // Handle Prefix (Comma/Colon)
+      char prefix = state_prefix[state];
+      if (prefix)
+        *cursor++ = prefix;
 
-        if (type == Type::Array)
-          *cursor++ = ']';
-        else
-          *cursor++ = '}';
-
-        i++;
-        continue;
-      }
-
-      // Handle Commas / Colons
-      // Current stack check
-      char state = *stack_ptr;
-
-      // If state has bit 0 set -> Comma needed
-      // If state has bit 1 set -> Object Key (expecting colon next)
-      // If state has bit 2 set -> Object Value (expecting comma next time)
-
-      // Refined State:
-      // 0: Array First
-      // 1: Array Subsequent (Needs Comma)
-      // 2: Object First Key
-      // 3: Object Key Subsequent (Needs Comma)
-      // 4: Object Value (Needs Colon)
-
-      if (state == 1)
-        *cursor++ = ',';
-      else if (state == 3)
-        *cursor++ = ',';
-      else if (state == 4)
-        *cursor++ = ':';
-
-      // Update State for next iteration at THIS level
-      if (state == 0)
-        *stack_ptr = 1; // Array First -> Subsequent
-      else if (state == 2)
-        *stack_ptr = 4; // Object First Key -> Value
-      else if (state == 3)
-        *stack_ptr = 4; // Object Key Subseq -> Value
-      else if (state == 4)
-        *stack_ptr = 3; // Object Value -> Key Subseq
+      // Update State for next element
+      state = next_state[state];
 
       // Process Value
       switch (type) {
@@ -7389,7 +7427,6 @@ public:
         break;
       case Type::Int64: {
         int64_t v = (int64_t)(val & 0x00FFFFFFFFFFFFFFULL);
-        // Sign extend
         if (val & (1ULL << 55))
           v |= 0xFF00000000000000ULL;
 
@@ -7402,13 +7439,12 @@ public:
         i++;
         break;
       }
-
       case Type::Int64Full: {
         int64_t val;
         uint64_t payload = tape[i + 1];
         std::memcpy(&val, &payload, 8);
         *cursor++ = '-';
-        uint64_t abs_v = (uint64_t)(-(val + 1)) + 1; // 2's complement negation
+        uint64_t abs_v = (uint64_t)(-(val + 1)) + 1;
         cursor = u64toa::to_chars(cursor, abs_v);
         i += 2;
         break;
@@ -7434,19 +7470,20 @@ public:
         uint32_t off = (uint32_t)(payload & 0xFFFFFFFF);
         const char *str = str_base + off;
 
-        // Size Check (String can be large)
-        if (BEAST_UNLIKELY(cursor + len * 6 + 32 > limit)) {
-          size_t used = cursor - start;
-          size_t new_cap = used + len * 6 + 4096;
-          char *new_start = (char *)std::realloc(start, new_cap);
-          if (!new_start) {
-            std::free(start);
-            std::free(stack_start);
-            return;
+        size_t required = len * 6 + 32;
+        if (BEAST_UNLIKELY(cursor + required > limit)) {
+          flush();
+          if (required > 16384) {
+            size_t pos = out_.size();
+            out_.resize(pos + required);
+            char *dst = &out_[pos];
+            *dst++ = '"';
+            dst = simd::escape_string(str, len, dst);
+            *dst++ = '"';
+            out_.resize(dst - out_.data());
+            i++;
+            break;
           }
-          start = new_start;
-          cursor = start + used;
-          limit = start + new_cap;
         }
 
         *cursor++ = '"';
@@ -7455,38 +7492,46 @@ public:
         i++;
         break;
       }
-      case Type::Array: {
-        *cursor++ = '[';
-        // Push 0 (Array First)
-        if (BEAST_UNLIKELY(stack_ptr >= stack_limit - 1)) {
-          size_t used = stack_ptr - stack_start;
-          size_t new_cap = stack_cap * 2;
-          char *new_stack = (char *)std::realloc(stack_start, new_cap);
-          if (!new_stack) {
-            std::free(start);
-            std::free(stack_start);
-            return;
-          }
-          stack_start = new_stack;
-          stack_ptr = stack_start + used;
-          stack_limit = stack_start + new_cap;
-          stack_cap = new_cap;
-        }
-        stack_ptr++;
-        *stack_ptr = 0;
+      case Type::StringInline: {
+        // Optimization: Merge opening quote with payload using shift
+        // val: [Type(8)|Len(8)|Chars(6)]
+        // val << 8 | '"': [Len(8)|Chars(6)|'"']
+        // Memory (LE): " C0..C5 Len
+        uint64_t tagged = (val << 8) | '"';
+        std::memcpy(cursor, &tagged, 8);
+
+        uint32_t len = (uint32_t)((val >> 48) & 0xFF);
+        cursor += 1 + len;
+        *cursor++ = '"';
         i++;
         break;
       }
-      case Type::Object: {
-        *cursor++ = '{';
-        // Push 2 (Object First Key)
+      case Type::StringInlineExt: {
+        // Slot 1: [Type(8)|Len(8)|Chars(6)] -> Write ", C0..C5, Len
+        uint64_t tagged = (val << 8) | '"';
+        std::memcpy(cursor, &tagged, 8);
+
+        // Slot 2: [Chars(8)]
+        uint64_t val2 = tape[i + 1];
+        // Write C6..C13 at cursor + 7 (Overwrites Len byte)
+        std::memcpy(cursor + 7, &val2, 8);
+
+        uint32_t len = (uint32_t)((val >> 48) & 0xFF);
+        cursor += 1 + len;
+        *cursor++ = '"';
+        i += 2;
+        break;
+      }
+      case Type::Array: { // Opening
+        *cursor++ = '[';
+        // Push State
         if (BEAST_UNLIKELY(stack_ptr >= stack_limit - 1)) {
           size_t used = stack_ptr - stack_start;
           size_t new_cap = stack_cap * 2;
           char *new_stack = (char *)std::realloc(stack_start, new_cap);
           if (!new_stack) {
-            std::free(start);
             std::free(stack_start);
+            flush();
             return;
           }
           stack_start = new_stack;
@@ -7494,8 +7539,31 @@ public:
           stack_limit = stack_start + new_cap;
           stack_cap = new_cap;
         }
+        *stack_ptr = state; // Save parent state
         stack_ptr++;
-        *stack_ptr = 2;
+        state = 0; // New Array State
+        i++;
+        break;
+      }
+      case Type::Object: { // Opening
+        *cursor++ = '{';
+        if (BEAST_UNLIKELY(stack_ptr >= stack_limit - 1)) {
+          size_t used = stack_ptr - stack_start;
+          size_t new_cap = stack_cap * 2;
+          char *new_stack = (char *)std::realloc(stack_start, new_cap);
+          if (!new_stack) {
+            std::free(stack_start);
+            flush();
+            return;
+          }
+          stack_start = new_stack;
+          stack_ptr = stack_start + used;
+          stack_limit = stack_start + new_cap;
+          stack_cap = new_cap;
+        }
+        *stack_ptr = state; // Save parent state
+        stack_ptr++;
+        state = 2; // New Object State
         i++;
         break;
       }
@@ -7506,8 +7574,7 @@ public:
     }
 
     std::free(stack_start);
-    out_.assign(start, cursor - start);
-    std::free(start);
+    flush();
   }
 };
 
@@ -8534,29 +8601,69 @@ template <typename T> constexpr bool has_subscript_v = has_subscript<T>::value;
 // 4. Direct Serializer (Zero-Copy)
 struct DirectSerializer {
   std::string &out;
+  char *ptr;
+  char *end;
 
-  DirectSerializer(std::string &o) : out(o) {}
-
-  void write_str(std::string_view sv) {
-    out.push_back('"');
-    // Reserve strict max: len * 6 (unicode) + 2 + padding
-    size_t current_size = out.size();
-    out.resize(current_size + sv.size() * 6 + 32);
-
-    char *start = out.data() + current_size;
-    char *end = ::beast::json::simd::escape_string(sv.data(), sv.size(), start);
-
-    // Shrink back
-    out.resize(end - out.data());
-    out.push_back('"');
+  DirectSerializer(std::string &o) : out(o) {
+    size_t current_len = out.size();
+    // Aggressively reserve to minimize reallocations
+    if (out.capacity() < current_len + 4096) {
+      out.reserve(std::max(out.capacity() * 2, current_len + 4096));
+    }
+    // Resize to capacity to allow raw access
+    out.resize(out.capacity());
+    ptr = &out[current_len];
+    end = &out[0] + out.size();
   }
 
-  void write(std::nullptr_t) { out.append("null", 4); }
+  ~DirectSerializer() {
+    if (ptr) {
+      out.resize(ptr - out.data());
+    }
+  }
+
+  BEAST_INLINE void ensure(size_t n) {
+    if (BEAST_UNLIKELY(ptr + n > end)) {
+      grow(n);
+    }
+  }
+
+  void grow(size_t n) {
+    size_t len = ptr - out.data();
+    size_t required = len + n;
+    size_t new_cap = std::max(out.capacity() * 2, required + 4096);
+    out.resize(new_cap);
+    ptr = out.data() + len;
+    end = out.data() + new_cap;
+  }
+
+  void write_chk(char c) {
+    ensure(1);
+    *ptr++ = c;
+  }
+
+  void write_str(std::string_view sv) {
+    ensure(sv.size() * 6 + 32 + 2);
+    *ptr++ = '"';
+    ptr = ::beast::json::simd::escape_string(sv.data(), sv.size(), ptr);
+    *ptr++ = '"';
+  }
+
+  void write(std::nullptr_t) {
+    ensure(4);
+    std::memcpy(ptr, "null", 4);
+    ptr += 4;
+  }
   void write(bool b) {
-    if (b)
-      out.append("true", 4);
-    else
-      out.append("false", 5);
+    if (b) {
+      ensure(4);
+      std::memcpy(ptr, "true", 4);
+      ptr += 4;
+    } else {
+      ensure(5);
+      std::memcpy(ptr, "false", 5);
+      ptr += 5;
+    }
   }
 
   void write(int8_t v) { write((int32_t)v); }
@@ -8565,58 +8672,53 @@ struct DirectSerializer {
   void write(uint16_t v) { write((uint32_t)v); }
 
   void write(int32_t v) {
-    char buf[32];
-    if (v >= 0)
-      out.append(buf,
-                 ::beast::json::tape::u64toa::to_chars(buf, (uint64_t)v) - buf);
-    else {
-      out.push_back('-');
-      out.append(buf, ::beast::json::tape::u64toa::to_chars(buf, (uint64_t)-v) -
-                          buf);
+    ensure(32);
+    if (v >= 0) {
+      ptr = ::beast::json::tape::u64toa::to_chars(ptr, (uint64_t)v);
+    } else {
+      *ptr++ = '-';
+      ptr = ::beast::json::tape::u64toa::to_chars(ptr, (uint64_t)-v);
     }
   }
 
   void write(uint32_t v) {
-    char buf[32];
-    out.append(buf,
-               ::beast::json::tape::u64toa::to_chars(buf, (uint64_t)v) - buf);
+    ensure(32);
+    ptr = ::beast::json::tape::u64toa::to_chars(ptr, (uint64_t)v);
   }
 
   void write(int64_t v) {
-    char buf[32];
-    if (v >= 0)
-      out.append(buf,
-                 ::beast::json::tape::u64toa::to_chars(buf, (uint64_t)v) - buf);
-    else {
-      out.push_back('-');
-      out.append(buf, ::beast::json::tape::u64toa::to_chars(buf, (uint64_t)-v) -
-                          buf);
+    ensure(32);
+    if (v >= 0) {
+      ptr = ::beast::json::tape::u64toa::to_chars(ptr, (uint64_t)v);
+    } else {
+      *ptr++ = '-';
+      ptr = ::beast::json::tape::u64toa::to_chars(ptr, (uint64_t)-v);
     }
   }
 
   void write(uint64_t v) {
-    char buf[32];
-    out.append(buf, ::beast::json::tape::u64toa::to_chars(buf, v) - buf);
+    ensure(32);
+    ptr = ::beast::json::tape::u64toa::to_chars(ptr, v);
   }
 
   void write(float v) { write((double)v); }
 
   void write(double v) {
-    char buf[64];
-    auto res = std::to_chars(buf, buf + 64, v);
-    out.append(buf, res.ptr - buf);
+    ensure(64);
+    auto res = std::to_chars(ptr, ptr + 64, v);
+    ptr = res.ptr;
   }
   void write(std::string_view sv) { write_str(sv); }
   void write(const std::string &s) { write_str(s); }
 
   template <typename T> void write(const std::vector<T> &vec) {
-    out.push_back('[');
+    write_chk('[');
     for (size_t i = 0; i < vec.size(); ++i) {
       if (i > 0)
-        out.push_back(',');
+        write_chk(',');
       this->write(vec[i]);
     }
-    out.push_back(']');
+    write_chk(']');
   }
 
   template <typename T> void write(const std::optional<T> &opt) {
@@ -8642,34 +8744,34 @@ struct DirectSerializer {
 
   // std::pair
   template <typename T1, typename T2> void write(const std::pair<T1, T2> &p) {
-    out.push_back('[');
+    write_chk('[');
     this->write(p.first);
-    out.push_back(',');
+    write_chk(',');
     this->write(p.second);
-    out.push_back(']');
+    write_chk(']');
   }
 
   // std::tuple (Recursive Unroll)
   template <typename... Args> void write(const std::tuple<Args...> &t) {
-    out.push_back('[');
+    write_chk('[');
     std::apply(
         [&](const auto &...args) {
           size_t n = 0;
-          ((n++ > 0 ? out.push_back(',') : void(), this->write(args)), ...);
+          ((n++ > 0 ? write_chk(',') : void(), this->write(args)), ...);
         },
         t);
-    out.push_back(']');
+    write_chk(']');
   }
 
   // std::array
   template <typename T, size_t N> void write(const std::array<T, N> &arr) {
-    out.push_back('[');
+    write_chk('[');
     for (size_t i = 0; i < N; ++i) {
       if (i > 0)
-        out.push_back(',');
+        write_chk(',');
       this->write(arr[i]);
     }
-    out.push_back(']');
+    write_chk(']');
   }
 
   // std::filesystem::path
@@ -8721,43 +8823,60 @@ struct DirectSerializer {
     if constexpr (reflects_v<T>) {
       constexpr auto members = meta<T>::info();
       if constexpr (std::tuple_size_v<decltype(members)> > 0) {
-        out.push_back('{');
+        write_chk('{');
         std::apply(
             [&](const auto &...args) {
               size_t n = 0;
-              (((n++ > 0 ? out.push_back(',') : void()), out.push_back('"'),
-                out.append(args.first), out.append("\":"),
-                this->write(obj.*(args.second))),
+              (((n++ > 0 ? write_chk(',') : void()), write_chk('"'),
+                write_str_raw(args.first), this->write(obj.*(args.second))),
                ...);
             },
             members);
-        out.push_back('}');
+        write_chk('}');
       } else {
-        out.append("{}");
+        ensure(2);
+        *ptr++ = '{';
+        *ptr++ = '}';
       }
     } else if constexpr (is_map_v<T>) {
-      out.push_back('{');
+      write_chk('{');
       bool first = true;
       for (const auto &item : obj) {
         if (!first)
-          out.push_back(',');
+          write_chk(',');
         this->write(item.first);
-        out.push_back(':');
+        write_chk(':');
         this->write(item.second);
         first = false;
       }
-      out.push_back('}');
+      write_chk('}');
     } else {
-      out.push_back('[');
+      write_chk('[');
       bool first = true;
       for (const auto &item : obj) {
         if (!first)
-          out.push_back(',');
+          write_chk(',');
         this->write(item);
         first = false;
       }
-      out.push_back(']');
+      write_chk(']');
     }
+  }
+
+  // Helper for reflected keys (known safe-ish or just use normal write_str)
+  // Reflected keys are string_views of member names. They usually don't need
+  // escaping if they are identifiers. But to be safe, we use write_str (which
+  // calls escape). Optimization: standard member names don't need escape. But
+  // let's stick to safe `ptr` writing.
+  void write_str_raw(std::string_view sv) {
+    // Manual "append" without quotes, followed by ":".
+    // Optimized version for keys: "key":
+    ensure(sv.size() * 6 + 32 + 2); // conservative
+    // Copy key (escape if needed, but member names usually safe? No, assume
+    // needs escape)
+    ptr = ::beast::json::simd::escape_string(sv.data(), sv.size(), ptr);
+    *ptr++ = '"';
+    *ptr++ = ':';
   }
 };
 } // namespace reflect
