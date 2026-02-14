@@ -46,6 +46,7 @@
 #include <cstdlib>
 #include <cstring> // for memcpy in optimizations
 #include <cstring> // For memcpy
+#include <filesystem>
 #include <fstream>
 #include <future>
 #include <initializer_list>
@@ -64,6 +65,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -228,6 +230,7 @@ enum class Error {
   Ok = 0,
   TypeMismatch,
   FieldNotFound, // For strict mode (optional)
+  ArrayTooShort, // For fixed-size container deserialization
   InvalidJson
 };
 
@@ -592,6 +595,12 @@ BEAST_INLINE const char *get_2digits(unsigned val) {
 // Needs escape check
 BEAST_INLINE bool needs_escape(char c) {
   return escape_table[static_cast<unsigned char>(c)] != 0;
+}
+
+BEAST_INLINE bool is_structural(char c) {
+  // '{', '}', '[', ']', ':', ',', '"'
+  return c == '{' || c == '}' || c == '[' || c == ']' || c == ':' || c == ',' ||
+         c == '"';
 }
 
 } // namespace lookup
@@ -3309,7 +3318,8 @@ BEAST_INLINE uint64_t neon_movemask(uint8x16_t input) {
 
 // Optimized Method
 BEAST_INLINE void classify_structure(const char *p, uint16_t &struct_mask,
-                                     uint16_t &quote_mask, uint16_t &esc_mask) {
+                                     uint16_t &quote_mask, uint16_t &esc_mask,
+                                     uint16_t &non_ws_mask) {
 #if defined(__aarch64__) || defined(__ARM_NEON)
   const uint8x16_t s_lc = vdupq_n_u8('{');
   const uint8x16_t s_rc = vdupq_n_u8('}');
@@ -3320,39 +3330,40 @@ BEAST_INLINE void classify_structure(const char *p, uint16_t &struct_mask,
   const uint8x16_t s_esc = vdupq_n_u8('\\');
   const uint8x16_t s_col = vdupq_n_u8(':');
 
+  const uint8x16_t s_sp = vdupq_n_u8(' ');
+  const uint8x16_t s_tab = vdupq_n_u8('\t');
+  const uint8x16_t s_lf = vdupq_n_u8('\n');
+  const uint8x16_t s_cr = vdupq_n_u8('\r');
+  const uint8x16_t s_ff = vdupq_n_u8('\f');
+
   uint8x16_t chunk = vld1q_u8((const uint8_t *)p);
 
-  uint8x16_t m1 = vceqq_u8(chunk, s_lc);
-  uint8x16_t m2 = vceqq_u8(chunk, s_rc);
-  uint8x16_t m3 = vceqq_u8(chunk, s_lb);
-  uint8x16_t m4 = vceqq_u8(chunk, s_rb);
-  uint8x16_t m5 = vceqq_u8(chunk, s_com);
-  uint8x16_t m7 = vceqq_u8(chunk, s_col);
-
   uint8x16_t m_str =
-      vorrq_u8(vorrq_u8(vorrq_u8(m1, m2), vorrq_u8(m3, m4)), vorrq_u8(m5, m7));
-  uint8x16_t m_quo = vceqq_u8(chunk, s_quo);
-  uint8x16_t m_esc = vceqq_u8(chunk, s_esc);
+      vorrq_u8(vorrq_u8(vorrq_u8(vceqq_u8(chunk, s_lc), vceqq_u8(chunk, s_rc)),
+                        vorrq_u8(vceqq_u8(chunk, s_lb), vceqq_u8(chunk, s_rb))),
+               vorrq_u8(vceqq_u8(chunk, s_com), vceqq_u8(chunk, s_col)));
+
+  uint8x16_t m_white =
+      vorrq_u8(vorrq_u8(vceqq_u8(chunk, s_sp), vceqq_u8(chunk, s_tab)),
+               vorrq_u8(vorrq_u8(vceqq_u8(chunk, s_lf), vceqq_u8(chunk, s_cr)),
+                        vceqq_u8(chunk, s_ff)));
+  uint8x16_t m_not_white = vmvnq_u8(m_white);
 
   struct_mask = (uint16_t)neon_movemask(m_str);
-  quote_mask = (uint16_t)neon_movemask(m_quo);
-  esc_mask = (uint16_t)neon_movemask(m_esc);
+  quote_mask = (uint16_t)neon_movemask(vceqq_u8(chunk, s_quo));
+  esc_mask = (uint16_t)neon_movemask(vceqq_u8(chunk, s_esc));
+  non_ws_mask = (uint16_t)neon_movemask(m_not_white);
 
-#elif defined(BEAST_ARCH_X86_64) && defined(BEAST_HAS_AVX2)
-  // AVX2 Implementation would go here (using _mm_movemask_epi8)
-  // For now, assume scalar fallback or sse2neon handles it?
-  // Actually sse2neon emulates _mm_movemask_epi8.
-  // But we are writing native NEON first as per request.
 #else
-  // Scalar Fallback
   struct_mask = 0;
   quote_mask = 0;
   esc_mask = 0;
-  // ... scalar logic ... (omitted for brevity in this specific patch block,
-  // assuming full file has it or we can leave empty as this is optimizing
-  // existing blocks) Re-inserting scalar logic for completeness:
+  non_ws_mask = 0;
   for (int i = 0; i < 16; ++i) {
     char c = p[i];
+    if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f')
+      continue;
+    non_ws_mask |= (1 << i);
     if (c == '{' || c == '}' || c == '[' || c == ']' || c == ',' || c == ':')
       struct_mask |= (1 << i);
     else if (c == '"')
@@ -3399,73 +3410,72 @@ BEAST_INLINE const char *skip_until_structural(const char *p, const char *end) {
 // Merges all structural checks into single vector mask to reduce reduction
 // overhead
 BEAST_INLINE void process_block64(const char *p, uint64_t &out_str,
-                                  uint64_t &out_quo, uint64_t &out_esc) {
+                                  uint64_t &out_quo, uint64_t &out_esc,
+                                  uint64_t &out_non_ws) {
 #if defined(__aarch64__) || defined(__ARM_NEON)
+  const uint8x16_t s_quo = vdupq_n_u8('"');
+  const uint8x16_t s_esc = vdupq_n_u8('\\');
+  const uint8x16_t s_sp = vdupq_n_u8(' ');
+  const uint8x16_t s_tab = vdupq_n_u8('\t');
+  const uint8x16_t s_lf = vdupq_n_u8('\n');
+  const uint8x16_t s_cr = vdupq_n_u8('\r');
+  const uint8x16_t s_ff = vdupq_n_u8('\f');
+
   const uint8x16_t s_lc = vdupq_n_u8('{');
   const uint8x16_t s_rc = vdupq_n_u8('}');
   const uint8x16_t s_lb = vdupq_n_u8('[');
   const uint8x16_t s_rb = vdupq_n_u8(']');
   const uint8x16_t s_com = vdupq_n_u8(',');
-  const uint8x16_t s_quo = vdupq_n_u8('"');
   const uint8x16_t s_col = vdupq_n_u8(':');
-  const uint8x16_t s_esc = vdupq_n_u8('\\');
 
-  // Atoms/Numbers start characters
-  const uint8x16_t s_neg = vdupq_n_u8('-');
-  const uint8x16_t s_true = vdupq_n_u8('t');
-  const uint8x16_t s_false = vdupq_n_u8('f');
-  const uint8x16_t s_null = vdupq_n_u8('n');
-  const uint8x16_t s_zero = vdupq_n_u8('0');
-
-  uint64_t r_str = 0, r_quo = 0, r_esc = 0;
+  uint64_t r_str = 0, r_quo = 0, r_esc = 0, r_non_ws = 0;
 
   for (int i = 0; i < 4; ++i) {
     uint8x16_t chunk = vld1q_u8((const uint8_t *)(p + i * 16));
 
-    uint8x16_t m1 = vceqq_u8(chunk, s_lc);
-    uint8x16_t m2 = vceqq_u8(chunk, s_rc);
-    uint8x16_t m3 = vceqq_u8(chunk, s_lb);
-    uint8x16_t m4 = vceqq_u8(chunk, s_rb);
-    uint8x16_t m5 = vceqq_u8(chunk, s_com);
-    uint8x16_t m7 = vceqq_u8(chunk, s_col);
+    uint8x16_t m_quo = vceqq_u8(chunk, s_quo);
+    uint8x16_t m_esc = vceqq_u8(chunk, s_esc);
 
-    // Atom starts
-    uint8x16_t m8 = vceqq_u8(chunk, s_neg);
-    uint8x16_t m9 = vceqq_u8(chunk, s_true);
-    uint8x16_t m10 = vceqq_u8(chunk, s_false);
-    uint8x16_t m11 = vceqq_u8(chunk, s_null);
+    uint8x16_t m_white = vorrq_u8(
+        vorrq_u8(vceqq_u8(chunk, s_sp), vceqq_u8(chunk, s_tab)),
+        vorrq_u8(vorrq_u8(vceqq_u8(chunk, s_lf), vceqq_u8(chunk, s_cr)),
+                 vceqq_u8(chunk, s_ff)));
+    uint8x16_t m_not_white = vmvnq_u8(m_white);
 
-    // Digits 0-9 range check
-    uint8x16_t m_digit = vcleq_u8(vsubq_u8(chunk, s_zero), vdupq_n_u8(9));
+    uint8x16_t m_str = vorrq_u8(
+        vorrq_u8(vorrq_u8(vceqq_u8(chunk, s_lc), vceqq_u8(chunk, s_rc)),
+                 vorrq_u8(vceqq_u8(chunk, s_lb), vceqq_u8(chunk, s_rb))),
+        vorrq_u8(vceqq_u8(chunk, s_com), vceqq_u8(chunk, s_col)));
 
-    uint8x16_t m_any_str =
-        vorrq_u8(vorrq_u8(vorrq_u8(m1, m2), vorrq_u8(m3, m4)),
-                 vorrq_u8(vorrq_u8(m5, m7),
-                          vorrq_u8(vorrq_u8(m8, m9),
-                                   vorrq_u8(vorrq_u8(m10, m11), m_digit))));
-    uint8x16_t m_any_quo = vceqq_u8(chunk, s_quo);
-    uint8x16_t m_any_esc = vceqq_u8(chunk, s_esc);
-
-    r_str |= (neon_movemask(m_any_str) << (i * 16));
-    r_quo |= (neon_movemask(m_any_quo) << (i * 16));
-    r_esc |= (neon_movemask(m_any_esc) << (i * 16));
+    r_str |= (neon_movemask(m_str) << (i * 16));
+    r_quo |= (neon_movemask(m_quo) << (i * 16));
+    r_esc |= (neon_movemask(m_esc) << (i * 16));
+    r_non_ws |= (neon_movemask(m_not_white) << (i * 16));
   }
+  out_str = r_str;
+  out_quo = r_quo;
+  out_esc = r_esc;
+  out_non_ws = r_non_ws;
 #else
-  uint64_t r_str = 0, r_quo = 0, r_esc = 0;
+  uint64_t r_str = 0, r_quo = 0, r_esc = 0, r_non_ws = 0;
   for (int i = 0; i < 64; ++i) {
     char c = p[i];
-    if (c == '{' || c == '}' || c == '[' || c == ']' || c == ',' || c == ':' ||
-        c == '-' || c == 't' || c == 'f' || c == 'n' || (c >= '0' && c <= '9'))
+    if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f') {
+      continue;
+    }
+    r_non_ws |= (1ULL << i);
+    if (c == '{' || c == '}' || c == '[' || c == ']' || c == ',' || c == ':')
       r_str |= (1ULL << i);
     else if (c == '"')
       r_quo |= (1ULL << i);
     else if (c == '\\')
       r_esc |= (1ULL << i);
   }
-#endif
   out_str = r_str;
   out_quo = r_quo;
   out_esc = r_esc;
+  out_non_ws = r_non_ws;
+#endif
 }
 
 BEAST_INLINE size_t fill_bitmap(const char *src, size_t len, BitmapIndex &idx) {
@@ -3473,10 +3483,11 @@ BEAST_INLINE size_t fill_bitmap(const char *src, size_t len, BitmapIndex &idx) {
   const char *end = src + len;
   uint64_t prev_in_string = 0;
   bool esc_next = false;
+  uint64_t prev_non_ws = (1ULL << 63); // Treat start of file as following ws
 
   while (p + 64 <= end) {
-    uint64_t str, quo, esc;
-    process_block64(p, str, quo, esc);
+    uint64_t str, quo, esc, non_ws;
+    process_block64(p, str, quo, esc, non_ws);
 
     uint64_t escaped = 0;
     uint64_t temp_esc = esc;
@@ -3513,12 +3524,24 @@ BEAST_INLINE size_t fill_bitmap(const char *src, size_t len, BitmapIndex &idx) {
 
     uint64_t clean_quotes = quo & ~escaped;
     uint64_t in_string = simd::prefix_xor(clean_quotes) ^ prev_in_string;
-    uint64_t structural = (str | clean_quotes) & ~(in_string ^ clean_quotes);
+
+    uint64_t inside = in_string & ~clean_quotes;
+    uint64_t external_non_ws = non_ws & ~inside;
+    uint64_t external_symbols = (str | clean_quotes);
+
+    // Any non-whitespace that is not a symbol and follows a whitespace or a
+    // symbol
+    uint64_t ws_like = (~non_ws & ~inside) | external_symbols;
+    uint64_t vstart = (external_non_ws & ~external_symbols) &
+                      (ws_like << 1 | (prev_non_ws >> 63));
+
+    uint64_t structural = external_symbols | vstart;
 
     idx.structural_bits.push_back(structural);
     idx.quote_bits.push_back(clean_quotes);
 
     prev_in_string = (uint64_t)((int64_t)in_string >> 63);
+    prev_non_ws = ws_like;
     p += 64;
   }
 
@@ -3528,13 +3551,14 @@ BEAST_INLINE size_t fill_bitmap(const char *src, size_t len, BitmapIndex &idx) {
     std::memset(buffer, ' ', 64);
     std::memcpy(buffer, p, remaining);
 
-    uint64_t str, quo, esc;
-    process_block64(buffer, str, quo, esc);
+    uint64_t str, quo, esc, non_ws;
+    process_block64(buffer, str, quo, esc, non_ws);
 
     uint64_t m = (remaining == 64) ? ~0ULL : (1ULL << remaining) - 1;
     str &= m;
     quo &= m;
     esc &= m;
+    non_ws &= m;
 
     uint64_t escaped = 0;
     uint64_t temp_esc = esc;
@@ -3566,7 +3590,16 @@ BEAST_INLINE size_t fill_bitmap(const char *src, size_t len, BitmapIndex &idx) {
 
     uint64_t clean_quotes = (quo & ~escaped) & m;
     uint64_t in_string = simd::prefix_xor(clean_quotes) ^ prev_in_string;
-    uint64_t structural = (str | clean_quotes) & ~(in_string ^ clean_quotes);
+
+    uint64_t inside = in_string & ~clean_quotes;
+    uint64_t external_non_ws = non_ws & ~inside;
+    uint64_t external_symbols = (str | clean_quotes);
+
+    uint64_t ws_like = (~non_ws & ~inside) | external_symbols;
+    uint64_t vstart = (external_non_ws & ~external_symbols) &
+                      (ws_like << 1 | (prev_non_ws >> 63));
+
+    uint64_t structural = (external_symbols | vstart) & m;
     idx.structural_bits.push_back(structural);
     idx.quote_bits.push_back(clean_quotes);
   }
@@ -3791,13 +3824,13 @@ fill_bitmap_and_find_splits(const char *src, size_t len, int partitions,
   while (p + 64 <= end) {
 
     uint64_t str_bits;
-    uint16_t s0, q0, e0, s1, q1, e1, s2, q2, e2, s3, q3, e3;
+    uint16_t s0, q0, e0, n0, s1, q1, e1, n1, s2, q2, e2, n2, s3, q3, e3, n3;
 
     // 1. Generate Raw Masks (SIMD)
-    classify_structure(p + 0, s0, q0, e0);
-    classify_structure(p + 16, s1, q1, e1);
-    classify_structure(p + 32, s2, q2, e2);
-    classify_structure(p + 48, s3, q3, e3);
+    classify_structure(p + 0, s0, q0, e0, n0);
+    classify_structure(p + 16, s1, q1, e1, n1);
+    classify_structure(p + 32, s2, q2, e2, n2);
+    classify_structure(p + 48, s3, q3, e3, n3);
 
     // Combine for Bitmap
     str_bits = (uint64_t)(s0 | q0) | ((uint64_t)(s1 | q1) << 16) |
@@ -4110,7 +4143,7 @@ fill_bitmap_and_find_splits(const char *src, size_t len, int partitions,
   }
 
   if (p < end) {
-    beast::json::simd::fill_bitmap(p, end - p, idx); // Appends to idx
+    ::beast::json::simd::fill_bitmap(p, end - p, idx); // Appends to idx
   }
 
   return splits;
@@ -4118,25 +4151,25 @@ fill_bitmap_and_find_splits(const char *src, size_t len, int partitions,
 
 // Recursively skips a JSON value.
 BEAST_INLINE const char *skip_value(const char *p, const char *end) {
-  p = beast::json::simd::skip_whitespace(p, end);
+  p = ::beast::json::simd::skip_whitespace(p, end);
   if (p >= end)
     return p;
 
   char c = *p;
   if (c == '"') {
-    return beast::json::simd::skip_string(p, end);
+    return ::beast::json::simd::skip_string(p, end);
   } else if (c == '{') {
     p++;
     while (p < end) {
-      p = beast::json::simd::skip_whitespace(p, end);
+      p = ::beast::json::simd::skip_whitespace(p, end);
       if (p >= end)
         return end;
       if (*p == '}')
         return p + 1;
 
       // Key
-      p = beast::json::simd::skip_string(p, end);
-      p = beast::json::simd::skip_whitespace(p, end);
+      p = ::beast::json::simd::skip_string(p, end);
+      p = ::beast::json::simd::skip_whitespace(p, end);
       if (p < end && *p == ':')
         p++;
       else
@@ -4144,7 +4177,7 @@ BEAST_INLINE const char *skip_value(const char *p, const char *end) {
 
       // Value
       p = skip_value(p, end);
-      p = beast::json::simd::skip_whitespace(p, end);
+      p = ::beast::json::simd::skip_whitespace(p, end);
       if (p < end) {
         if (*p == '}')
           return p + 1;
@@ -4155,14 +4188,14 @@ BEAST_INLINE const char *skip_value(const char *p, const char *end) {
   } else if (c == '[') {
     p++;
     while (p < end) {
-      p = beast::json::simd::skip_whitespace(p, end);
+      p = ::beast::json::simd::skip_whitespace(p, end);
       if (p >= end)
         return end;
       if (*p == ']')
         return p + 1;
 
       p = skip_value(p, end);
-      p = beast::json::simd::skip_whitespace(p, end);
+      p = ::beast::json::simd::skip_whitespace(p, end);
       if (p < end) {
         if (*p == ']')
           return p + 1;
@@ -5706,7 +5739,7 @@ public:
 
 struct ParseOptions {
   bool allow_duplicate_keys = true;
-  bool allow_trailing_commas = true;
+  bool allow_trailing_commas = false;
   bool allow_comments = true;
   bool allow_single_quotes = false;
   bool allow_unquoted_keys = false;
@@ -5791,6 +5824,7 @@ class Parser {
   ParseOptions options_;
   BitmapIndex bitmap_idx_;
   std::optional<BitmapIterator> iter_;
+  int depth_ = 0;
 
 public:
   // Standard Constructor (Const Input - copies strings)
@@ -5844,122 +5878,268 @@ public:
     return res;
   }
 
-  BEAST_INLINE const char *parse_bitmap_flat(const char *p) {
-    uint64_t *stack[256];
-    Type types[256];
+  BEAST_INLINE const char *parse_nitro(const char *p) {
+    if (BEAST_UNLIKELY(!p))
+      return nullptr;
+
+    uint64_t *stack[1024];
+    Type types[1024];
     int depth = -1;
+    bool expect_value = true;
+    bool expect_sep = false;
 
-    const char *curr = p; // Initialize curr
+    const char *curr = p;
+    const char *const base = start_;
+    const char *const end_ptr = end_;
+    const char *last_end = p;
+    uint64_t *tape = tape_head_;
+    BitmapIterator it = *iter_;
 
-    while (true) {
-      char c = *curr;
-      switch (c) {
-      case '{': {
-        if (BEAST_UNLIKELY(depth >= 255))
-          return nullptr;
-        stack[++depth] = tape_head_;
-        types[depth] = Type::Object;
-        push_tape(Element(Type::Object, 0).data);
-        break;
-      }
-      case '[': {
-        if (BEAST_UNLIKELY(depth >= 255))
-          return nullptr;
-        stack[++depth] = tape_head_;
-        types[depth] = Type::Array;
-        push_tape(Element(Type::Array, 0).data);
-        break;
-      }
-      case '}': {
-        if (BEAST_UNLIKELY(depth < 0 || types[depth] != Type::Object))
-          return nullptr;
-        size_t start_idx = stack[depth] - doc_->tape.data();
-        size_t end_idx = tape_head_ - doc_->tape.data();
-        *stack[depth] = Element(Type::Object, end_idx).data;
-        push_tape(Element(Type::Object, start_idx).data);
-        depth--;
-        break;
-      }
-      case ']': {
-        if (BEAST_UNLIKELY(depth < 0 || types[depth] != Type::Array))
-          return nullptr;
-        size_t start_idx = stack[depth] - doc_->tape.data();
-        size_t end_idx = tape_head_ - doc_->tape.data();
-        *stack[depth] = Element(Type::Array, end_idx).data;
-        push_tape(Element(Type::Array, start_idx).data);
-        depth--;
-        break;
-      }
-      case '"': {
-        const char *next = parse_string(curr);
-        if (BEAST_UNLIKELY(!next))
-          return nullptr;
-        iter_->seek(next - start_);
-        break;
-      }
-      case 't': {
-        if (BEAST_LIKELY(curr + 4 <= end_)) {
-          uint32_t word;
-          std::memcpy(&word, curr, 4);
-          if (BEAST_LIKELY(word == 0x65757274)) {
-            push_tape(Element(Type::True, 0).data);
-            iter_->seek((curr + 4) - start_);
-            break;
-          }
-        }
-        return nullptr;
-      }
-      case 'f': {
-        if (BEAST_LIKELY(curr + 5 <= end_)) {
-          uint32_t word;
-          std::memcpy(&word, curr, 4);
-          if (BEAST_LIKELY(word == 0x736C6166 && curr[4] == 'e')) {
-            push_tape(Element(Type::False, 0).data);
-            iter_->seek((curr + 5) - start_);
-            break;
-          }
-        }
-        return nullptr;
-      }
-      case 'n': {
-        if (BEAST_LIKELY(curr + 4 <= end_)) {
-          uint32_t word;
-          std::memcpy(&word, curr, 4);
-          if (BEAST_LIKELY(word == 0x6C6C756E)) {
-            push_tape(Element(Type::Null, 0).data);
-            iter_->seek((curr + 4) - start_);
-            break;
-          }
-        }
-        return nullptr;
-      }
-      case ':':
-      case ',':
-        break;
-      default: {
-        if (BEAST_LIKELY((*curr >= '0' && *curr <= '9') || *curr == '-')) {
-          const char *next = (*curr == '-') ? parse_number_impl<true>(curr + 1)
-                                            : parse_number_impl<false>(curr);
-          if (BEAST_UNLIKELY(!next))
-            return nullptr;
-          iter_->seek(next - start_);
-          break;
-        }
-        return nullptr;
-      }
-      }
+    // Labels as values (Computed Gotos)
+    const void *dispatch_table[256];
+    for (int i = 0; i < 256; ++i)
+      dispatch_table[i] = &&L_error;
 
-      size_t next_pos = iter_->next();
-      if (next_pos == (size_t)-1) {
-        if (depth < 0)
-          return (const char *)end_; // Successfully reached end
-        return nullptr;
-      }
-      curr = start_ + next_pos;
-      if (depth < 0)
-        break;
+    dispatch_table['{'] = &&L_obj_start;
+    dispatch_table['}'] = &&L_obj_end;
+    dispatch_table['['] = &&L_array_start;
+    dispatch_table[']'] = &&L_array_end;
+    dispatch_table['"'] = &&L_string;
+    dispatch_table['t'] = &&L_true;
+    dispatch_table['f'] = &&L_false;
+    dispatch_table['n'] = &&L_null;
+    dispatch_table[':'] = &&L_colon;
+    dispatch_table[','] = &&L_comma;
+    dispatch_table['-'] = &&L_number;
+    for (int i = '0'; i <= '9'; ++i)
+      dispatch_table[i] = &&L_number;
+    dispatch_table['/'] = &&L_comment;
+
+#define DISPATCH() goto *dispatch_table[(uint8_t)*curr]
+#define NEXT()                                                                 \
+  do {                                                                         \
+    size_t next_pos = it.next();                                               \
+    if (BEAST_UNLIKELY(next_pos == (size_t)-1))                                \
+      goto L_finish;                                                           \
+    curr = base + next_pos;                                                    \
+    DISPATCH();                                                                \
+  } while (0)
+
+    DISPATCH();
+
+  L_obj_start:
+    if (BEAST_UNLIKELY(!expect_value || depth >= 1023))
+      goto L_error;
+    stack[++depth] = tape;
+    types[depth] = Type::Object;
+    *tape++ = Element(Type::Object, 0).data;
+    expect_value = true;
+    expect_sep = false;
+    NEXT();
+
+  L_array_start:
+    if (BEAST_UNLIKELY(!expect_value || depth >= 1023))
+      goto L_error;
+    stack[++depth] = tape;
+    types[depth] = Type::Array;
+    *tape++ = Element(Type::Array, 0).data;
+    expect_value = true;
+    expect_sep = false;
+    NEXT();
+
+  L_obj_end:
+    if (BEAST_UNLIKELY(depth < 0 || types[depth] != Type::Object))
+      goto L_error;
+    if (expect_value && !options_.allow_trailing_commas) {
+      if (stack[depth] != tape - 1)
+        goto L_error;
     }
-    return curr;
+    {
+      size_t s_idx = stack[depth] - doc_->tape.data();
+      size_t e_idx = tape - doc_->tape.data();
+      *stack[depth] = Element(Type::Object, e_idx).data;
+      *tape++ = Element(Type::Object, s_idx).data;
+    }
+    last_end = curr + 1;
+    depth--;
+    expect_value = false;
+    expect_sep = true;
+    NEXT();
+
+  L_array_end:
+    if (BEAST_UNLIKELY(depth < 0 || types[depth] != Type::Array))
+      goto L_error;
+    if (expect_value && !options_.allow_trailing_commas) {
+      if (stack[depth] != tape - 1)
+        goto L_error;
+    }
+    {
+      size_t s_idx = stack[depth] - doc_->tape.data();
+      size_t e_idx = tape - doc_->tape.data();
+      *stack[depth] = Element(Type::Array, e_idx).data;
+      *tape++ = Element(Type::Array, s_idx).data;
+    }
+    last_end = curr + 1;
+    depth--;
+    expect_value = false;
+    expect_sep = true;
+    NEXT();
+
+  L_string:
+    if (depth >= 0 && types[depth] == Type::Object && !expect_value &&
+        !expect_sep) {
+      // Key
+    } else if (!expect_value) {
+      goto L_error;
+    }
+    {
+      tape_head_ = tape;
+      last_end = parse_string(curr);
+      if (BEAST_UNLIKELY(!last_end))
+        goto L_error;
+      curr = last_end;
+      tape = tape_head_;
+      // Optimization: No seek! Skip closing quote in bitmap
+      it.next();
+    }
+    if (depth >= 0 && types[depth] == Type::Object && !expect_sep) {
+      expect_value = false;
+    } else {
+      expect_value = false;
+      expect_sep = true;
+    }
+    NEXT();
+
+  L_number:
+    if (BEAST_UNLIKELY(!expect_value))
+      goto L_error;
+    {
+      tape_head_ = tape;
+      last_end = (*curr == '-') ? parse_number_impl<true>(curr + 1)
+                                : parse_number_impl<false>(curr);
+      if (BEAST_UNLIKELY(!last_end))
+        goto L_error;
+      curr = last_end;
+      tape = tape_head_;
+      // Optimization: No seek needed for numbers!
+    }
+    expect_value = false;
+    expect_sep = true;
+    NEXT();
+
+  L_true:
+    if (BEAST_UNLIKELY(!expect_value))
+      goto L_error;
+    if (BEAST_LIKELY(curr + 4 <= end_ptr)) {
+      uint32_t word;
+      std::memcpy(&word, curr, 4);
+      if (BEAST_LIKELY(word == 0x65757274)) {
+        *tape++ = Element(Type::True, 0).data;
+        last_end = curr + 4;
+        if (last_end < end_ptr && !lookup::is_whitespace(*last_end) &&
+            !lookup::is_structural(*last_end))
+          goto L_error;
+        expect_value = false;
+        expect_sep = true;
+        NEXT();
+      }
+    }
+    goto L_error;
+
+  L_false:
+    if (BEAST_UNLIKELY(!expect_value))
+      goto L_error;
+    if (BEAST_LIKELY(curr + 5 <= end_ptr)) {
+      uint32_t word;
+      std::memcpy(&word, curr, 4);
+      if (BEAST_LIKELY(word == 0x736C6166 && curr[4] == 'e')) {
+        *tape++ = Element(Type::False, 0).data;
+        last_end = curr + 5;
+        if (last_end < end_ptr && !lookup::is_whitespace(*last_end) &&
+            !lookup::is_structural(*last_end))
+          goto L_error;
+        expect_value = false;
+        expect_sep = true;
+        NEXT();
+      }
+    }
+    goto L_error;
+
+  L_null:
+    if (BEAST_UNLIKELY(!expect_value))
+      goto L_error;
+    if (BEAST_LIKELY(curr + 4 <= end_ptr)) {
+      uint32_t word;
+      std::memcpy(&word, curr, 4);
+      if (BEAST_LIKELY(word == 0x6C6C756E)) {
+        *tape++ = Element(Type::Null, 0).data;
+        last_end = curr + 4;
+        if (last_end < end_ptr && !lookup::is_whitespace(*last_end) &&
+            !lookup::is_structural(*last_end))
+          goto L_error;
+        expect_value = false;
+        expect_sep = true;
+        NEXT();
+      }
+    }
+    goto L_error;
+
+  L_colon:
+    if (depth < 0 || types[depth] != Type::Object || expect_value || expect_sep)
+      goto L_error;
+    expect_value = true;
+    NEXT();
+
+  L_comma:
+    if (depth < 0 || expect_value || !expect_sep)
+      goto L_error;
+    expect_value = true;
+    expect_sep = false;
+    NEXT();
+
+  L_comment:
+    if (!options_.allow_comments)
+      goto L_error;
+    if (curr + 1 >= end_ptr)
+      goto L_error;
+    {
+      char next_char = curr[1];
+      if (next_char == '/') {
+        curr += 2;
+        while (curr < end_ptr && *curr != '\n')
+          curr++;
+      } else if (next_char == '*') {
+        curr += 2;
+        while (curr + 1 < end_ptr) {
+          if (*curr == '*' && curr[1] == '/') {
+            curr += 2;
+            goto comment_done;
+          }
+          curr++;
+        }
+        goto L_error;
+      comment_done:;
+      } else
+        goto L_error;
+    }
+    // For comments, we still need seek because we don't know how many
+    // structural bits we skipped inside or at the end of the comment
+    last_end = curr;
+    it.seek(curr - base);
+    NEXT();
+
+  L_finish:
+    tape_head_ = tape;
+    *iter_ = it;
+    if (depth < 0) {
+      return last_end;
+    }
+    return nullptr;
+
+  L_error:
+    tape_head_ = tape;
+    *iter_ = it;
+    return nullptr;
   }
 
   ParseResult parse() {
@@ -5998,7 +6178,7 @@ public:
       if (next_pos == (size_t)-1)
         return {Error::InvalidJson, 0, 0, 0, "Empty or whitespace-only input"};
       p = start_ + next_pos;
-      p = parse_bitmap_flat(p);
+      p = parse_nitro(p);
     } else {
       p = simd::skip_whitespace(p, (const char *)end_);
       if (p >= end_)
@@ -6021,6 +6201,44 @@ public:
 
     // Commit final position
     p_ = (char *)p;
+
+    // Check for trailing junk if we're not using bitmap or if we finished
+    // bitmap flat
+    const char *final_p = p_;
+    while (final_p < end_) {
+      if (lookup::is_whitespace(*final_p)) {
+        final_p++;
+        continue;
+      }
+
+      if (options_.allow_comments && *final_p == '/') {
+        if (final_p + 1 < end_) {
+          char next = final_p[1];
+          if (next == '/') {
+            final_p += 2;
+            while (final_p < end_ && *final_p != '\n') {
+              final_p++;
+            }
+            continue;
+          } else if (next == '*') {
+            final_p += 2;
+            while (final_p + 1 < end_) {
+              if (*final_p == '*' && final_p[1] == '/') {
+                final_p += 2;
+                goto trailing_comment_done;
+              }
+              final_p++;
+            }
+            return report_error(Error::InvalidJson,
+                                "Unclosed trailing comment");
+          trailing_comment_done:
+            continue;
+          }
+        }
+      }
+
+      return report_error(Error::InvalidJson, "Trailing junk after JSON");
+    }
 
     // Commit used size
     size_t used_tape = tape_head_ - doc_->tape.data();
@@ -6045,23 +6263,20 @@ public:
   // Assumes p is already at a non-whitespace character
   template <bool Padded>
   BEAST_INLINE const char *parse_value_impl(const char *p) {
-    if constexpr (!Padded) {
-      if (BEAST_UNLIKELY(p >= end_)) {
-        p_ = end_;
-        return nullptr;
-      }
-    }
+    if (BEAST_UNLIKELY(++depth_ > 255))
+      return nullptr;
 
+    const char *res = nullptr;
     switch (*p) {
     case '{':
-      return parse_object_impl<Padded>(p);
+      res = parse_object_impl<Padded>(p);
+      break;
     case '[':
-      return parse_array_impl<Padded>(p);
+      res = parse_array_impl<Padded>(p);
+      break;
     case '"': {
-      const char *res = parse_string(p);
-      if (options_.use_bitmap && res)
-        iter_->seek(res - start_);
-      return res;
+      res = parse_string(p);
+      break;
     }
     case 't':
       if (BEAST_LIKELY(p + 4 <= end_)) {
@@ -6069,63 +6284,44 @@ public:
         std::memcpy(&word, p, 4);
         if (BEAST_LIKELY(word == 0x65757274)) {
           push_tape(Element(Type::True, 0).data);
-          const char *res = p + 4;
-          if (options_.use_bitmap)
-            iter_->seek(res - start_);
-          return res;
+          res = p + 4;
         }
       }
-      p_ = end_;
-      return nullptr;
+      break;
     case 'f':
       if (BEAST_LIKELY(p + 5 <= end_)) {
         uint32_t word;
         std::memcpy(&word, p, 4);
         if (BEAST_LIKELY(word == 0x736C6166 && p[4] == 'e')) {
           push_tape(Element(Type::False, 0).data);
-          const char *res = p + 5;
-          if (options_.use_bitmap)
-            iter_->seek(res - start_);
-          return res;
+          res = p + 5;
         }
       }
-      p_ = end_;
-      return nullptr;
+      break;
     case 'n':
       if (BEAST_LIKELY(p + 4 <= end_)) {
         uint32_t word;
         std::memcpy(&word, p, 4);
         if (BEAST_LIKELY(word == 0x6C6C756E)) {
           push_tape(Element(Type::Null, 0).data);
-          const char *res = p + 4;
-          if (options_.use_bitmap)
-            iter_->seek(res - start_);
-          return res;
+          res = p + 4;
         }
       }
-      p_ = end_;
-      return nullptr;
-    case '-':
-    case '0':
-    case '1':
-    case '2':
-    case '3':
-    case '4':
-    case '5':
-    case '6':
-    case '7':
-    case '8':
-    case '9': {
-      const char *res = (*p == '-') ? parse_number_impl<true>(p + 1)
-                                    : parse_number_impl<false>(p);
-      if (options_.use_bitmap && res)
-        iter_->seek(res - start_);
-      return res;
-    }
+      break;
     default:
-      p_ = (char *)p;
-      return nullptr;
+      if (BEAST_LIKELY((*p >= '0' && *p <= '9') || *p == '-')) {
+        res = parse_number(p); // Call the non-templated version
+      } else {
+        p_ = (char *)p;
+        return nullptr;
+      }
+      break;
     }
+
+    depth_--;
+    if (res && options_.use_bitmap)
+      iter_->seek(res - start_);
+    return res;
   }
 
   // Wrapper for existing code
@@ -6649,7 +6845,7 @@ public:
         }
       } else {
         // Negative Integer
-        // If len < 19, fits in int64_t.
+        // If len < 18, fits in int64_t (max -9e17).
         // If -u fits in 56-bit inline, use Int64.
         // If fits in 64-bit, we don't have Int64Full.
         // Fallback to Double for large negatives for now.
@@ -6757,8 +6953,22 @@ public:
           if (next_pos == (size_t)-1)
             return nullptr;
           p = start_ + next_pos;
+          if (*p == ']') {
+            if (options_.allow_trailing_commas) {
+              p++;
+              break;
+            }
+            return nullptr;
+          }
         } else {
           p = simd::skip_whitespace(p, (const char *)end_);
+          if (*p == ']') {
+            if (options_.allow_trailing_commas) {
+              p++;
+              break;
+            }
+            return nullptr;
+          }
         }
         continue;
       } else if (c == ']') {
@@ -6862,8 +7072,22 @@ public:
           if (next_pos == (size_t)-1)
             return nullptr;
           p = start_ + next_pos;
+          if (*p == '}') {
+            if (options_.allow_trailing_commas) {
+              p++;
+              break;
+            }
+            return nullptr;
+          }
         } else {
           p = simd::skip_whitespace(p, (const char *)end_);
+          if (*p == '}') {
+            if (options_.allow_trailing_commas) {
+              p++;
+              break;
+            }
+            return nullptr;
+          }
         }
         continue;
       } else if (c == '}') {
@@ -7004,57 +7228,9 @@ BEAST_INLINE char *to_chars(char *buffer, uint64_t val) {
     return end;
   }
 
-  // > 8 Digits (Slow Path for now, or just extend logic)
-  // Max u64 is ~1.8e19 (20 digits).
-  // Just use simple loop.
-  char *p = buffer;
-  char temp_buf[24];
-  char *tp = temp_buf + 23;
-  *tp = '\0';
-
-  do {
-    uint64_t index = (val % 100) * 2;
-    val /= 100;
-    tp -= 2;
-    std::memcpy(tp, digits_lz + index, 2);
-  } while (val >= 100);
-
-  if (val > 0) {
-    if (val < 10) {
-      *--tp = '0' + (char)val;
-    } else {
-      tp -= 2;
-      std::memcpy(tp, digits_lz + val * 2, 2);
-    }
-  }
-
-  // Copy back
-  size_t len = (temp_buf + 23) - tp;
-  // If we had leading zero from 2-digit pair when val < 10 check above?
-  // Wait, if loop ends with val=0?
-  // The loop condition is val >= 100.
-  // If input was 100, val becomes 1. Loop ends. val > 0 block runs.
-  // bytes: 01 for '1'.
-  // But wait `digits_lz + 1*2` is "01". We want "1".
-
-  // Ah, the block:
-  // if (val < 10) *--tp = '0' + val; else { memcpy };
-  // handles it correctly. "01" -> '1' written? NO.
-  // "01" are 2 bytes. "0" and "1".
-  // Index 2 is "01".
-
-  // My loop block for >8 digits has `tp -= 2`.
-  // If val=1, it writes 2 bytes "01". That's WRONG for high digits.
-  // Leading zero issue.
-
-  // Correct simple loop:
-  // We can just rely on std::to_chars for massive numbers as they are rare?
-  // Or just fix the loop.
-
+  // > 8 Digits: Fallback to std::to_chars for correctness
+  // The previous manual loop was modifying val before calling std::to_chars.
   auto res = std::to_chars(buffer, buffer + 32, val);
-  // Wait, I overwrote val.
-  // Let's just fallback to std::to_chars for n >= 10^8 for
-  // safety/correctness first. It's already 4x faster than naive.
   return res.ptr;
 }
 
@@ -7260,11 +7436,17 @@ public:
 
         // Size Check (String can be large)
         if (BEAST_UNLIKELY(cursor + len * 6 + 32 > limit)) {
-          size_t curl = cursor - start;
-          out_.resize(curl + len * 6 + 1024);
-          start = &out_[0];
-          cursor = start + curl;
-          limit = start + out_.capacity();
+          size_t used = cursor - start;
+          size_t new_cap = used + len * 6 + 4096;
+          char *new_start = (char *)std::realloc(start, new_cap);
+          if (!new_start) {
+            std::free(start);
+            std::free(stack_start);
+            return;
+          }
+          start = new_start;
+          cursor = start + used;
+          limit = start + new_cap;
         }
 
         *cursor++ = '"';
@@ -7812,8 +7994,11 @@ public:
   }
 
   int64_t get_int64() const {
-    if (type() == Type::Int64)
-      return (int64_t)(doc_->tape[index_] & 0x00FFFFFFFFFFFFFFULL);
+
+    if (type() == Type::Int64) {
+      // Sign-extend 56-bit value
+      return ((int64_t)(doc_->tape[index_] << 8)) >> 8;
+    }
     if (type() == Type::Int64Full) {
       uint64_t payload = doc_->tape[index_ + 1];
       int64_t val;
@@ -7943,6 +8128,7 @@ public:
   }
 
   bool is_null() const { return type() == Type::Null; }
+  bool is_double() const { return type() == Type::Double; }
   bool is_bool() const { return type() == Type::True || type() == Type::False; }
   bool is_number() const {
     return type() == Type::Double || type() == Type::Int64 ||
@@ -8100,6 +8286,9 @@ public:
     const TapeView *view;
     uint64_t current;
 
+    bool operator==(const Iterator &other) const {
+      return current == other.current;
+    }
     bool operator!=(const Iterator &other) const {
       return current != other.current;
     }
@@ -8179,7 +8368,7 @@ inline Value parse_parallel(
       mr = std::pmr::get_default_resource();
     beast::json::BitmapIndex idx;
     beast::json::Allocator alloc(mr);
-    beast::json::tape::BitmapParser parser(json, len, idx, alloc);
+    ::beast::json::tape::BitmapParser parser(json, len, idx, alloc);
     return parser.parse();
   }
 
@@ -8187,13 +8376,13 @@ inline Value parse_parallel(
   beast::json::BitmapIndex global_idx;
   global_idx.reserve(len);
 
-  auto splits = beast::json::simd::fill_bitmap_and_find_splits(
+  auto splits = ::beast::json::simd::fill_bitmap_and_find_splits(
       json, len, partitions, global_idx);
 
   if (splits.empty()) {
     std::cout << "[Par] No splits found, fallback.\n";
     beast::json::Allocator alloc(mr);
-    beast::json::tape::BitmapParser parser(json, len, global_idx, alloc);
+    ::beast::json::tape::BitmapParser parser(json, len, global_idx, alloc);
     return parser.parse();
   }
 
@@ -8212,7 +8401,8 @@ inline Value parse_parallel(
         std::launch::async,
         [chunk_start, chunk_end, json, len, &global_idx, mr]() -> ResultPair {
           beast::json::Allocator alloc(mr); // Use shared arena
-          beast::json::tape::BitmapParser parser(json, len, global_idx, alloc);
+          ::beast::json::tape::BitmapParser parser(json, len, global_idx,
+                                                   alloc);
 
           size_t start_off = chunk_start - json;
           size_t end_off = chunk_end - json;
@@ -8249,10 +8439,41 @@ inline Value parse_parallel(
 // ============================================================================
 namespace reflect {
 
-// 1. Meta Type Trait
-template <typename T> struct meta {
-  static constexpr auto info() { return std::make_tuple(); }
-};
+template <typename T> struct meta {};
+
+template <typename T, typename = void> struct is_map : std::false_type {};
+template <typename T>
+struct is_map<T, std::void_t<typename T::key_type, typename T::mapped_type,
+                             decltype(std::begin(std::declval<T &>())),
+                             decltype(std::end(std::declval<T &>()))>>
+    : std::true_type {};
+
+template <typename T> constexpr bool is_map_v = is_map<T>::value;
+
+template <typename T, typename = void> struct is_sequence : std::false_type {};
+template <typename T>
+struct is_sequence<T, std::void_t<decltype(std::begin(std::declval<T &>())),
+                                  decltype(std::end(std::declval<T &>()))>>
+    : std::integral_constant<bool, !is_map_v<T>> {};
+
+template <typename T> constexpr bool is_sequence_v = is_sequence<T>::value;
+
+template <typename T, typename = void> struct reflects : std::false_type {};
+template <typename T>
+struct reflects<T, std::enable_if_t<!is_sequence_v<T> && !is_map_v<T>,
+                                    std::void_t<decltype(meta<T>::info())>>>
+    : std::true_type {};
+
+template <typename T> constexpr bool reflects_v = reflects<T>::value;
+
+template <typename T, typename = void>
+struct has_subscript : std::false_type {};
+template <typename T>
+struct has_subscript<
+    T, std::void_t<
+           decltype(std::declval<T &>()[std::declval<typename T::key_type>()])>>
+    : std::true_type {};
+template <typename T> constexpr bool has_subscript_v = has_subscript<T>::value;
 
 // 2. Preprocessor-based Member Iteration (Up to 20 fields)
 #define BEAST_ARG_N(_1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13,    \
@@ -8323,7 +8544,7 @@ struct DirectSerializer {
     out.resize(current_size + sv.size() * 6 + 32);
 
     char *start = out.data() + current_size;
-    char *end = beast::json::simd::escape_string(sv.data(), sv.size(), start);
+    char *end = ::beast::json::simd::escape_string(sv.data(), sv.size(), start);
 
     // Shrink back
     out.resize(end - out.data());
@@ -8338,27 +8559,48 @@ struct DirectSerializer {
       out.append("false", 5);
   }
 
+  void write(int8_t v) { write((int32_t)v); }
+  void write(uint8_t v) { write((uint32_t)v); }
+  void write(int16_t v) { write((int32_t)v); }
+  void write(uint16_t v) { write((uint32_t)v); }
+
   void write(int32_t v) {
     char buf[32];
-    out.append(buf, beast::json::tape::u64toa::to_chars(
-                        buf, (uint64_t)(v >= 0 ? v : -v)) -
-                        buf);
+    if (v >= 0)
+      out.append(buf,
+                 ::beast::json::tape::u64toa::to_chars(buf, (uint64_t)v) - buf);
+    else {
+      out.push_back('-');
+      out.append(buf, ::beast::json::tape::u64toa::to_chars(buf, (uint64_t)-v) -
+                          buf);
+    }
   }
+
+  void write(uint32_t v) {
+    char buf[32];
+    out.append(buf,
+               ::beast::json::tape::u64toa::to_chars(buf, (uint64_t)v) - buf);
+  }
+
   void write(int64_t v) {
     char buf[32];
     if (v >= 0)
       out.append(buf,
-                 beast::json::tape::u64toa::to_chars(buf, (uint64_t)v) - buf);
+                 ::beast::json::tape::u64toa::to_chars(buf, (uint64_t)v) - buf);
     else {
       out.push_back('-');
-      out.append(buf,
-                 beast::json::tape::u64toa::to_chars(buf, (uint64_t)-v) - buf);
+      out.append(buf, ::beast::json::tape::u64toa::to_chars(buf, (uint64_t)-v) -
+                          buf);
     }
   }
+
   void write(uint64_t v) {
     char buf[32];
-    out.append(buf, beast::json::tape::u64toa::to_chars(buf, v) - buf);
+    out.append(buf, ::beast::json::tape::u64toa::to_chars(buf, v) - buf);
   }
+
+  void write(float v) { write((double)v); }
+
   void write(double v) {
     char buf[64];
     auto res = std::to_chars(buf, buf + 64, v);
@@ -8372,28 +8614,149 @@ struct DirectSerializer {
     for (size_t i = 0; i < vec.size(); ++i) {
       if (i > 0)
         out.push_back(',');
-      write(vec[i]);
+      this->write(vec[i]);
     }
     out.push_back(']');
   }
 
-  template <typename T, typename = std::enable_if_t<std::is_class_v<T>>>
+  template <typename T> void write(const std::optional<T> &opt) {
+    if (opt)
+      this->write(*opt);
+    else
+      this->write(nullptr);
+  }
+
+  template <typename T> void write(const std::unique_ptr<T> &ptr) {
+    if (ptr)
+      this->write(*ptr);
+    else
+      this->write(nullptr);
+  }
+
+  template <typename T> void write(const std::shared_ptr<T> &ptr) {
+    if (ptr)
+      this->write(*ptr);
+    else
+      this->write(nullptr);
+  }
+
+  // std::pair
+  template <typename T1, typename T2> void write(const std::pair<T1, T2> &p) {
+    out.push_back('[');
+    this->write(p.first);
+    out.push_back(',');
+    this->write(p.second);
+    out.push_back(']');
+  }
+
+  // std::tuple (Recursive Unroll)
+  template <typename... Args> void write(const std::tuple<Args...> &t) {
+    out.push_back('[');
+    std::apply(
+        [&](const auto &...args) {
+          size_t n = 0;
+          ((n++ > 0 ? out.push_back(',') : void(), this->write(args)), ...);
+        },
+        t);
+    out.push_back(']');
+  }
+
+  // std::array
+  template <typename T, size_t N> void write(const std::array<T, N> &arr) {
+    out.push_back('[');
+    for (size_t i = 0; i < N; ++i) {
+      if (i > 0)
+        out.push_back(',');
+      this->write(arr[i]);
+    }
+    out.push_back(']');
+  }
+
+  // std::filesystem::path
+  void write(const std::filesystem::path &p) { write(p.string()); }
+
+  // std::variant
+  template <typename... Ts> void write(const std::variant<Ts...> &v) {
+    std::visit([&](const auto &arg) { this->write(arg); }, v);
+  }
+
+  // ----------------------------------------------------------------------------
+  // Chrono Support (Phase 11) - DirectSerializer
+  // ----------------------------------------------------------------------------
+
+  // Duration
+  template <typename Rep, typename Period>
+  void write(const std::chrono::duration<Rep, Period> &d) {
+    if constexpr (std::is_integral_v<Rep>) {
+      write(static_cast<int64_t>(d.count()));
+    } else {
+      write(d.count());
+    }
+  }
+
+  // Time Point
+  template <typename Clock, typename Duration>
+  void write(const std::chrono::time_point<Clock, Duration> &tp) {
+    auto d = tp.time_since_epoch();
+    if constexpr (std::is_integral_v<typename Duration::rep>) {
+      write(static_cast<int64_t>(d.count()));
+    } else {
+      write(d.count());
+    }
+  }
+
+  // ----------------------------------------------------------------------------
+  // Bitset Support (Phase 11) - DirectSerializer
+  // ----------------------------------------------------------------------------
+  template <size_t N> void write(const std::bitset<N> &bs) {
+    write(bs.to_string());
+  }
+
+  template <typename T,
+            typename = std::enable_if_t<(is_sequence_v<T> || is_map_v<T> ||
+                                         reflects_v<T>) &&
+                                        !std::is_same_v<T, std::string> &&
+                                        !std::is_same_v<T, std::string_view>>>
   void write(const T &obj) {
-    constexpr auto members = meta<T>::info();
-    if constexpr (std::tuple_size_v<decltype(members)> > 0) {
+    if constexpr (reflects_v<T>) {
+      constexpr auto members = meta<T>::info();
+      if constexpr (std::tuple_size_v<decltype(members)> > 0) {
+        out.push_back('{');
+        std::apply(
+            [&](const auto &...args) {
+              size_t n = 0;
+              (((n++ > 0 ? out.push_back(',') : void()), out.push_back('"'),
+                out.append(args.first), out.append("\":"),
+                this->write(obj.*(args.second))),
+               ...);
+            },
+            members);
+        out.push_back('}');
+      } else {
+        out.append("{}");
+      }
+    } else if constexpr (is_map_v<T>) {
       out.push_back('{');
-      std::apply(
-          [&](const auto &...args) {
-            size_t n = 0;
-            (((n++ > 0 ? out.push_back(',') : void()), out.push_back('"'),
-              out.append(args.first), out.append("\":"),
-              write(obj.*(args.second))),
-             ...);
-          },
-          members);
+      bool first = true;
+      for (const auto &item : obj) {
+        if (!first)
+          out.push_back(',');
+        this->write(item.first);
+        out.push_back(':');
+        this->write(item.second);
+        first = false;
+      }
       out.push_back('}');
     } else {
-      out.append("{}");
+      out.push_back('[');
+      bool first = true;
+      for (const auto &item : obj) {
+        if (!first)
+          out.push_back(',');
+        this->write(item);
+        first = false;
+      }
+      out.push_back(']');
     }
   }
 };
@@ -8402,46 +8765,131 @@ struct DirectSerializer {
 // 6. Deserialization (TapeView -> Struct)
 namespace reflect {
 
-template <typename T>
-Error bind_value(const beast::json::tape::TapeView &v, T &obj);
+// Forward declaration for reflected structs to handle nested
+// structures
+template <typename T, typename = std::enable_if_t<reflects_v<T>>>
+Error bind_value(const ::beast::json::tape::TapeView &v, T &obj);
 
 // Primitive Overloads
-inline Error bind_value(const beast::json::tape::TapeView &v, int32_t &i) {
+inline Error bind_value(const ::beast::json::tape::TapeView &v, int8_t &i) {
   if (v.is_number()) {
+    if (v.is_double()) {
+      double d = v.get_double();
+      if ((double)(int64_t)d != d)
+        return Error::TypeMismatch;
+    }
+    i = (int8_t)v.get_int64();
+    return Error::Ok;
+  }
+  return Error::TypeMismatch;
+}
+inline Error bind_value(const ::beast::json::tape::TapeView &v, uint8_t &u) {
+  if (v.is_number()) {
+    if (v.is_double()) {
+      double d = v.get_double();
+      if ((double)(int64_t)d != d || d < 0)
+        return Error::TypeMismatch;
+    }
+    u = (uint8_t)v.get_uint64();
+    return Error::Ok;
+  }
+  return Error::TypeMismatch;
+}
+inline Error bind_value(const ::beast::json::tape::TapeView &v, int16_t &i) {
+  if (v.is_number()) {
+    if (v.is_double()) {
+      double d = v.get_double();
+      if ((double)(int64_t)d != d)
+        return Error::TypeMismatch;
+    }
+    i = (int16_t)v.get_int64();
+    return Error::Ok;
+  }
+  return Error::TypeMismatch;
+}
+inline Error bind_value(const ::beast::json::tape::TapeView &v, uint16_t &u) {
+  if (v.is_number()) {
+    if (v.is_double()) {
+      double d = v.get_double();
+      if ((double)(int64_t)d != d || d < 0)
+        return Error::TypeMismatch;
+    }
+    u = (uint16_t)v.get_uint64();
+    return Error::Ok;
+  }
+  return Error::TypeMismatch;
+}
+inline Error bind_value(const ::beast::json::tape::TapeView &v, int32_t &i) {
+  if (v.is_number()) {
+    if (v.is_double()) {
+      double d = v.get_double();
+      if ((double)(int64_t)d != d)
+        return Error::TypeMismatch;
+    }
     i = (int32_t)v.get_int64();
     return Error::Ok;
   }
   return Error::TypeMismatch;
 }
-inline Error bind_value(const beast::json::tape::TapeView &v, int64_t &i) {
+inline Error bind_value(const ::beast::json::tape::TapeView &v, uint32_t &u) {
   if (v.is_number()) {
+    if (v.is_double()) {
+      double d = v.get_double();
+      if ((double)(int64_t)d != d || d < 0)
+        return Error::TypeMismatch;
+    }
+    u = (uint32_t)v.get_uint64();
+    return Error::Ok;
+  }
+  return Error::TypeMismatch;
+}
+inline Error bind_value(const ::beast::json::tape::TapeView &v, int64_t &i) {
+  if (v.is_number()) {
+    if (v.is_double()) {
+      double d = v.get_double();
+      if ((double)(int64_t)d != d)
+        return Error::TypeMismatch;
+    }
     i = v.get_int64();
     return Error::Ok;
   }
   return Error::TypeMismatch;
 }
-inline Error bind_value(const beast::json::tape::TapeView &v, uint64_t &u) {
+inline Error bind_value(const ::beast::json::tape::TapeView &v, uint64_t &u) {
   if (v.is_number()) {
-    u = (uint64_t)v.get_int64();
+    if (v.is_double()) {
+      double d = v.get_double();
+      if ((double)(int64_t)d != d || d < 0)
+        return Error::TypeMismatch;
+    }
+    u = v.get_uint64();
     return Error::Ok;
   }
   return Error::TypeMismatch;
 }
-inline Error bind_value(const beast::json::tape::TapeView &v, double &d) {
+inline Error bind_value(const ::beast::json::tape::TapeView &v, float &f) {
+  if (v.is_number()) {
+    f = (float)v.get_double();
+    return Error::Ok;
+  }
+  return Error::TypeMismatch;
+}
+inline Error bind_value(const ::beast::json::tape::TapeView &v, double &d) {
   if (v.is_number()) {
     d = v.get_double();
     return Error::Ok;
   }
   return Error::TypeMismatch;
 }
-inline Error bind_value(const beast::json::tape::TapeView &v, bool &b) {
+inline Error bind_value(const ::beast::json::tape::TapeView &v, bool &b) {
   if (v.is_bool()) {
     b = v.get_bool();
     return Error::Ok;
   }
   return Error::TypeMismatch;
 }
-inline Error bind_value(const beast::json::tape::TapeView &v, std::string &s) {
+inline Error bind_value(const ::beast::json::tape::TapeView &v,
+                        std::string &s) {
   if (v.is_string()) {
     s = std::string(v.get_string());
     return Error::Ok;
@@ -8449,32 +8897,322 @@ inline Error bind_value(const beast::json::tape::TapeView &v, std::string &s) {
   return Error::TypeMismatch;
 }
 
-// Vector Overload
-template <typename T>
-Error bind_value(const beast::json::tape::TapeView &v, std::vector<T> &vec) {
+// ----------------------------------------------------------------------------
+// Extended STL Support (Phase 10)
+// ----------------------------------------------------------------------------
+
+// std::pair
+template <typename T1, typename T2>
+Error bind_value(const ::beast::json::tape::TapeView &v, std::pair<T1, T2> &p) {
   if (!v.is_array())
     return Error::TypeMismatch;
-  vec.clear();
+
+  auto it = v.begin();
+  if (it == v.end())
+    return Error::ArrayTooShort;
+
+  Error err;
+  if ((err = bind_value(*it, p.first)) != Error::Ok)
+    return err;
+
+  ++it;
+  if (it == v.end())
+    return Error::ArrayTooShort;
+
+  if ((err = bind_value(*it, p.second)) != Error::Ok)
+    return err;
+
+  return Error::Ok;
+}
+
+// std::tuple (Recursive Unroll)
+template <typename Tuple, size_t... Is>
+Error bind_tuple_impl(const ::beast::json::tape::TapeView &v, Tuple &t,
+                      std::index_sequence<Is...>) {
+  if (!v.is_array())
+    return Error::TypeMismatch;
+
   Error err = Error::Ok;
-  v.for_each_array([&](const beast::json::tape::TapeView &item) {
+  bool ok =
+      (((err = bind_value(v[Is], std::get<Is>(t))), (err == Error::Ok)) && ...);
+
+  return ok ? Error::Ok : err;
+}
+
+template <typename... Args>
+Error bind_value(const ::beast::json::tape::TapeView &v,
+                 std::tuple<Args...> &t) {
+  return bind_tuple_impl(v, t, std::index_sequence_for<Args...>{});
+}
+
+// std::array
+template <typename T, size_t N>
+Error bind_value(const ::beast::json::tape::TapeView &v,
+                 std::array<T, N> &arr) {
+  if (!v.is_array())
+    return Error::TypeMismatch;
+
+  size_t i = 0;
+  Error final_err = Error::Ok;
+
+  v.for_each_array([&](const ::beast::json::tape::TapeView &item) {
+    if (final_err != Error::Ok)
+      return;
+    if (i >= N) {
+      return;
+    }
+    final_err = bind_value(item, arr[i++]);
+  });
+
+  if (final_err != Error::Ok)
+    return final_err;
+  if (i < N)
+    return Error::ArrayTooShort;
+  return Error::Ok;
+}
+
+// std::filesystem::path
+inline Error bind_value(const ::beast::json::tape::TapeView &v,
+                        std::filesystem::path &p) {
+  if (v.is_string()) {
+    p = std::string(v.get_string());
+    return Error::Ok;
+  }
+  return Error::TypeMismatch;
+}
+
+// std::variant helper
+template <typename Variant, size_t I = 0>
+Error bind_variant_helper(const ::beast::json::tape::TapeView &v,
+                          Variant &var) {
+  if constexpr (I >= std::variant_size_v<Variant>) {
+    return Error::TypeMismatch; // None matched
+  } else {
+    using Type = std::variant_alternative_t<I, Variant>;
+    Type val;
+    Error err = bind_value(v, val);
+    if (err == Error::Ok) {
+      var = std::move(val);
+      return Error::Ok;
+    }
+    return bind_variant_helper<Variant, I + 1>(v, var);
+  }
+}
+
+template <typename... Ts>
+Error bind_value(const ::beast::json::tape::TapeView &v,
+                 std::variant<Ts...> &var) {
+  return bind_variant_helper<std::variant<Ts...>>(v, var);
+}
+
+// Vector Overload
+// 1. Sequence Containers (push_back)
+template <typename T, typename = std::enable_if_t<!reflects_v<T>>>
+auto bind_value(const ::beast::json::tape::TapeView &v, T &container)
+    -> decltype(container.push_back(std::declval<typename T::value_type>()),
+                Error()) {
+  if (!v.is_array())
+    return Error::TypeMismatch;
+  container.clear();
+  Error err = Error::Ok;
+  v.for_each_array([&](const ::beast::json::tape::TapeView &item) {
     if (err != Error::Ok)
       return;
-    T val;
+    typename T::value_type val;
     if ((err = bind_value(item, val)) == Error::Ok) {
-      vec.push_back(std::move(val));
+      container.push_back(std::move(val));
     }
   });
   return err;
 }
 
-// Struct Overload (Reflection)
+// 2. Set-like Containers (insert)
+template <typename T,
+          typename = std::enable_if_t<!reflects_v<T> && !is_map_v<T>>>
+auto bind_value(const ::beast::json::tape::TapeView &v, T &container)
+    -> decltype(container.insert(std::declval<typename T::value_type>()),
+                Error()) {
+  if (!v.is_array())
+    return Error::TypeMismatch;
+  container.clear();
+  Error err = Error::Ok;
+  v.for_each_array([&](const ::beast::json::tape::TapeView &item) {
+    if (err != Error::Ok)
+      return;
+    typename T::value_type val;
+    if ((err = bind_value(item, val)) == Error::Ok) {
+      container.insert(std::move(val));
+    }
+  });
+  return err;
+}
+
+// 3. Forward List (insert_after)
+template <typename T, typename = std::enable_if_t<!reflects_v<T>>>
+auto bind_value(const ::beast::json::tape::TapeView &v, T &container)
+    -> decltype(container.insert_after(container.before_begin(),
+                                       std::declval<typename T::value_type>()),
+                Error()) {
+  if (!v.is_array())
+    return Error::TypeMismatch;
+  container.clear();
+  Error err = Error::Ok;
+  auto it = container.before_begin();
+  v.for_each_array([&](const ::beast::json::tape::TapeView &item) {
+    if (err != Error::Ok)
+      return;
+    typename T::value_type val;
+    if ((err = bind_value(item, val)) == Error::Ok) {
+      it = container.insert_after(it, std::move(val));
+    }
+  });
+  return err;
+}
+
+// 4. Associative Containers (map, unordered_map, multimap)
+template <typename T, typename = std::enable_if_t<!reflects_v<T>>>
+auto bind_value(const ::beast::json::tape::TapeView &v, T &m)
+    -> decltype(typename T::key_type(), typename T::mapped_type(), Error()) {
+  if (!v.is_object())
+    return Error::TypeMismatch;
+  m.clear();
+  Error err = Error::Ok;
+  v.for_each_object(
+      [&](std::string_view key, const ::beast::json::tape::TapeView &val) {
+        if (err != Error::Ok)
+          return;
+        typename T::mapped_type v_val;
+        if ((err = bind_value(val, v_val)) == Error::Ok) {
+          if constexpr (has_subscript_v<T>) {
+            m[typename T::key_type(key)] = std::move(v_val);
+          } else {
+            m.emplace(typename T::key_type(key), std::move(v_val));
+          }
+        }
+      });
+  return err;
+}
+
+// Optional Overload
 template <typename T>
-Error bind_value(const beast::json::tape::TapeView &v, T &obj) {
+Error bind_value(const ::beast::json::tape::TapeView &v,
+                 std::optional<T> &opt) {
+  if (v.is_null()) {
+    opt = std::nullopt;
+    return Error::Ok;
+  }
+  T val;
+  Error err = bind_value(v, val);
+  if (err == Error::Ok) {
+    opt = std::move(val);
+  }
+  return err;
+}
+
+// ----------------------------------------------------------------------------
+// Chrono Support (Duration & TimePoint)
+// ----------------------------------------------------------------------------
+
+// Duration (Serialize as count)
+template <typename Rep, typename Period>
+Error bind_value(const ::beast::json::tape::TapeView &v,
+                 std::chrono::duration<Rep, Period> &d) {
+  if constexpr (std::is_integral_v<Rep>) {
+    int64_t count;
+    Error err = bind_value(v, count);
+    if (err == Error::Ok) {
+      d = std::chrono::duration<Rep, Period>(static_cast<Rep>(count));
+    }
+    return err;
+  } else {
+    Rep count;
+    Error err = bind_value(v, count);
+    if (err == Error::Ok) {
+      d = std::chrono::duration<Rep, Period>(count);
+    }
+    return err;
+  }
+}
+
+// Time Point (Serialize as count of duration since epoch)
+template <typename Clock, typename Duration>
+Error bind_value(const ::beast::json::tape::TapeView &v,
+                 std::chrono::time_point<Clock, Duration> &tp) {
+  using Rep = typename Duration::rep;
+  if constexpr (std::is_integral_v<Rep>) {
+    int64_t count;
+    Error err = bind_value(v, count);
+    if (err == Error::Ok) {
+      tp = std::chrono::time_point<Clock, Duration>(
+          Duration(static_cast<Rep>(count)));
+    }
+    return err;
+  } else {
+    Rep count;
+    Error err = bind_value(v, count);
+    if (err == Error::Ok) {
+      tp = std::chrono::time_point<Clock, Duration>(Duration(count));
+    }
+    return err;
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Bitset Support (Serialize as String "101...")
+// ----------------------------------------------------------------------------
+template <size_t N>
+Error bind_value(const ::beast::json::tape::TapeView &v, std::bitset<N> &bs) {
+  if (!v.is_string())
+    return Error::TypeMismatch;
+  std::string_view s = v.get_string();
+  if (s.size() > N) // Relaxed check: allow smaller strings, but not larger?
+    return Error::TypeMismatch;
+
+  try {
+    bs = std::bitset<N>(std::string(s)); // Requires string copy, unfortunately.
+  } catch (...) {
+    return Error::TypeMismatch;
+  }
+  return Error::Ok;
+}
+
+// Smart Pointer Overloads
+template <typename T>
+Error bind_value(const ::beast::json::tape::TapeView &v,
+                 std::unique_ptr<T> &ptr) {
+  if (v.is_null()) {
+    ptr.reset();
+    return Error::Ok;
+  }
+  if (!ptr)
+    ptr = std::make_unique<T>();
+  return bind_value(v, *ptr);
+}
+
+template <typename T>
+Error bind_value(const ::beast::json::tape::TapeView &v,
+                 std::shared_ptr<T> &ptr) {
+  if (v.is_null()) {
+    ptr.reset();
+    return Error::Ok;
+  }
+  if (!ptr)
+    ptr = std::make_shared<T>();
+  return bind_value(v, *ptr);
+}
+
+// ----------------------------------------------------------------------------
+// Extended STL Support (Phase 10)
+// ----------------------------------------------------------------------------
+
+// Struct Overload (Reflection)
+template <typename T, typename>
+Error bind_value(const ::beast::json::tape::TapeView &v, T &obj) {
   if (!v.is_object())
     return Error::TypeMismatch;
   Error err = Error::Ok;
   v.for_each_object([&](std::string_view key,
-                        const beast::json::tape::TapeView &val) {
+                        const ::beast::json::tape::TapeView &val) {
     if (err != Error::Ok)
       return;
     const auto members = meta<T>::info();
@@ -8497,21 +9235,21 @@ Error bind_value(const beast::json::tape::TapeView &v, T &obj) {
 template <typename T> std::string json_of(const T &obj) {
   std::string out;
   out.reserve(256);
-  reflect::DirectSerializer ser(out); // Implicit in beast::json::reflect
+  ::beast::json::reflect::DirectSerializer ser(out);
   ser.write(obj);
   return out;
 }
 
 // 6. Public API (parse_into)
 template <typename T> Error parse_into(T &obj, std::string_view json) {
-  beast::json::tape::Document doc; // Explicit namespace
-  beast::json::tape::Parser p(doc, json.data(), json.size());
+  ::beast::json::tape::Document doc; // Explicit namespace
+  ::beast::json::tape::Parser p(doc, json.data(), json.size());
   auto res = p.parse();
   if (!res)
     return res.error;
 
   // Root Element is @ Index 0
-  return reflect::bind_value(beast::json::tape::TapeView(doc, 0), obj);
+  return reflect::bind_value(::beast::json::tape::TapeView(doc, 0), obj);
 }
 
 } // namespace json

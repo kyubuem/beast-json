@@ -7,9 +7,13 @@
 #include <simdjson.h>
 #include <yyjson.h>
 
-int main() {
-  const char *filename = "twitter.json";
+int main(int argc, char **argv) {
+  const char *filename = (argc > 1) ? argv[1] : "twitter.json";
   std::string json_content = bench::read_file(filename);
+
+  if (json_content.empty()) {
+    return 1;
+  }
 
   bench::print_header("File I/O Benchmark");
   std::cout << "File: " << filename << " (" << (json_content.size() / 1024.0)
@@ -35,13 +39,10 @@ int main() {
 
     // Reuse arena across iterations (like yyjson/simdjson)
     beast::json::FastArena arena(json_content.size() * 2);
-    beast::json::tape::Document doc(&arena);
-
     parse_timer.start();
     for (size_t i = 0; i < iterations; ++i) {
       arena.reset();
-      doc.tape.clear();
-      doc.string_buffer.clear();
+      beast::json::tape::Document doc(&arena);
 
       beast::json::tape::Parser parser(doc, json_content.data(),
                                        json_content.size());
@@ -51,8 +52,7 @@ int main() {
 
     // Prepare for Serialize (reuse same doc from last parse)
     arena.reset();
-    doc.tape.clear();
-    doc.string_buffer.clear();
+    beast::json::tape::Document doc(&arena);
     beast::json::tape::Parser parser(doc, json_content.data(),
                                      json_content.size());
     auto res = parser.parse();
@@ -93,13 +93,11 @@ int main() {
 
     // Reuse arena across iterations
     beast::json::FastArena arena_insitu(json_content.size() * 2);
-    beast::json::tape::Document doc_insitu(&arena_insitu);
 
     parse_timer.start();
     for (size_t i = 0; i < iterations; ++i) {
       arena_insitu.reset();
-      doc_insitu.tape.clear();
-      doc_insitu.string_buffer.clear();
+      beast::json::tape::Document doc_insitu(&arena_insitu);
 
       // Pass mutable char*
       beast::json::tape::Parser parser(
@@ -111,8 +109,7 @@ int main() {
 
     // Verification (reuse arena/doc from above)
     arena_insitu.reset();
-    doc_insitu.tape.clear();
-    doc_insitu.string_buffer.clear();
+    beast::json::tape::Document doc_insitu(&arena_insitu);
 
     std::string mutable_input = json_content;
     beast::json::tape::Parser parser_verify(
@@ -138,13 +135,11 @@ int main() {
     size_t iterations = 1000;
 
     beast::json::FastArena arena(json_content.size() * 2);
-    beast::json::tape::Document doc(&arena);
 
     parse_timer.start();
     for (size_t i = 0; i < iterations; ++i) {
       arena.reset();
-      doc.tape.clear();
-      doc.string_buffer.clear();
+      beast::json::tape::Document doc(&arena);
 
       beast::json::tape::Parser parser(doc, json_content.data(),
                                        json_content.size(),

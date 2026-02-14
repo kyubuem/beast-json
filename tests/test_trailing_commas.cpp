@@ -7,8 +7,10 @@ using namespace beast::json;
 class TrailingCommas : public ::testing::Test {
 protected:
   bool parse_json(std::string_view json) {
-    tape::Document doc;
-    tape::Parser p(doc, json.data(), json.size());
+    beast::json::tape::Document doc;
+    beast::json::tape::ParseOptions opts;
+    opts.allow_trailing_commas = true;
+    beast::json::tape::Parser p(doc, json.data(), json.size(), opts);
     return p.parse();
   }
 };

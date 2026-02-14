@@ -54,14 +54,24 @@ FetchContent_MakeAvailable(glaze)
 
 # Download benchmark data
 set(BENCHMARK_DATA_DIR ${CMAKE_CURRENT_BINARY_DIR})
-if(NOT EXISTS ${BENCHMARK_DATA_DIR}/twitter.json)
-    message(STATUS "Downloading twitter.json...")
-    file(DOWNLOAD 
-        https://raw.githubusercontent.com/simdjson/simdjson/master/jsonexamples/twitter.json
-        ${BENCHMARK_DATA_DIR}/twitter.json
-        SHOW_PROGRESS
-    )
-endif()
+
+set(BENCHMARK_FILES
+    "twitter.json"
+    "canada.json"
+    "citm_catalog.json"
+    "gsoc-2018.json"
+)
+
+foreach(file ${BENCHMARK_FILES})
+    if(NOT EXISTS ${BENCHMARK_DATA_DIR}/${file})
+        message(STATUS "Downloading ${file}...")
+        file(DOWNLOAD 
+            https://raw.githubusercontent.com/simdjson/simdjson-data/master/jsonexamples/${file}
+            ${BENCHMARK_DATA_DIR}/${file}
+            SHOW_PROGRESS
+        )
+    endif()
+endforeach()
 
 # Optimization and PGO
 if(NOT CMAKE_BUILD_TYPE MATCHES "Debug")

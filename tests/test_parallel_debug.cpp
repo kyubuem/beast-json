@@ -45,7 +45,7 @@ TEST(ParallelDebug, AnomalyDetection) {
 
       // Handle String State
       if (c == '"') {
-        // Check for escape (naive check)
+        // Check for escape
         bool escaped = false;
         if (offset > 0 && large_json[offset - 1] == '\\') {
           size_t backslash_count = 0;
@@ -56,7 +56,6 @@ TEST(ParallelDebug, AnomalyDetection) {
               break;
             j--;
           }
-          // Correctly handle bounds
           if (backslash_count % 2 == 1)
             escaped = true;
         }
@@ -78,9 +77,9 @@ TEST(ParallelDebug, AnomalyDetection) {
       else if (c == ']' || c == '}')
         depth--;
 
-      bits &= bits - 1;
-
       ASSERT_GE(depth, 0) << "Depth went negative at offset " << offset;
+
+      bits &= bits - 1;
     }
     block_idx++;
     if (block_idx >= idx.structural_bits.size())
@@ -88,4 +87,5 @@ TEST(ParallelDebug, AnomalyDetection) {
     bits = idx.structural_bits[block_idx];
     base_offset = block_idx * 64;
   }
+  ASSERT_EQ(depth, 0);
 }
