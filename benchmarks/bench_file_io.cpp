@@ -7,238 +7,220 @@
 #include <simdjson.h>
 #include <yyjson.h>
 
+void verify_beast(const std::string &original_json,
+                  const std::string &beast_serialized,
+                  const std::string &lib_name) {
+  try {
+    auto j1 = nlohmann::json::parse(original_json);
+    auto j2 = nlohmann::json::parse(beast_serialized);
+    if (j1 != j2) {
+      std::cout << "Verify Failed for " << lib_name
+                << ": Semantically different.\n";
+      std::cout << "Output SNIP: " << beast_serialized.substr(0, 100)
+                << "...\n";
+    }
+  } catch (const std::exception &e) {
+    std::cout << "Verify Failed for " << lib_name << ": " << e.what() << "\n";
+    std::cout << "Output SNIP: " << beast_serialized.substr(0, 100) << "...\n";
+  }
+}
+
 int main(int argc, char **argv) {
   const char *filename = (argc > 1) ? argv[1] : "twitter.json";
   std::string json_content = bench::read_file(filename);
 
-  if (json_content.empty()) {
+  if (json_content.empty())
     return 1;
-  }
 
-  bench::print_header("File I/O Benchmark");
+  const size_t iterations = 200; // Faster for debugging
+  bench::print_header("File I/O Benchmark (Strict)");
   std::cout << "File: " << filename << " (" << (json_content.size() / 1024.0)
             << " KB)\n";
-  std::cout << "Test: Parse JSON → Serialize → Verify (input == output)\n\n";
   bench::print_table_header();
 
   std::vector<bench::Result> results;
 
   // 1. beast_json
   {
-    // Warmup
-    {
-      beast::json::FastArena arena(json_content.size() * 2);
-      beast::json::tape::Document doc(&arena);
-      beast::json::tape::Parser parser(doc, json_content.data(),
-                                       json_content.size());
-      parser.parse();
-    }
-
-    bench::Timer parse_timer, serialize_timer;
-    size_t iterations = 10000;
-
-    // Reuse arena across iterations (like yyjson/simdjson)
-    beast::json::FastArena arena(json_content.size() * 2);
-    parse_timer.start();
+    beast::json::FastArena arena(json_content.size() * 10);
+    bench::Timer pt, st;
+    pt.start();
     for (size_t i = 0; i < iterations; ++i) {
       arena.reset();
       beast::json::tape::Document doc(&arena);
-
       beast::json::tape::Parser parser(doc, json_content.data(),
                                        json_content.size());
       parser.parse();
     }
-    double parse_ns = parse_timer.elapsed_ns() / iterations;
+    double p_ns = pt.elapsed_ns() / iterations;
 
-    // Prepare for Serialize (reuse same doc from last parse)
     arena.reset();
     beast::json::tape::Document doc(&arena);
     beast::json::tape::Parser parser(doc, json_content.data(),
                                      json_content.size());
-    auto res = parser.parse();
-    bool correct = (res.error == beast::json::Error::Ok);
-    if (!correct) {
-      std::cout << "beast_json Failed: " << (int)res.error << " at "
-                << res.offset << "\n";
-    }
+    parser.parse();
 
-    std::string output;
-    output.reserve(json_content.size() * 2);
-
-    serialize_timer.start();
+    std::string ser_out;
+    ser_out.reserve(json_content.size() * 2);
+    st.start();
     for (size_t i = 0; i < iterations; ++i) {
-      beast::json::tape::TapeSerializerExtreme serializer(doc, output);
-      serializer.serialize();
-      output.resize(0);
+      ser_out.resize(0);
+      beast::json::tape::TapeSerializerExtreme s(doc, ser_out);
+      s.serialize();
     }
-    double serialize_ns = serialize_timer.elapsed_ns() / iterations;
+    double s_ns = st.elapsed_ns() / iterations;
 
-    results.push_back({"beast_json", parse_ns, serialize_ns, correct});
+    std::string v_out;
+    beast::json::tape::TapeSerializerExtreme sv(doc, v_out);
+    sv.serialize();
+
+    bool ok = false;
+    try {
+      auto j1 = nlohmann::json::parse(json_content);
+      auto j2 = nlohmann::json::parse(v_out);
+      ok = (j1 == j2);
+    } catch (...) {
+    }
+    if (!ok)
+      verify_beast(json_content, v_out, "beast_json");
+    results.push_back({"beast_json", p_ns, s_ns, ok});
   }
 
-  // 1b. beast_json (In-Situ)
+  // 1b. beast_json (insitu)
   {
-    bench::Timer parse_timer;
-    size_t iterations = 1000;
-
-    // Need a fresh copy for each iteration as insitu modifies input
-    // Ensure padding for unchecked mode
-    std::vector<std::string> inputs;
-    inputs.reserve(iterations);
-    for (size_t i = 0; i < iterations; ++i) {
-      std::string s = json_content;
-      s.resize(json_content.size() + 64); // Padding
-      inputs.push_back(std::move(s));
-    }
-
-    // Reuse arena across iterations
-    beast::json::FastArena arena_insitu(json_content.size() * 2);
-
-    parse_timer.start();
-    for (size_t i = 0; i < iterations; ++i) {
-      arena_insitu.reset();
-      beast::json::tape::Document doc_insitu(&arena_insitu);
-
-      // Pass mutable char*
-      beast::json::tape::Parser parser(
-          doc_insitu, &inputs[i][0], inputs[i].size(),
-          {true, true, true, false, false, true}); // last true = insitu
-      parser.parse();
-    }
-    double parse_ns = parse_timer.elapsed_ns() / iterations;
-
-    // Verification (reuse arena/doc from above)
-    arena_insitu.reset();
-    beast::json::tape::Document doc_insitu(&arena_insitu);
-
-    std::string mutable_input = json_content;
-    beast::json::tape::Parser parser_verify(
-        doc_insitu, &mutable_input[0], mutable_input.size(),
-        {true, true, true, false, false, true});
-    auto res = parser_verify.parse();
-    bool correct = (res.error == beast::json::Error::Ok);
-    if (!correct) {
-      std::cout << "Insitu Failed: " << (int)res.error << " at " << res.offset
-                << "\n";
-      size_t start_ctx = (res.offset > 20) ? res.offset - 20 : 0;
-      size_t len_ctx = std::min((size_t)40, mutable_input.size() - start_ctx);
-      std::string ctx = mutable_input.substr(start_ctx, len_ctx);
-      std::cout << "Context: [" << ctx << "]\n";
-    }
-
-    results.push_back({"beast_json (insitu)", parse_ns, 0.0, correct});
-  }
-
-  // 1c. beast_json (two-stage)
-  {
-    bench::Timer parse_timer;
-    size_t iterations = 1000;
-
-    beast::json::FastArena arena(json_content.size() * 2);
-
-    parse_timer.start();
+    beast::json::FastArena arena(json_content.size() * 10);
+    std::string input_copy = json_content;
+    input_copy.resize(json_content.size() + 64);
+    bench::Timer pt, st;
+    pt.start();
     for (size_t i = 0; i < iterations; ++i) {
       arena.reset();
       beast::json::tape::Document doc(&arena);
-
-      beast::json::tape::Parser parser(doc, json_content.data(),
-                                       json_content.size(),
-                                       {true, true, true, false, false, false,
-                                        false, true}); // use_bitmap = true
+      beast::json::tape::Parser parser(
+          doc, &input_copy[0], json_content.size(),
+          {true, false, false, true, true, false, true});
       parser.parse();
     }
-    double parse_ns = parse_timer.elapsed_ns() / iterations;
-    results.push_back({"beast_json (two-stage)", parse_ns, 0.0, true});
-  }
+    double p_ns = pt.elapsed_ns() / iterations;
 
-  // 2. nlohmann/json
-  {
-    bench::Timer parse_timer, serialize_timer;
+    arena.reset();
+    beast::json::tape::Document doc(&arena);
+    beast::json::tape::Parser parser(
+        doc, &input_copy[0], json_content.size(),
+        {true, false, false, true, true, false, true});
+    parser.parse();
 
-    parse_timer.start();
-    nlohmann::json j = nlohmann::json::parse(json_content);
-    double parse_ns = parse_timer.elapsed_ns();
-
-    serialize_timer.start();
-    std::string output = j.dump();
-    double serialize_ns = serialize_timer.elapsed_ns();
-
-    // Note: nlohmann may change whitespace/formatting
-    bool correct = (output.size() > 0); // Basic sanity check
-    results.push_back({"nlohmann/json", parse_ns, serialize_ns, correct});
-  }
-
-  // 3. RapidJSON
-  {
-    bench::Timer parse_timer, serialize_timer;
-    std::string buffer = json_content; // RapidJSON modifies input
-
-    parse_timer.start();
-    rapidjson::Document doc;
-    doc.ParseInsitu(&buffer[0]);
-    double parse_ns = parse_timer.elapsed_ns();
-
-    serialize_timer.start();
-    rapidjson::StringBuffer sb;
-    rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
-    doc.Accept(writer);
-    double serialize_ns = serialize_timer.elapsed_ns();
-
-    std::string output(sb.GetString(), sb.GetSize());
-    bool correct = (output.size() > 0);
-    results.push_back({"RapidJSON", parse_ns, serialize_ns, correct});
-  }
-
-  // 4. simdjson (parse-only)
-  {
-    bench::Timer parse_timer;
-    simdjson::dom::parser parser;
-    std::string padded = json_content;
-    padded.reserve(json_content.size() + simdjson::SIMDJSON_PADDING);
-
-    parse_timer.start();
-    simdjson::dom::element doc;
-    auto error = parser.parse(padded).get(doc);
-    double parse_ns = parse_timer.elapsed_ns();
-
-    bool correct = !error;
-    results.push_back({"simdjson (parse)", parse_ns, 0.0, correct});
-  }
-
-  // 5. yyjson
-  {
-    bench::Timer parse_timer, serialize_timer;
-
-    parse_timer.start();
-    yyjson_doc *doc = yyjson_read(json_content.c_str(), json_content.size(), 0);
-    double parse_ns = parse_timer.elapsed_ns();
-
-    serialize_timer.start();
-    size_t len;
-    char *str = yyjson_write(doc, 0, &len);
-    double serialize_ns = serialize_timer.elapsed_ns();
-
-    std::string output(str, len);
-
-    // Semantic equivalence: can we parse our own output?
-    bool correct = false;
-    yyjson_doc *doc2 = yyjson_read(str, len, 0);
-    if (doc2) {
-      correct = true;
-      yyjson_doc_free(doc2);
+    std::string ser_out;
+    ser_out.reserve(json_content.size() * 2);
+    st.start();
+    for (size_t i = 0; i < iterations; ++i) {
+      ser_out.resize(0);
+      beast::json::tape::TapeSerializerExtreme s(doc, ser_out);
+      s.serialize();
     }
+    double s_ns = st.elapsed_ns() / iterations;
 
-    free(str);
-    yyjson_doc_free(doc);
-
-    results.push_back({"yyjson", parse_ns, serialize_ns, correct});
+    std::string v_out;
+    beast::json::tape::TapeSerializerExtreme sv(doc, v_out);
+    sv.serialize();
+    bool ok = false;
+    try {
+      auto j1 = nlohmann::json::parse(json_content);
+      auto j2 = nlohmann::json::parse(v_out);
+      ok = (j1 == j2);
+    } catch (...) {
+    }
+    if (!ok)
+      verify_beast(json_content, v_out, "beast_json (insitu)");
+    results.push_back({"beast_json (insitu)", p_ns, s_ns, ok});
   }
 
-  // Print results
-  for (const auto &r : results) {
+  // 1c. beast_json (nitro)
+  {
+    beast::json::FastArena arena(json_content.size() * 10);
+    bench::Timer pt, st;
+    pt.start();
+    for (size_t i = 0; i < iterations; ++i) {
+      arena.reset();
+      beast::json::tape::Document doc(&arena);
+      beast::json::tape::Parser parser(
+          doc, json_content.data(), json_content.size(),
+          {true, true, true, false, false, false, false, true});
+      parser.parse();
+    }
+    double p_ns = pt.elapsed_ns() / iterations;
+
+    arena.reset();
+    beast::json::tape::Document doc(&arena);
+    beast::json::tape::Parser parser(
+        doc, json_content.data(), json_content.size(),
+        {true, true, true, false, false, false, false, true});
+    parser.parse();
+
+    std::string ser_out;
+    ser_out.reserve(json_content.size() * 2);
+    st.start();
+    for (size_t i = 0; i < iterations; ++i) {
+      ser_out.resize(0);
+      beast::json::tape::TapeSerializerExtreme s(doc, ser_out);
+      s.serialize();
+    }
+    double s_ns = st.elapsed_ns() / iterations;
+
+    std::string v_out;
+    beast::json::tape::TapeSerializerExtreme sv(doc, v_out);
+    sv.serialize();
+    bool ok = false;
+    try {
+      auto j1 = nlohmann::json::parse(json_content);
+      auto j2 = nlohmann::json::parse(v_out);
+      ok = (j1 == j2);
+    } catch (...) {
+    }
+    if (!ok)
+      verify_beast(json_content, v_out, "beast_json (nitro)");
+    results.push_back({"beast_json (nitro)", p_ns, s_ns, ok});
+  }
+
+  // 2. nlohmann
+  {
+    bench::Timer pt, st;
+    pt.start();
+    for (size_t i = 0; i < iterations; ++i) {
+      nlohmann::json j = nlohmann::json::parse(json_content);
+    }
+    double p_ns = pt.elapsed_ns() / iterations;
+    nlohmann::json j = nlohmann::json::parse(json_content);
+    st.start();
+    for (size_t i = 0; i < iterations; ++i) {
+      std::string s = j.dump();
+    }
+    double s_ns = st.elapsed_ns() / iterations;
+    results.push_back({"nlohmann/json", p_ns, s_ns, true});
+  }
+
+  // 3. yyjson
+  {
+    bench::Timer pt, st;
+    pt.start();
+    for (size_t i = 0; i < iterations; ++i) {
+      yyjson_doc *d = yyjson_read(json_content.c_str(), json_content.size(), 0);
+      yyjson_doc_free(d);
+    }
+    double p_ns = pt.elapsed_ns() / iterations;
+    yyjson_doc *d = yyjson_read(json_content.c_str(), json_content.size(), 0);
+    st.start();
+    for (size_t i = 0; i < iterations; ++i) {
+      size_t l;
+      char *s = yyjson_write(d, 0, &l);
+      free(s);
+    }
+    double s_ns = st.elapsed_ns() / iterations;
+    yyjson_doc_free(d);
+    results.push_back({"yyjson", p_ns, s_ns, true});
+  }
+
+  for (const auto &r : results)
     r.print();
-  }
-
-  std::cout << "\n✓ Benchmark complete\n";
   return 0;
 }

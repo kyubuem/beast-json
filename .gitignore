@@ -1,3 +1,29 @@
+
+# Build Artifacts
+.agent/
 .agent
 build*
-.cache
+.*cache
+_deps/
+*.pc
+*_include.cmake
+*Config.cmake
+*ConfigVersion.cmake
+compile_commands.json
+.DS_Store
+
+# IDEs
+.vscode/
+.idea/
+
+# Large Files & Data
+*.json
+!tests/small.json
+!tests/test_*.json
+# But ignore large specific ones
+tests/test_large.json
+tests/test_uint64.json
+twitter.json
+
+# Temporary Scripts
+*.py

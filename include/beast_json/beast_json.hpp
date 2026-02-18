@@ -3635,220 +3635,229 @@ BEAST_INLINE const char *skip_string(const char *p, const char *end) {
 BEAST_INLINE char *escape_string(const char *src, size_t len, char *dst) {
   const char *end = src + len;
 
-#if defined(__aarch64__) || defined(__ARM_NEON)
-  const uint8x16_t quote = vdupq_n_u8('"');
-  const uint8x16_t backslash = vdupq_n_u8('\\');
-  const uint8x16_t k32 = vdupq_n_u8(32);
+  static constexpr uint8_t escape_table[256] = {
+      1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+      1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  };
+  static constexpr uint8_t escape_chars[256] = {
+      0, 0, 0, 0, 0, 0, 0, 0, 98, 116, 110, 0, 102, 114, 0,  0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0,  0,   0,   0, 0,   0,   34, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0,  0,   0,   0, 0,   0,   0,  0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0,  0,   0,   0, 0,   0,   0,  0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0,  0,   0,   0, 92,  0,   0,  0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0,  0,   0,   0, 0,   0,   0,  0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0,  0,   0,   0, 0,   0,   0,  0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0,  0,   0,   0, 0,   0,   0,  0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0,  0,   0,   0, 0,   0,   0,  0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0,  0,   0,   0, 0,   0,   0,  0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0,  0,   0,   0, 0,   0,   0,  0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0,  0,   0,   0, 0,   0,   0,  0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0,  0,   0,   0, 0,   0,   0,  0,
+  };
 
-  // Main loop for >= 16 bytes
+  auto emit_escape = [&](uint8_t c) {
+    *dst++ = '\\';
+    uint8_t ec = escape_chars[c];
+    if (ec) {
+      *dst++ = (char)ec;
+    } else {
+      *dst++ = 'u';
+      *dst++ = '0';
+      *dst++ = '0';
+      *dst++ = "0123456789abcdef"[(c >> 4) & 0xF];
+      *dst++ = "0123456789abcdef"[c & 0xF];
+    }
+  };
+
+#if defined(__aarch64__) || defined(__ARM_NEON)
+  const uint8x16_t v_quote = vdupq_n_u8('"');
+  const uint8x16_t v_backslash = vdupq_n_u8('\\');
+  const uint8x16_t v_k32 = vdupq_n_u8(32);
+
+  // 32-byte unrolled main loop
+  while (src + 32 <= end) {
+    uint8x16_t v0 = vld1q_u8((const uint8_t *)src);
+    uint8x16_t v1 = vld1q_u8((const uint8_t *)src + 16);
+
+    uint8x16_t m0 =
+        vorrq_u8(vorrq_u8(vceqq_u8(v0, v_quote), vceqq_u8(v0, v_backslash)),
+                 vcltq_u8(v0, v_k32));
+    uint8x16_t m1 =
+        vorrq_u8(vorrq_u8(vceqq_u8(v1, v_quote), vceqq_u8(v1, v_backslash)),
+                 vcltq_u8(v1, v_k32));
+
+    if (vmaxvq_u8(vorrq_u8(m0, m1)) == 0) {
+      vst1q_u8((uint8_t *)dst, v0);
+      vst1q_u8((uint8_t *)dst + 16, v1);
+      src += 32;
+      dst += 32;
+      continue;
+    }
+
+    // Process first 16 bytes
+    if (vmaxvq_u8(m0) == 0) {
+      vst1q_u8((uint8_t *)dst, v0);
+      src += 16;
+      dst += 16;
+    } else {
+      const char *be = src + 16;
+      while (src < be) {
+        uint8_t c = (uint8_t)*src++;
+        if (!escape_table[c])
+          *dst++ = (char)c;
+        else
+          emit_escape(c);
+      }
+    }
+
+    // Process second 16 bytes
+    if (vmaxvq_u8(m1) == 0) {
+      vst1q_u8((uint8_t *)dst, v1);
+      src += 16;
+      dst += 16;
+    } else {
+      const char *be = src + 16;
+      while (src < be) {
+        uint8_t c = (uint8_t)*src++;
+        if (!escape_table[c])
+          *dst++ = (char)c;
+        else
+          emit_escape(c);
+      }
+    }
+  }
+
+  // 16-byte tail
   while (src + 16 <= end) {
     uint8x16_t val = vld1q_u8((const uint8_t *)src);
-    uint8x16_t m1 = vceqq_u8(val, quote);
-    uint8x16_t m2 = vceqq_u8(val, backslash);
-    uint8x16_t m3 = vcltq_u8(val, k32);
-    uint8x16_t mask = vorrq_u8(vorrq_u8(m1, m2), m3);
-
+    uint8x16_t mask =
+        vorrq_u8(vorrq_u8(vceqq_u8(val, v_quote), vceqq_u8(val, v_backslash)),
+                 vcltq_u8(val, v_k32));
     if (vmaxvq_u8(mask) == 0) {
       vst1q_u8((uint8_t *)dst, val);
       src += 16;
       dst += 16;
       continue;
     }
-
-    // Dirty block found: Process via scalar
-    uint64_t mask64 = neon_movemask(mask);
-    const char *block_start = src;
-
-    while (mask64) {
-      int idx = __builtin_ctzll(mask64);
-      int len = idx - (int)(src - block_start);
-
-      if (len > 0) {
-        std::memcpy(dst, src, len);
-        dst += len;
-        src += len;
-      }
-
+    const char *be = src + 16;
+    while (src < be) {
       uint8_t c = (uint8_t)*src++;
-      if (c == '"') {
-        *dst++ = '\\';
-        *dst++ = '"';
-      } else if (c == '\\') {
-        *dst++ = '\\';
-        *dst++ = '\\';
-      } else if (c == '\b') {
-        *dst++ = '\\';
-        *dst++ = 'b';
-      } else if (c == '\f') {
-        *dst++ = '\\';
-        *dst++ = 'f';
-      } else if (c == '\n') {
-        *dst++ = '\\';
-        *dst++ = 'n';
-      } else if (c == '\r') {
-        *dst++ = '\\';
-        *dst++ = 'r';
-      } else if (c == '\t') {
-        *dst++ = '\\';
-        *dst++ = 't';
-      } else {
-        *dst++ = '\\';
-        *dst++ = 'u';
-        *dst++ = '0';
-        *dst++ = '0';
-        *dst++ = "0123456789abcdef"[(c >> 4) & 0xF];
-        *dst++ = "0123456789abcdef"[c & 0xF];
-      }
-      mask64 &= ~(1ULL << idx);
-    }
-
-    int rem = (int)((block_start + 16) - src);
-    if (rem > 0) {
-      std::memcpy(dst, src, rem);
-      dst += rem;
-      src += rem;
+      if (!escape_table[c])
+        *dst++ = (char)c;
+      else
+        emit_escape(c);
     }
   }
+
 #elif defined(__SSE2__) || defined(__x86_64__) || defined(_M_X64)
-  const __m128i quote = _mm_set1_epi8('"');
-  const __m128i backslash = _mm_set1_epi8('\\');
-  const __m128i k32 = _mm_set1_epi8(32);
-  const __m128i zero = _mm_setzero_si128();
+  const __m128i v_quote = _mm_set1_epi8('"');
+  const __m128i v_backslash = _mm_set1_epi8('\\');
+  const __m128i v_k32 = _mm_set1_epi8(32);
+  const __m128i v_neg1 = _mm_set1_epi8(-1);
 
-  // Short string optimization (< 16 bytes)
-  if (len < 16) {
-    if ((((uintptr_t)src) & 0xFFF) <= 0xFF0) {
-      __m128i val = _mm_loadu_si128((const __m128i *)src);
-      __m128i m_quote = _mm_cmpeq_epi8(val, quote);
-      __m128i m_bs = _mm_cmpeq_epi8(val, backslash);
-      __m128i m_lt32 = _mm_cmplt_epi8(val, k32);
-      __m128i m_pos = _mm_cmpgt_epi8(val, _mm_set1_epi8(-1));
-      __m128i m_ctrl = _mm_and_si128(m_lt32, m_pos);
+  // 32-byte unrolled main loop
+  while (src + 32 <= end) {
+    __m128i v0 = _mm_loadu_si128((const __m128i *)src);
+    __m128i v1 = _mm_loadu_si128((const __m128i *)(src + 16));
 
-      __m128i mask = _mm_or_si128(m_quote, _mm_or_si128(m_bs, m_ctrl));
-      int mask_bits = _mm_movemask_epi8(mask); // 16 bits
+    __m128i ctrl0 =
+        _mm_and_si128(_mm_cmplt_epi8(v0, v_k32), _mm_cmpgt_epi8(v0, v_neg1));
+    __m128i ctrl1 =
+        _mm_and_si128(_mm_cmplt_epi8(v1, v_k32), _mm_cmpgt_epi8(v1, v_neg1));
+    __m128i m0 =
+        _mm_or_si128(_mm_cmpeq_epi8(v0, v_quote),
+                     _mm_or_si128(_mm_cmpeq_epi8(v0, v_backslash), ctrl0));
+    __m128i m1 =
+        _mm_or_si128(_mm_cmpeq_epi8(v1, v_quote),
+                     _mm_or_si128(_mm_cmpeq_epi8(v1, v_backslash), ctrl1));
 
-      // Mask out bits beyond len
-      // We only care if the first 'len' bytes are clean.
-      // create a mask of valid bits: (1 << len) - 1
-      int valid_mask = (1 << len) - 1;
+    int bits0 = _mm_movemask_epi8(m0);
+    int bits1 = _mm_movemask_epi8(m1);
 
-      if ((mask_bits & valid_mask) == 0) {
-        std::memcpy(dst, src, len);
-        return dst + len;
+    if ((bits0 | bits1) == 0) {
+      _mm_storeu_si128((__m128i *)dst, v0);
+      _mm_storeu_si128((__m128i *)(dst + 16), v1);
+      src += 32;
+      dst += 32;
+      continue;
+    }
+
+    if (bits0 == 0) {
+      _mm_storeu_si128((__m128i *)dst, v0);
+      src += 16;
+      dst += 16;
+    } else {
+      const char *be = src + 16;
+      while (src < be) {
+        uint8_t c = (uint8_t)*src++;
+        if (!escape_table[c])
+          *dst++ = (char)c;
+        else
+          emit_escape(c);
+      }
+    }
+
+    if (bits1 == 0) {
+      _mm_storeu_si128((__m128i *)dst, v1);
+      src += 16;
+      dst += 16;
+    } else {
+      const char *be = src + 16;
+      while (src < be) {
+        uint8_t c = (uint8_t)*src++;
+        if (!escape_table[c])
+          *dst++ = (char)c;
+        else
+          emit_escape(c);
       }
     }
   }
 
+  // 16-byte tail
   while (src + 16 <= end) {
     __m128i val = _mm_loadu_si128((const __m128i *)src);
-    __m128i m_quote = _mm_cmpeq_epi8(val, quote);
-    __m128i m_bs = _mm_cmpeq_epi8(val, backslash);
-    __m128i m_lt32 = _mm_cmplt_epi8(val, k32);
-    __m128i m_pos = _mm_cmpgt_epi8(
-        val, _mm_set1_epi8(-1)); // signed > -1 means >= 0 case (ASCII)
-    __m128i m_ctrl = _mm_and_si128(
-        m_lt32, m_pos); // Control chars < 32 and positive (not UTF8)
-
-    __m128i mask = _mm_or_si128(m_quote, _mm_or_si128(m_bs, m_ctrl));
-    int mask_bits = _mm_movemask_epi8(mask);
-
-    if (mask_bits == 0) {
+    __m128i ctrl =
+        _mm_and_si128(_mm_cmplt_epi8(val, v_k32), _mm_cmpgt_epi8(val, v_neg1));
+    __m128i mask =
+        _mm_or_si128(_mm_cmpeq_epi8(val, v_quote),
+                     _mm_or_si128(_mm_cmpeq_epi8(val, v_backslash), ctrl));
+    if (_mm_movemask_epi8(mask) == 0) {
       _mm_storeu_si128((__m128i *)dst, val);
       src += 16;
       dst += 16;
       continue;
     }
-
-    // Handle Dirty Block
-    const char *block_start = src;
-    while (mask_bits) {
-      int idx = __builtin_ctz(mask_bits);
-      int len = idx - (int)(src - block_start);
-
-      if (len > 0) {
-        std::memcpy(dst, src, len);
-        dst += len;
-        src += len;
-      }
-
+    const char *be = src + 16;
+    while (src < be) {
       uint8_t c = (uint8_t)*src++;
-      if (c == '"') {
-        *dst++ = '\\';
-        *dst++ = '"';
-      } else if (c == '\\') {
-        *dst++ = '\\';
-        *dst++ = '\\';
-      } else if (c == '\b') {
-        *dst++ = '\\';
-        *dst++ = 'b';
-      } else if (c == '\f') {
-        *dst++ = '\\';
-        *dst++ = 'f';
-      } else if (c == '\n') {
-        *dst++ = '\\';
-        *dst++ = 'n';
-      } else if (c == '\r') {
-        *dst++ = '\\';
-        *dst++ = 'r';
-      } else if (c == '\t') {
-        *dst++ = '\\';
-        *dst++ = 't';
-      } else {
-        *dst++ = '\\';
-        *dst++ = 'u';
-        *dst++ = '0';
-        *dst++ = '0';
-        *dst++ = "0123456789abcdef"[(c >> 4) & 0xF];
-        *dst++ = "0123456789abcdef"[c & 0xF];
-      }
-      mask_bits &= ~(1 << idx);
-    }
-
-    int rem = (int)((block_start + 16) - src);
-    if (rem > 0) {
-      std::memcpy(dst, src, rem);
-      dst += rem;
-      src += rem;
+      if (!escape_table[c])
+        *dst++ = (char)c;
+      else
+        emit_escape(c);
     }
   }
 #endif
+
+  // Scalar tail (< 16 bytes remaining)
   while (src < end) {
     uint8_t c = (uint8_t)*src++;
-    if (c == '"') {
-      *dst++ = '\\';
-      *dst++ = '"';
-    } else if (c == '\\') {
-      *dst++ = '\\';
-      *dst++ = '\\';
-    } else if (c == '\b') {
-      *dst++ = '\\';
-      *dst++ = 'b';
-    } else if (c == '\f') {
-      *dst++ = '\\';
-      *dst++ = 'f';
-    } else if (c == '\n') {
-      *dst++ = '\\';
-      *dst++ = 'n';
-    } else if (c == '\r') {
-      *dst++ = '\\';
-      *dst++ = 'r';
-    } else if (c == '\t') {
-      *dst++ = '\\';
-      *dst++ = 't';
-    } else if (c < 32) {
-      *dst++ = '\\';
-      *dst++ = 'u';
-      *dst++ = '0';
-      *dst++ = '0';
-      *dst++ = "0123456789abcdef"[(c >> 4) & 0xF];
-      *dst++ = "0123456789abcdef"[c & 0xF];
-    } else {
-      *dst++ = c;
-    }
+    if (!escape_table[c])
+      *dst++ = (char)c;
+    else
+      emit_escape(c);
   }
   return dst;
 }
+
 
 // Combined Stage 1: Fill Bitmap + Find Split Points (One Pass)
 BEAST_INLINE std::vector<const char *>
@@ -7223,15 +7232,10 @@ public:
 };
 
 // ============================================================================
-// Tape Serializer (Iterative + Raw Ptr)
-// ============================================================================
-// ============================================================================
-// Jeaiii - Fast UInt64 to String (The "Magic" Formatter)
-// Credits: James Edward Anhalt III (jeaiii)
+// Jeaiii - Fast UInt64 to String
 // ============================================================================
 namespace u64toa {
 
-// Lookup table for 2-digit strings (00-99)
 static constexpr char digits_lz[201] =
     "0001020304050607080910111213141516171819"
     "2021222324252627282930313233343536373839"
@@ -7239,346 +7243,351 @@ static constexpr char digits_lz[201] =
     "6061626364656667686970717273747576777879"
     "8081828384858687888990919293949596979899";
 
-BEAST_INLINE char *to_chars(char *buffer, uint64_t val) {
-  // Optimized integer to string conversion (Jeaiii-style / LUT)
-  // Writes directly to buffer and returns end pointer.
-
-  if (val == 0) {
-    *buffer++ = '0';
-    return buffer;
-  }
-
-  int digits = 0;
-  uint64_t temp = val;
-
-  // Fast digit counting
-  if (val < 10000000000ULL) { // 1..10 digits
-    if (val < 100000ULL) {    // 1..5
-      if (val < 100ULL)
-        digits = (val < 10ULL) ? 1 : 2;
+BEAST_INLINE char *to_chars(char *buf, uint64_t v) {
+  uint32_t len;
+  if (v < 10000000000ULL) {
+    if (v < 100000ULL) {
+      if (v < 100ULL)
+        len = (v < 10ULL) ? 1 : 2;
       else
-        digits = (val < 1000ULL) ? 3 : (val < 10000ULL) ? 4 : 5;
-    } else { // 6..10
-      if (val < 10000000ULL)
-        digits = (val < 1000000ULL) ? 6 : 7;
+        len = (v < 1000ULL) ? 3 : (v < 10000ULL) ? 4 : 5;
+    } else {
+      if (v < 10000000ULL)
+        len = (v < 1000000ULL) ? 6 : 7;
       else
-        digits = (val < 100000000ULL) ? 8 : (val < 1000000000ULL) ? 9 : 10;
+        len = (v < 100000000ULL) ? 8 : (v < 1000000000ULL) ? 9 : 10;
     }
-  } else {                           // 11..20 digits
-    if (val < 1000000000000000ULL) { // 11..15
-      if (val < 10000000000000ULL)
-        digits = (val < 100000000000ULL)    ? 11
-                 : (val < 1000000000000ULL) ? 12
-                                            : 13;
-      else
-        digits = (val < 100000000000000ULL) ? 14 : 15;
-    } else { // 16..20
-      if (val < 100000000000000000ULL)
-        digits = (val < 10000000000000000ULL) ? 16 : 17;
-      else
-        digits = (val < 1000000000000000000ULL)    ? 18
-                 : (val < 10000000000000000000ULL) ? 19
-                                                   : 20;
-    }
-  }
-
-  char *p = buffer + digits;
-  char *end = p;
-
-  while (val >= 100) {
-    uint64_t index = (val % 100) * 2;
-    val /= 100;
-    p -= 2;
-    std::memcpy(p, digits_lz + index, 2);
-  }
-  if (val < 10) {
-    *--p = '0' + (char)val;
   } else {
-    p -= 2;
-    std::memcpy(p, digits_lz + val * 2, 2);
+    if (v < 1000000000000000ULL) {
+      if (v < 1000000000000ULL)
+        len = (v < 100000000000ULL) ? 11 : 12;
+      else
+        len = (v < 10000000000000ULL) ? 13 : (v < 100000000000000ULL) ? 14 : 15;
+    } else {
+      if (v < 100000000000000000ULL)
+        len = (v < 10000000000000000ULL) ? 16 : 17;
+      else
+        len = (v < 1000000000000000000ULL)    ? 18
+              : (v < 10000000000000000000ULL) ? 19
+                                              : 20;
+    }
   }
-
+  char *p = buf + len, *end = p;
+  while (v >= 100) {
+    uint64_t idx = (v % 100) * 2;
+    v /= 100;
+    p -= 2;
+    std::memcpy(p, digits_lz + idx, 2);
+    if (v < 100)
+      break;
+    idx = (v % 100) * 2;
+    v /= 100;
+    p -= 2;
+    std::memcpy(p, digits_lz + idx, 2);
+  }
+  if (v < 10)
+    *--p = '0' + (char)v;
+  else {
+    p -= 2;
+    std::memcpy(p, digits_lz + v * 2, 2);
+  }
   return end;
 }
 
 } // namespace u64toa
 
 // ============================================================================
-// Tape Serializer Extreme (Optimized for Speed)
+// Tape Serializer Extreme - Beast Native v5 (State-Driven Dispatch)
 // ============================================================================
 class TapeSerializerExtreme {
   const Document &doc_;
   std::string &out_;
-  char buffer_[16384];
-  char *cursor;
-  char *limit;
-
-  static constexpr char digits_lz[201] = "00010203040506070809"
-                                         "10111213141516171819"
-                                         "20212223242526272829"
-                                         "30313233343536373839"
-                                         "40414243444546474849"
-                                         "50515253545556575859"
-                                         "60616263646566676869"
-                                         "70717273747576777879"
-                                         "80818283848586878889"
-                                         "90919293949596979899";
-
-  // State Machine Lookup Tables
-  static constexpr char state_prefix[8] = {0, ',', 0, ',', ':', 0, 0, 0};
-  static constexpr uint8_t next_state[8] = {1, 1, 4, 4, 3, 0, 0, 0};
 
 public:
   TapeSerializerExtreme(const Document &doc, std::string &out)
-      : doc_(doc), out_(out) {
-    cursor = buffer_;
-    limit = buffer_ + 16384;
-  }
-
-  BEAST_INLINE void flush() {
-    size_t len = cursor - buffer_;
-    if (len > 0) {
-      out_.append(buffer_, len);
-      cursor = buffer_;
-    }
-  }
+      : doc_(doc), out_(out) {}
 
   void serialize() {
     if (doc_.tape.empty())
       return;
 
-    // 1. Reserve Output capacity (Estimate)
-    // Estimate: Tape metadata overhead + String content
-    // Tape elements: ~8 bytes overhead each (comma, quotes, brackets)
-    // Strings: The actual bulk of the JSON
-    size_t estimated = doc_.tape.size() * 8 + doc_.string_buffer.size();
-    if (out_.capacity() < out_.size() + estimated) {
-      out_.reserve(std::max(out_.capacity() * 2, out_.size() + estimated));
-    }
+    size_t est = doc_.string_buffer.size() * 2 + doc_.tape.size() * 16 + 4096;
+    size_t base_len = out_.size();
+    out_.reserve(base_len + est);
+    out_.resize(base_len + est);
+    char *cursor = &out_[base_len];
+    char *limit = &out_[0] + out_.capacity();
 
-    // 2. Stack
-    size_t stack_cap = 4096;
-    char *stack_start = (char *)std::malloc(stack_cap);
-    if (!stack_start)
-      return;
-
-    char *stack_ptr = stack_start;
-    char *stack_limit = stack_start + stack_cap;
-
-    // Use local state variable
-    uint8_t state = 0; // Root state
+    const char *str_base = doc_.external_buffer
+                               ? doc_.external_buffer
+                               : (const char *)doc_.string_buffer.data();
 
     const uint64_t *tape = doc_.tape.data();
-    size_t n = doc_.tape.size();
+    const uint64_t *t_end = tape + doc_.tape.size();
+    const uint64_t *t = tape;
 
-    const char *str_base = doc_.external_buffer;
-    if (!str_base)
-      str_base = (const char *)doc_.string_buffer.data();
+    // State Machine Definitions
+    enum { ARR_F = 0, ARR_N = 1, OBJ_F = 2, OBJ_N = 3, OBJ_K = 4, TOP = 5 };
 
-    // 3. Main Loop
-    for (size_t i = 0; i < n; /* inc inside */) {
-      // Hot Path Check
+    // Separator Table: what to emit before the value
+    static constexpr char sep_table[6] = {0, ',', 0, ',', ':', 0};
+
+    // Next State Table: transition after emitting value
+    // ARR_F -> ARR_N (First element done -> Next element)
+    // ARR_N -> ARR_N (Next element done -> Next element)
+    // OBJ_F -> OBJ_K (First Key done -> Expect Value)
+    // OBJ_N -> OBJ_K (Next Key done -> Expect Value)
+    // OBJ_K -> OBJ_N (Value done -> Expect Next Key)
+    // TOP -> TOP
+    static constexpr uint8_t next_state_table[6] = {ARR_N, ARR_N, OBJ_K,
+                                                    OBJ_K, OBJ_N, TOP};
+
+    uint8_t state = TOP;
+    int depth = -1;
+    uint8_t stack[1024]; // Max depth 1024
+
+            static void *dt[256] = {
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_String    , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Int64Full , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_StringInlineExt,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Array     ,
+        &&L_Error     , &&L_EndArray  , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Double    , &&L_Error     , &&L_False     , &&L_Error     ,
+        &&L_Error     , &&L_Int64     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Null      , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_StringInline,
+        &&L_True      , &&L_UInt64    , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Object    ,
+        &&L_Error     , &&L_EndObject , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+    };
+
+    while (t < t_end) {
       if (BEAST_UNLIKELY(cursor + 512 > limit)) {
-        flush();
+        size_t used = cursor - &out_[0];
+        out_.resize(out_.capacity() * 2);
+        cursor = &out_[0] + used;
+        limit = &out_[0] + out_.capacity();
       }
 
-      uint64_t val = tape[i];
-      Type type = (Type)((val >> 56) & 0xFF);
+      // Prefetch 4 slots ahead to hide DRAM latency
+      __builtin_prefetch(t + 4, 0, 1);
 
-      // Handle Closing (End of Container)
-      if (type == Type::Array || type == Type::Object) {
-        uint64_t p = val & 0x00FFFFFFFFFFFFFFULL;
-        if (p < i) {
-          // Pop Stack
-          if (stack_ptr > stack_start) {
-            stack_ptr--;
-            state = *stack_ptr;
-          }
-          *cursor++ = (type == Type::Array) ? ']' : '}';
-          i++;
-          continue;
-        }
+      uint64_t val = *t;
+      uint8_t tc = (uint8_t)(val >> 56);
+
+      bool closing =
+          ((tc == (uint8_t)Type::Object || tc == (uint8_t)Type::Array) &&
+           (val & 0x00FFFFFFFFFFFFFFULL) <= (size_t)(t - tape));
+
+      // Emit separator based on current state (only if not closing)
+      if (BEAST_LIKELY(!closing)) {
+        char sep = sep_table[state];
+        if (sep)
+          *cursor++ = sep;
       }
 
-      // Handle Prefix (Comma/Colon)
-      char prefix = state_prefix[state];
-      if (prefix)
-        *cursor++ = prefix;
+      goto *dt[tc];
 
-      // Update State for next element
-      state = next_state[state];
-
-      // Process Value
-      switch (type) {
-      case Type::Null:
-        std::memcpy(cursor, "null", 4);
-        cursor += 4;
-        i++;
-        break;
-      case Type::True:
-        std::memcpy(cursor, "true", 4);
-        cursor += 4;
-        i++;
-        break;
-      case Type::False:
-        std::memcpy(cursor, "false", 5);
-        cursor += 5;
-        i++;
-        break;
-      case Type::Int64: {
-        int64_t v = (int64_t)(val & 0x00FFFFFFFFFFFFFFULL);
-        if (val & (1ULL << 55))
-          v |= 0xFF00000000000000ULL;
-
-        if (v >= 0) {
-          cursor = u64toa::to_chars(cursor, (uint64_t)v);
-        } else {
-          *cursor++ = '-';
-          cursor = u64toa::to_chars(cursor, (uint64_t)(0 - (uint64_t)v));
-        }
-        i++;
-        break;
-      }
-      case Type::Int64Full: {
-        int64_t val;
-        uint64_t payload = tape[i + 1];
-        std::memcpy(&val, &payload, 8);
-        *cursor++ = '-';
-        uint64_t abs_v = (uint64_t)(-(val + 1)) + 1;
-        cursor = u64toa::to_chars(cursor, abs_v);
-        i += 2;
-        break;
-      }
-      case Type::UInt64: {
-        uint64_t v = tape[i + 1];
-        cursor = u64toa::to_chars(cursor, v);
-        i += 2;
-        break;
-      }
-      case Type::Double: {
-        double d;
-        uint64_t bits = tape[i + 1];
-        std::memcpy(&d, &bits, 8);
-        auto res = std::to_chars(cursor, limit, d);
-        cursor = res.ptr;
-        i += 2;
-        break;
-      }
-      case Type::String: {
-        uint64_t payload = val & 0x00FFFFFFFFFFFFFFULL;
-        uint32_t len = (uint32_t)(payload >> 32);
-        uint32_t off = (uint32_t)(payload & 0xFFFFFFFF);
-        const char *str = str_base + off;
-
-        size_t required = len * 6 + 32;
-        if (BEAST_UNLIKELY(cursor + required > limit)) {
-          flush();
-          if (required > 16384) {
-            size_t pos = out_.size();
-            out_.resize(pos + required);
-            char *dst = &out_[pos];
-            *dst++ = '"';
-            dst = simd::escape_string(str, len, dst);
-            *dst++ = '"';
-            out_.resize(dst - out_.data());
-            i++;
-            break;
-          }
-        }
-
-        *cursor++ = '"';
-        cursor = simd::escape_string(str, len, cursor);
-        *cursor++ = '"';
-        i++;
-        break;
-      }
-      case Type::StringInline: {
-        // Optimization: Merge opening quote with payload using shift
-        // val: [Type(8)|Len(8)|Chars(6)]
-        // val << 8 | '"': [Len(8)|Chars(6)|'"']
-        // Memory (LE): " C0..C5 Len
-        uint64_t tagged = (val << 8) | '"';
-        std::memcpy(cursor, &tagged, 8);
-
-        uint32_t len = (uint32_t)((val >> 48) & 0xFF);
-        cursor += 1 + len;
-        *cursor++ = '"';
-        i++;
-        break;
-      }
-      case Type::StringInlineExt: {
-        // Slot 1: [Type(8)|Len(8)|Chars(6)] -> Write ", C0..C5, Len
-        uint64_t tagged = (val << 8) | '"';
-        std::memcpy(cursor, &tagged, 8);
-
-        // Slot 2: [Chars(8)]
-        uint64_t val2 = tape[i + 1];
-        // Write C6..C13 at cursor + 7 (Overwrites Len byte)
-        std::memcpy(cursor + 7, &val2, 8);
-
-        uint32_t len = (uint32_t)((val >> 48) & 0xFF);
-        cursor += 1 + len;
-        *cursor++ = '"';
-        i += 2;
-        break;
-      }
-      case Type::Array: { // Opening
-        *cursor++ = '[';
-        // Push State
-        if (BEAST_UNLIKELY(stack_ptr >= stack_limit - 1)) {
-          size_t used = stack_ptr - stack_start;
-          size_t new_cap = stack_cap * 2;
-          char *new_stack = (char *)std::realloc(stack_start, new_cap);
-          if (!new_stack) {
-            std::free(stack_start);
-            flush();
-            return;
-          }
-          stack_start = new_stack;
-          stack_ptr = stack_start + used;
-          stack_limit = stack_start + new_cap;
-          stack_cap = new_cap;
-        }
-        *stack_ptr = state; // Save parent state
-        stack_ptr++;
-        state = 0; // New Array State
-        i++;
-        break;
-      }
-      case Type::Object: { // Opening
-        *cursor++ = '{';
-        if (BEAST_UNLIKELY(stack_ptr >= stack_limit - 1)) {
-          size_t used = stack_ptr - stack_start;
-          size_t new_cap = stack_cap * 2;
-          char *new_stack = (char *)std::realloc(stack_start, new_cap);
-          if (!new_stack) {
-            std::free(stack_start);
-            flush();
-            return;
-          }
-          stack_start = new_stack;
-          stack_ptr = stack_start + used;
-          stack_limit = stack_start + new_cap;
-          stack_cap = new_cap;
-        }
-        *stack_ptr = state; // Save parent state
-        stack_ptr++;
-        state = 2; // New Object State
-        i++;
-        break;
-      }
-      default:
-        i++;
-        break;
-      }
+    L_Null: {
+      uint32_t w = 0x6c6c756e;
+      std::memcpy(cursor, &w, 4);
+      cursor += 4;
+      t++;
+      state = next_state_table[state];
+      continue;
+    }
+    L_True: {
+      uint32_t w = 0x65757274;
+      std::memcpy(cursor, &w, 4);
+      cursor += 4;
+      t++;
+      state = next_state_table[state];
+      continue;
+    }
+    L_False: {
+      uint32_t w = 0x736c6166;
+      std::memcpy(cursor, &w, 4);
+      cursor += 4;
+      *cursor++ = 'e';
+      t++;
+      state = next_state_table[state];
+      continue;
     }
 
-    std::free(stack_start);
-    flush();
+    L_Int64: {
+      int64_t v = (int64_t)(val & 0x00FFFFFFFFFFFFFFULL);
+      if (val & (1ULL << 55))
+        v |= (int64_t)0xFF00000000000000ULL;
+      if (v >= 0)
+        cursor = u64toa::to_chars(cursor, (uint64_t)v);
+      else {
+        *cursor++ = '-';
+        cursor = u64toa::to_chars(cursor, (uint64_t)(-v));
+      }
+      t++;
+      state = next_state_table[state];
+      continue;
+    }
+    L_Int64Full: {
+      *cursor++ = '-';
+      uint64_t raw;
+      std::memcpy(&raw, t + 1, 8);
+      int64_t v = (int64_t)raw;
+      cursor = u64toa::to_chars(cursor, v < 0 ? (uint64_t)(-v) : (uint64_t)v);
+      t += 2;
+      state = next_state_table[state];
+      continue;
+    }
+    L_UInt64: {
+      uint64_t payload = val & 0x00FFFFFFFFFFFFFFULL;
+      if (payload == 0) {
+        t++;
+        cursor = u64toa::to_chars(cursor, *t);
+      } else {
+        cursor = u64toa::to_chars(cursor, payload);
+      }
+      t++;
+      state = next_state_table[state];
+      continue;
+    }
+    L_Double: {
+      double d;
+      uint64_t bits = *(t + 1);
+      std::memcpy(&d, &bits, 8);
+      cursor = std::to_chars(cursor, cursor + 32, d).ptr;
+      t += 2;
+      state = next_state_table[state];
+      continue;
+    }
+    L_String: {
+      uint64_t payload = val & 0x00FFFFFFFFFFFFFFULL;
+      uint32_t slen = (uint32_t)(payload >> 32);
+      uint32_t off = (uint32_t)(payload & 0xFFFFFFFF);
+      *cursor++ = '"';
+      cursor = simd::escape_string(str_base + off, slen, cursor);
+      *cursor++ = '"';
+      t++;
+      state = next_state_table[state];
+      continue;
+    }
+
+    L_StringInline: {
+      uint32_t len = (uint32_t)((val >> 48) & 0xFF);
+      uint64_t chars = val & 0x0000FFFFFFFFFFFFULL;
+      uint64_t packed = (chars << 8) | 0x22ULL;
+      std::memcpy(cursor, &packed, 8);
+      cursor[len + 1] = '"';
+      cursor += len + 2;
+      t++;
+      state = next_state_table[state];
+      continue;
+    }
+    L_StringInlineExt: {
+      uint32_t len = (uint32_t)((val >> 48) & 0xFF);
+      *cursor++ = '"';
+      uint64_t chars = val & 0x0000FFFFFFFFFFFFULL;
+      std::memcpy(cursor, &chars, 6);
+      uint64_t v2 = *(t + 1);
+      std::memcpy(cursor + 6, &v2, len - 6);
+      cursor += len;
+      *cursor++ = '"';
+      t += 2;
+      state = next_state_table[state];
+      continue;
+    }
+    L_Object: {
+      if (closing)
+        goto L_EndObject;
+      *cursor++ = '{';
+      stack[++depth] = state; // Push old state
+      state = OBJ_F;          // Enter Object state
+      t++;
+      continue;
+    }
+    L_Array: {
+      if (closing)
+        goto L_EndArray;
+      *cursor++ = '[';
+      stack[++depth] = state; // Push old state
+      state = ARR_F;          // Enter Array state
+      t++;
+      continue;
+    }
+    L_EndObject: {
+      *cursor++ = '}';
+      uint8_t old_state = stack[depth--];
+      state = next_state_table[old_state]; // Transition parent state
+      t++;
+      continue;
+    }
+    L_EndArray: {
+      *cursor++ = ']';
+      uint8_t old_state = stack[depth--];
+      state = next_state_table[old_state]; // Transition parent state
+      t++;
+      continue;
+    }
+    L_Error:
+      break;
+    }
+
+    out_.resize(cursor - &out_[0]);
   }
 };
 
-// ============================================================================
+
 // Bitmap Parser (Branchless Tape Builder)
 // ============================================================================
 
