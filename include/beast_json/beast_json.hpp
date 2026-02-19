@@ -64,7 +64,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <thread>
+// #include <thread> // Unused
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -350,7 +350,7 @@ public:
     size_t aligned = (size + 7) & ~size_t(7);
 
     // Fast Path: Alloc from TLAB
-    if (BEAST_LIKELY(tlab_ptr + aligned <= tlab_end)) {
+    if (BEAST_LIKELY(tlab_ptr && tlab_ptr + aligned <= tlab_end)) {
       void *ptr = tlab_ptr;
       tlab_ptr += aligned;
       tlab_hits_.fetch_add(1, std::memory_order_relaxed);
@@ -397,6 +397,7 @@ public:
 
 protected:
   void *do_allocate(size_t bytes, size_t alignment) override {
+    (void)alignment; // Unused
     return allocate(bytes);
   }
 
@@ -574,7 +575,8 @@ alignas(64) static const uint8_t escape_table[256] = {
 // Whitespace check using bit manipulation
 BEAST_INLINE bool is_whitespace(char c) {
   // Bitmap: ' '=32, '\t'=9, '\n'=10, '\r'=13
-  return ((0x100003600ULL >> static_cast<unsigned char>(c)) & 1) != 0;
+  unsigned char uc = static_cast<unsigned char>(c);
+  return uc <= 32 && ((0x100003600ULL >> uc) & 1);
 }
 
 // Digit check
@@ -2113,7 +2115,7 @@ public:
   using allocator_type = Allocator;
 
   Value() : type_(ValueType::Null) {}
-  explicit Value(Allocator alloc) : type_(ValueType::Null) {}
+  explicit Value(Allocator alloc) : type_(ValueType::Null) { (void)alloc; }
   Value(std::nullptr_t) : type_(ValueType::Null) {}
   Value(bool b) : type_(ValueType::Boolean), bool_val(b) {}
   Value(int i) : type_(ValueType::Integer), int_val(i) {}
@@ -2444,6 +2446,8 @@ public:
   }
 
   std::string dump(int indent = -1, int current_indent = 0) const {
+    (void)indent;
+    (void)current_indent;
     StringBuffer buf;
     Serializer ser(buf);
     ser.write(*this);
@@ -4300,14 +4304,14 @@ find_array_boundaries(const char *json, size_t len, int partitions,
   size_t block_idx = 0;
   uint64_t bits = idx.structural_bits[0];
   size_t base_offset = 0;
-  size_t total_chars_scanned = 0;
-  size_t last_comma_offset = 0;
+  // size_t total_chars_scanned = 0;
+  // size_t last_comma_offset = 0;
 
   while (block_idx < idx.structural_bits.size()) {
     while (bits != 0) {
       int bit_pos = __builtin_ctzll(bits);
       size_t offset = base_offset + bit_pos;
-      total_chars_scanned++;
+      // total_chars_scanned++; // Removed (unused)
 
       if (offset >= len) {
         // std::cout << "[Split] Exit: offset " << offset << " >= len " << len
@@ -4340,7 +4344,7 @@ find_array_boundaries(const char *json, size_t len, int partitions,
         // Check for split point: comma at depth==1 BEFORE updating depth
         if (depth == 1 && c == ',') {
           comma_offsets.push_back(offset);
-          last_comma_offset = offset;
+          // last_comma_offset = offset; // Removed (unused)
         }
 
         // Update depth based on current character
@@ -4411,7 +4415,7 @@ phase2:
 
 // Legacy fallback (now unused mostly)
 BEAST_INLINE std::vector<const char *>
-find_array_boundaries(const char *p, size_t len, int partitions) {
+find_array_boundaries(const char * /*p*/, size_t /*len*/, int /*partitions*/) {
   // ... (Keep existing implementation just in case, or delete?)
   // I will overwrite it with the implementation that builds a temp index?
   // Or just leave it for potential scalar fallback?
@@ -5262,9 +5266,9 @@ private:
           throw_error("Invalid escape");
         }
       } else {
-        // Should be control char if scan stopped here and not " or \
-         if (static_cast<unsigned char>(c) < 32)
-        throw_error("Invalid control character");
+        // Should be control char if scan stopped here and not " or backslash
+        if (static_cast<unsigned char>(c) < 32)
+          throw_error("Invalid control character");
         result += c;
       }
     }
@@ -5878,6 +5882,7 @@ struct ParseOptions {
   bool insitu = false;       // Zero-copy parsing (modifies input)
   bool padding_safe = false; // Input has 64 bytes of zero padding
   bool use_bitmap = false;   // Stage 2: User bitmap-based parsing
+  bool validate_utf8 = true; // RFC 8259 Compliance: Validate UTF-8
 };
 
 struct BitmapIterator {
@@ -6494,7 +6499,7 @@ public:
       doc_->string_buffer.resize(used_str);
     }
 
-    return {Error::Ok};
+    return {Error::Ok, 0, 0, 0, ""};
   }
 
   BEAST_INLINE void push_tape(uint64_t val) { *tape_head_++ = val; }
@@ -6645,13 +6650,13 @@ public:
       char *mutable_end = const_cast<char *>(scanned_end);
       *mutable_end = '\0'; // Overwrite closing quote
 
-      // Lazy Validation Removed: Already validated by scan_string_fused!
-      /* if (has_utf8) {
+      // Validation (RFC 8259)
+      if (has_utf8 && options_.validate_utf8) {
         if (!simd::validate_utf8(start_ptr, len)) {
           p_ = (char *)start_ptr;
           return nullptr;
         }
-      } */
+      }
 
       size_t input_offset = start_ptr - start_;
       uint64_t len_bits = (uint64_t)len;
@@ -6782,7 +6787,7 @@ public:
     size_t len = write_head - start_ptr;
 
     // Lazy Validation
-    if (has_utf8) {
+    if (has_utf8 && options_.validate_utf8) {
       if (!simd::validate_utf8(start_ptr, len)) {
         p_ = (char *)start_ptr; // Approx error location
         return nullptr;
@@ -6820,41 +6825,23 @@ public:
 
       // Inline String Optimization (Phase 13)
       if (len <= 14) {
+        if (has_utf8 && options_.validate_utf8) {
+          if (!simd::validate_utf8(p, len)) {
+            p_ = (char *)p;
+            return nullptr;
+          }
+        }
+
         if (len <= 5) {
           // Type::StringInline [Type(8)|Len(8)|Chars(48)]
           uint64_t payload = (uint64_t)len << 48;
           uint64_t chars = 0;
-          // Safe copy for short strings (register/stack based)
-          // We can just memcpy to uint64 and mask?
-          // Or just loop? Loop is fine for 5 bytes.
-          // Actually, memcpy to a local uint64 is safest/fastest on 64-bit.
           std::memcpy(&chars, p, len);
-          // Little Endian: bytes 0..len-1 are at bottom.
-          // We want bytes 0..5 at [16..63]? NO.
-          // Element constructor shifts Type to top 8 bits.
-          // Payload is lower 56 bits.
-          // We want: [Type(8) | Len(8) | Char0 | Char1 ... ]
-          // payload arg to Element is 56 bits.
-          // So payload = (len << 48) | (chars & 0xFFFFFFFFFFFF)
           payload |= (chars & 0xFFFFFFFFFFFFULL);
           push_tape(Element(Type::StringInline, payload).data);
           return const_cast<char *>(scanned_end) + 1;
-        } else {
-          // Type::StringInlineExt [Type(8)|Len(8)|Chars(48)] + [Chars(64)]
-          // Total 14 chars max.
-          // Element 1: Len + first 6 chars
-          uint64_t payload1 = (uint64_t)len << 48;
-          uint64_t chars1 = 0;
-          std::memcpy(&chars1, p, 6);
-          payload1 |= (chars1 & 0xFFFFFFFFFFFFULL);
-          push_tape(Element(Type::StringInlineExt, payload1).data);
-
-          // Element 2: Remaining 8 chars (max)
-          uint64_t chars2 = 0;
-          std::memcpy(&chars2, p + 6, len - 6);
-          push_tape(chars2); // Raw payload, no type header for 2nd slot
-          return const_cast<char *>(scanned_end) + 1;
         }
+        // StringInlineExt removed due to incompatibility with string_view API
       }
 
       // Zero-Copy Fast Path: no escapes, len > 14
@@ -6963,12 +6950,23 @@ public:
           decoded = '\b';
         else if (escape == 'f')
           decoded = '\f';
-        else if (escape == '/' || escape == '\\' || escape == '"')
-          decoded = escape;
+        else if (escape == '/')
+          decoded = '/';
+        else if (escape == '\\')
+          decoded = '\\';
+        else if (escape == '"')
+          decoded = '"';
         else
           decoded = escape; // Non-standard but widely accepted? prefer strict?
-        // Existing implementation allowed it. Keeping behavior.
 
+        // Check buffer space
+        if (BEAST_UNLIKELY(str_head_ >= str_end_)) {
+          size_t curr_off = str_head_ - (char *)doc_->string_buffer.data();
+          doc_->string_buffer.resize(doc_->string_buffer.capacity() * 2);
+          str_head_ = (char *)doc_->string_buffer.data() + curr_off;
+          str_end_ = (char *)doc_->string_buffer.data() +
+                     doc_->string_buffer.capacity();
+        }
         *str_head_++ = decoded;
       } else {
         // Control char or other (scanned by simd but stopped)
@@ -6979,12 +6977,27 @@ public:
         // Should not happen if scan_copy_string is correct, unless it
         // stopped for non-special reasons? scan_copy_string stops on " \ or
         // < 0x20. It consumes everything else.
+        // Check buffer space
+        if (BEAST_UNLIKELY(str_head_ >= str_end_)) {
+          size_t curr_off = str_head_ - (char *)doc_->string_buffer.data();
+          doc_->string_buffer.resize(doc_->string_buffer.capacity() * 2);
+          str_head_ = (char *)doc_->string_buffer.data() + curr_off;
+          str_end_ = (char *)doc_->string_buffer.data() +
+                     doc_->string_buffer.capacity();
+        }
         *str_head_++ = c;
         p++;
       }
     }
 
   finish:
+    if (BEAST_UNLIKELY(str_head_ >= str_end_)) {
+      size_t curr_off = str_head_ - (char *)doc_->string_buffer.data();
+      doc_->string_buffer.resize(doc_->string_buffer.capacity() * 2);
+      str_head_ = (char *)doc_->string_buffer.data() + curr_off;
+      str_end_ =
+          (char *)doc_->string_buffer.data() + doc_->string_buffer.capacity();
+    }
     *str_head_++ = '\0';
     size_t len = (size_t)((str_head_ - 1) -
                           ((char *)doc_->string_buffer.data() + offset));
@@ -7942,7 +7955,7 @@ private:
       Value key = parse_string(next_off);
 
       // Parse Colon
-      size_t colon_off = iter_.next();
+      iter_.next(); // colon_off unused
       // Should be ':'
 
       // Parse Value
@@ -8274,13 +8287,33 @@ public:
   }
 
   std::string_view get_string() const {
-    if (type() != Type::String)
+    Type t = type();
+    if (t == Type::String) {
+      uint64_t payload = doc_->tape[index_] & 0x00FFFFFFFFFFFFFFULL;
+      uint32_t len = (uint32_t)(payload >> 32);
+      uint32_t off = (uint32_t)(payload & 0xFFFFFFFF);
+      return std::string_view((const char *)doc_->string_buffer.data() + off,
+                              len);
+    } else if (t == Type::RawString) {
+      uint64_t payload = doc_->tape[index_] & 0x00FFFFFFFFFFFFFFULL;
+      uint32_t len = (uint32_t)(payload >> 32);
+      uint32_t off = (uint32_t)(payload & 0xFFFFFFFF);
+      if (BEAST_LIKELY(doc_->json_input))
+        return std::string_view(doc_->json_input + off, len);
       return {};
-    uint64_t payload = doc_->tape[index_] & 0x00FFFFFFFFFFFFFFULL;
-    uint32_t len = (uint32_t)(payload >> 32);
-    uint32_t off = (uint32_t)(payload & 0xFFFFFFFF);
-    return std::string_view((const char *)doc_->string_buffer.data() + off,
-                            len);
+    } else if (t == Type::StringInline) {
+      uint64_t payload = doc_->tape[index_] & 0x00FFFFFFFFFFFFFFULL;
+      uint32_t len = (uint32_t)(payload >> 48);
+      // Bytes 0..5 are at the start of payload (LSB)
+      // Since map to memory is implementation defined but often payload is in
+      // register. We want to return view to tape memory. tape[index] contains
+      // the element. Element layout: [Type(8)|Len(8)|Chars(48)]? No, Element
+      // struct: (Type << 56) | payload. Payload for StringInline: (len << 48) |
+      // chars. chars are low 48 bits. So chars are at the "bottom" of the
+      // uint64. On Little Endian: bytes 0-5.
+      return std::string_view((const char *)&doc_->tape[index_], len);
+    }
+    return {};
   }
 
   // Fluent Implicit Conversions
@@ -8348,13 +8381,8 @@ public:
 
     while (curr < payload) {
       // Key
-      uint64_t key_val = doc_->tape[curr];
-      // Extract key string
-      uint64_t k_payload = key_val & 0x00FFFFFFFFFFFFFFULL;
-      uint32_t k_len = (uint32_t)(k_payload >> 32);
-      uint32_t k_off = (uint32_t)(k_payload & 0xFFFFFFFF);
-      std::string_view k_str((const char *)doc_->string_buffer.data() + k_off,
-                             k_len);
+      TapeView key_view(*doc_, curr);
+      std::string_view k_str = key_view.get_string();
 
       curr++; // Skip Key
 
@@ -8486,12 +8514,9 @@ public:
       uint64_t curr = index_ + 1;
       while (curr < payload) {
         // Key
-        uint64_t key_val = doc_->tape[curr];
-        uint64_t k_payload = key_val & 0x00FFFFFFFFFFFFFFULL;
-        uint32_t k_len = (uint32_t)(k_payload >> 32);
-        uint32_t k_off = (uint32_t)(k_payload & 0xFFFFFFFF);
-        std::string_view k_str((const char *)doc_->string_buffer.data() + k_off,
-                               k_len);
+        // Key
+        TapeView key_view(*doc_, curr);
+        std::string_view k_str = key_view.get_string();
 
         curr++; // Skip Key
         TapeView v(*doc_, curr);

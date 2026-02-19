@@ -36,11 +36,15 @@ function(add_beast_gtest name)
     target_link_libraries(${name} PRIVATE beast_json::beast_json gtest_main)
     target_compile_features(${name} PRIVATE cxx_std_17)
     
-    # Enable coverage
-    target_compile_options(${name} PRIVATE -O0 -g --coverage -fprofile-arcs -ftest-coverage)
-    target_link_options(${name} PRIVATE --coverage)
+    # Enable coverage (Disabled for Sanitizer run to avoid noise/conflicts)
+    # target_compile_options(${name} PRIVATE -O0 -g --coverage -fprofile-arcs -ftest-coverage)
+    # target_link_options(${name} PRIVATE --coverage)
+    # Enable coverage (Disabled for Sanitizer run to avoid noise/conflicts)
+    # target_compile_options(${name} PRIVATE -O0 -g --coverage -fprofile-arcs -ftest-coverage)
+    # target_link_options(${name} PRIVATE --coverage)
+    target_compile_options(${name} PRIVATE -O1 -g -Wall -Wextra)
 
-    gtest_discover_tests(${name})
+    gtest_discover_tests(${name} DISCOVERY_TIMEOUT 60)
 endfunction()
 
 # Migrated tests
