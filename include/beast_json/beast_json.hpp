@@ -3527,7 +3527,11 @@ BEAST_INLINE size_t fill_bitmap(const char *src, size_t len, BitmapIndex &idx) {
 
     uint64_t inside = in_string & ~clean_quotes;
     uint64_t external_non_ws = non_ws & ~inside;
-    uint64_t external_symbols = (str | clean_quotes);
+    // BUG FIX: external_symbols must exclude characters inside strings.
+    // `str` marks ALL { } [ ] , : characters regardless of string context.
+    // We must mask by ~inside to get only the EXTERNAL structural characters.
+    // `clean_quotes` are by definition at string boundaries (not inside).
+    uint64_t external_symbols = (str & ~inside) | clean_quotes;
 
     // Any non-whitespace that is not a symbol and follows a whitespace or a
     // symbol
@@ -3857,7 +3861,6 @@ BEAST_INLINE char *escape_string(const char *src, size_t len, char *dst) {
   }
   return dst;
 }
-
 
 // Combined Stage 1: Fill Bitmap + Find Split Points (One Pass)
 BEAST_INLINE std::vector<const char *>
@@ -4751,53 +4754,101 @@ BEAST_INLINE CopyResult<CharT> scan_copy_string(CharT *src, CharT *src_end,
   const uint8x16_t quote = vdupq_n_u8('"');
   const uint8x16_t backslash = vdupq_n_u8('\\');
   const uint8x16_t control = vdupq_n_u8(0x1F);
+  const uint8x16_t high80 = vdupq_n_u8(0x80);
 
   bool no_write = ((const char *)src == (const char *)dst);
 
+  // 32-byte unrolled loop (2 x 16-byte NEON)
+  while (src + 32 <= src_end && dst + 32 <= dst_end) {
+    uint8x16_t a, b;
+    std::memcpy(&a, src, 16);
+    std::memcpy(&b, src + 16, 16);
+
+    uint8x16_t ma =
+        vorrq_u8(vorrq_u8(vceqq_u8(a, quote), vceqq_u8(a, backslash)),
+                 vcleq_u8(a, control));
+    uint8x16_t mb =
+        vorrq_u8(vorrq_u8(vceqq_u8(b, quote), vceqq_u8(b, backslash)),
+                 vcleq_u8(b, control));
+
+    // Accumulate UTF-8 flag (any byte ≥ 0x80) across both chunks
+    uint8x16_t high_a = vcgeq_u8(a, high80);
+    uint8x16_t high_b = vcgeq_u8(b, high80);
+    if (vmaxvq_u8(vorrq_u8(high_a, high_b)) != 0)
+      has_utf8 = true;
+
+    // Combined special-char check
+    uint8x16_t combined = vorrq_u8(ma, mb);
+    if (BEAST_LIKELY(vmaxvq_u8(combined) == 0)) {
+      // No specials: bulk copy 32 bytes
+      if (!no_write) {
+        vst1q_u8((uint8_t *)dst, a);
+        vst1q_u8((uint8_t *)dst + 16, b);
+      }
+      src += 32;
+      dst += 32;
+      continue;
+    }
+
+    // Special char found — determine which chunk and exact index
+    uint64_t low_a = vgetq_lane_u64(vreinterpretq_u64_u8(ma), 0);
+    int idx;
+    if (vmaxvq_u8(ma) != 0) {
+      if (low_a != 0) {
+        idx = __builtin_ctzll(low_a) / 8;
+      } else {
+        uint64_t high = vgetq_lane_u64(vreinterpretq_u64_u8(ma), 1);
+        idx = 8 + __builtin_ctzll(high) / 8;
+      }
+      if (!no_write)
+        std::memcpy(dst, src, idx);
+      return {src + idx, dst + idx, has_utf8};
+    } else {
+      // Special char is in chunk b (bytes 16..31)
+      if (!no_write)
+        vst1q_u8((uint8_t *)dst, a);
+      uint64_t low_b = vgetq_lane_u64(vreinterpretq_u64_u8(mb), 0);
+      if (low_b != 0) {
+        idx = 16 + __builtin_ctzll(low_b) / 8;
+      } else {
+        uint64_t high_b2 = vgetq_lane_u64(vreinterpretq_u64_u8(mb), 1);
+        idx = 24 + __builtin_ctzll(high_b2) / 8;
+      }
+      if (!no_write)
+        std::memcpy(dst + 16, src + 16, idx - 16);
+      return {src + idx, dst + idx, has_utf8};
+    }
+  }
+
+  // 16-byte tail
   while (src + 16 <= src_end && dst + 16 <= dst_end) {
     uint8x16_t chunk;
     std::memcpy(&chunk, src, 16);
 
-    uint8x16_t m1 = vceqq_u8(chunk, quote);
-    uint8x16_t m2 = vceqq_u8(chunk, backslash);
-    uint8x16_t m3 = vcleq_u8(chunk, control);
-    uint8x16_t mask = vorrq_u8(vorrq_u8(m1, m2), m3);
+    uint8x16_t mask =
+        vorrq_u8(vorrq_u8(vceqq_u8(chunk, quote), vceqq_u8(chunk, backslash)),
+                 vcleq_u8(chunk, control));
+
+    if (vmaxvq_u8(vcgeq_u8(chunk, high80)) != 0)
+      has_utf8 = true;
 
     if (vmaxvq_u8(mask) != 0) {
       uint64_t low = vgetq_lane_u64(vreinterpretq_u64_u8(mask), 0);
-      int idx;
-      if (low != 0) {
-        idx = __builtin_ctzll(low) / 8;
-      } else {
-        uint64_t high = vgetq_lane_u64(vreinterpretq_u64_u8(mask), 1);
-        idx = 8 + __builtin_ctzll(high) / 8;
-      }
-
-      // Perform partial copy for the valid prefix
-      if (!no_write) {
+      int idx = (low != 0) ? __builtin_ctzll(low) / 8
+                           : 8 + __builtin_ctzll(vgetq_lane_u64(
+                                     vreinterpretq_u64_u8(mask), 1)) /
+                                     8;
+      if (!no_write)
         std::memcpy(dst, src, idx);
-      }
-
-      if (vmaxvq_u8(chunk) >= 0x80)
-        has_utf8 = true; // Conservative check (may be past idx)
-
       return {src + idx, dst + idx, has_utf8};
     }
-
-    // No match, copy full chunk
-    if (!no_write) {
-      asm volatile("" ::: "memory");
+    if (!no_write)
       vst1q_u8((uint8_t *)dst, chunk);
-    }
-
-    if (vmaxvq_u8(chunk) >= 0x80)
-      has_utf8 = true;
-
     src += 16;
     dst += 16;
   }
 #endif
-  // Scalar fallback
+  // Scalar tail
   while (src < src_end && dst < dst_end) {
     char c = *src;
     if ((unsigned char)c >= 0x80)
@@ -5658,8 +5709,10 @@ enum Type : uint8_t {
   UInt64 = 'u',
   Double = 'd',
   String = '"',
-  StringInline = 's',    // Payload: [Len(1)|Chars(6)]
-  StringInlineExt = 'S', // Payload: [Len(1)|Chars(6)] + Next[Chars(8)]
+  StringInline = 's',    // Payload: [Len(8)|Chars(48)]
+  StringInlineExt = 'S', // Payload: [Len(8)|Chars(48)] + Next[Chars(64)]
+  RawString =
+      'r', // Payload: [Len(24)|JsonOffset(32)] - zero-copy, no-escape only
   Array = '[',
   Object = '{'
 };
@@ -5801,6 +5854,8 @@ public:
   PodVector<uint64_t> tape;
   PodVector<uint8_t> string_buffer;
   const char *external_buffer = nullptr;
+  const char *json_input =
+      nullptr; // Original JSON buffer (for RawString zero-copy)
 
   Document(std::pmr::memory_resource *mr = std::pmr::get_default_resource())
       : tape(mr), string_buffer(mr) {
@@ -5885,6 +5940,20 @@ struct BitmapIterator {
     if (bit > 0)
       current_bits_ &= (~0ULL << bit);
   }
+  // Find the next set bit in quote_bits (for nitro parser string skip)
+  BEAST_INLINE size_t next_quote(size_t after_pos) const {
+    size_t block = (after_pos + 1) / 64;
+    size_t bit = (after_pos + 1) % 64;
+    while (block < idx_->quote_bits.size()) {
+      uint64_t bits = idx_->quote_bits[block] & (~0ULL << bit);
+      if (bits) {
+        return block * 64 + __builtin_ctzll(bits);
+      }
+      block++;
+      bit = 0;
+    }
+    return (size_t)-1;
+  }
 };
 
 class Parser {
@@ -5964,6 +6033,8 @@ public:
     int depth = -1;
     bool expect_value = true;
     bool expect_sep = false;
+    bool after_colon =
+        false; // Tracks if last separator was ':' (value context)
 
     const char *curr = p;
     const char *const base = start_;
@@ -6012,6 +6083,7 @@ public:
     *tape++ = Element(Type::Object, 0).data;
     expect_value = true;
     expect_sep = false;
+    after_colon = false; // Reset: first string in new object is a key
     NEXT();
 
   L_array_start:
@@ -6022,6 +6094,7 @@ public:
     *tape++ = Element(Type::Array, 0).data;
     expect_value = true;
     expect_sep = false;
+    after_colon = false; // Reset: in array context, no keys
     NEXT();
 
   L_obj_end:
@@ -6062,30 +6135,122 @@ public:
     expect_sep = true;
     NEXT();
 
-  L_string:
-    if (depth >= 0 && types[depth] == Type::Object && !expect_value &&
-        !expect_sep) {
-      // Key
-    } else if (!expect_value) {
+  L_string: {
+    // In an object:
+    //  - After '{' or ',': expect_value=true, expect_sep=false -> KEY
+    //  - After ':': expect_value=true, expect_sep=false -> also matches! BUG
+    //  source.
+    // Original approach: after key parse, set expect_sep=false (waiting for
+    // ':') After value parse, set expect_sep=true. The key check at line 6082
+    // (original) used !expect_sep AFTER parse to determine. But for VALUE after
+    // ':', expect_sep is also false going into L_string. FIX: Check post-parse
+    // state differently. We can use a separate flag: in an object, the pattern
+    // is key -> colon -> value. L_colon sets expect_value=true. After key
+    // parsed, expect_value is false. So when entering L_string for value:
+    // expect_value=true. When entering L_string for key:  expect_value=true too
+    // (after '{' or ','). The difference is: after key, next dispatch should be
+    // ':' not ',' or '}'. So: is_key = (in_object && expect_value &&
+    // !expect_sep)
+    //     But we need ANOTHER bit to distinguish after ',' from after ':'.
+    // Solution: Track it with the comma handler.
+    // After L_obj_start: expect_value=true, expect_sep=false -> KEY context
+    // After L_comma:     expect_value=true, expect_sep=false -> KEY context
+    // After L_colon:     expect_value=true, expect_sep=false -> VALUE context
+    // We need to know "did we just see a colon?" Use a bool `after_colon`.
+    // This properly disambiguates key vs value in object context.
+    if (BEAST_UNLIKELY(!expect_value))
       goto L_error;
-    }
     {
-      tape_head_ = tape;
-      last_end = parse_string(curr);
-      if (BEAST_UNLIKELY(!last_end))
+      // NITRO STRING FAST PATH:
+      // The bitmap already has all quote positions in quote_bits.
+      // Use next_quote() to find closing " without calling scan_string().
+      size_t open_pos = (size_t)(curr - base);
+      size_t close_pos = it.next_quote(open_pos);
+      if (BEAST_UNLIKELY(close_pos == (size_t)-1))
         goto L_error;
+
+      const char *str_start = curr + 1;
+      const char *str_end = base + close_pos;
+      size_t len = (size_t)(str_end - str_start);
+
+      // Fast escape/UTF-8 check using 8-byte word scan
+      const char *scan = str_start;
+      bool needs_escape = false;
+      static constexpr uint64_t kSlash8 = 0x5C5C5C5C5C5C5C5CULL;
+      while (scan + 8 <= str_end) {
+        uint64_t w;
+        std::memcpy(&w, scan, 8);
+        uint64_t high_bits = w & 0x8080808080808080ULL;
+        uint64_t bs_check = w ^ kSlash8;
+        uint64_t has_bs = (bs_check - 0x0101010101010101ULL) & ~bs_check &
+                          0x8080808080808080ULL;
+        if (BEAST_UNLIKELY(high_bits | has_bs)) {
+          needs_escape = true;
+          break;
+        }
+        scan += 8;
+      }
+      if (!needs_escape) {
+        while (scan < str_end) {
+          uint8_t c = (uint8_t)*scan++;
+          if (c == '\\' || c >= 0x80) {
+            needs_escape = true;
+            break;
+          }
+        }
+      }
+
+      if (BEAST_LIKELY(!needs_escape)) {
+        // Consume closing quote from structural iterator
+        it.next();
+        // Emit inline or RawString directly
+        if (len <= 5) {
+          uint64_t payload = (uint64_t)len << 48;
+          uint64_t chars = 0;
+          std::memcpy(&chars, str_start, len);
+          payload |= (chars & 0x0000FFFFFFFFFFFFULL);
+          *tape++ = Element(Type::StringInline, payload).data;
+        } else if (len <= 14) {
+          uint64_t payload1 = (uint64_t)len << 48;
+          uint64_t chars1 = 0;
+          std::memcpy(&chars1, str_start, 6);
+          payload1 |= (chars1 & 0x0000FFFFFFFFFFFFULL);
+          *tape++ = Element(Type::StringInlineExt, payload1).data;
+          uint64_t chars2 = 0;
+          std::memcpy(&chars2, str_start + 6, len - 6);
+          *tape++ = chars2;
+        } else {
+          if (!doc_->json_input)
+            doc_->json_input = start_;
+          size_t json_off = (size_t)(str_start - base);
+          uint64_t len_bits = (uint64_t)(len > 0xFFFFFF ? 0xFFFFFF : len);
+          *tape++ = Element(Type::RawString,
+                            (len_bits << 32) | (json_off & 0xFFFFFFFF))
+                        .data;
+        }
+        last_end = str_end + 1;
+      } else {
+        // Fallback: string has escapes or UTF-8 — delegate to parse_string()
+        tape_head_ = tape;
+        last_end = parse_string(curr);
+        if (BEAST_UNLIKELY(!last_end))
+          goto L_error;
+        tape = tape_head_;
+        it.next(); // consume closing " from structural iterator
+      }
       curr = last_end;
-      tape = tape_head_;
-      // Optimization: No seek! Skip closing quote in bitmap
-      it.next();
     }
-    if (depth >= 0 && types[depth] == Type::Object && !expect_sep) {
+    // Key vs value disambiguation via after_colon flag
+    if (depth >= 0 && types[depth] == Type::Object && !after_colon) {
       expect_value = false;
+      expect_sep = false;
     } else {
       expect_value = false;
       expect_sep = true;
+      after_colon = false;
     }
     NEXT();
+  }
 
   L_number:
     if (BEAST_UNLIKELY(!expect_value))
@@ -6165,6 +6330,7 @@ public:
     if (depth < 0 || types[depth] != Type::Object || expect_value || expect_sep)
       goto L_error;
     expect_value = true;
+    after_colon = true; // Next string will be a value
     NEXT();
 
   L_comma:
@@ -6172,6 +6338,7 @@ public:
       goto L_error;
     expect_value = true;
     expect_sep = false;
+    after_colon = false; // Next string in object will be a key
     NEXT();
 
   L_comment:
@@ -6234,6 +6401,7 @@ public:
       if (options_.insitu) {
         doc_->external_buffer = start_;
         str_head_ = start_;
+        doc_->json_input = start_;
         str_end_ = end_;
       } else {
         doc_->string_buffer.resize(cap);
@@ -6689,7 +6857,23 @@ public:
         }
       }
 
-      // Ensure space in output buffer
+      // Zero-Copy Fast Path: no escapes, len > 14
+      // Store (json_offset, len) pointing directly into the original JSON
+      // buffer. No memcpy, no string_buffer allocation.
+      if (!has_utf8) {
+        size_t json_off = (size_t)(p - start_);
+        uint64_t len_bits = (uint64_t)len;
+        if (BEAST_UNLIKELY(len_bits > 0xFFFFFF))
+          len_bits = 0xFFFFFF;
+        uint64_t payload = (len_bits << 32) | (json_off & 0xFFFFFFFF);
+        push_tape(Element(Type::RawString, payload).data);
+        // Ensure json_input is set so serializer can find the buffer
+        if (!doc_->json_input)
+          doc_->json_input = start_;
+        return const_cast<char *>(scanned_end) + 1;
+      }
+
+      // Fallback: has UTF-8 or cannot zero-copy — use string_buffer
       if (BEAST_LIKELY(str_head_ + len + 1 <= str_end_)) {
         std::memcpy(str_head_, p, len);
         str_head_ += len;
@@ -6702,10 +6886,11 @@ public:
           }
         }
 
+        size_t off = str_head_ - (char *)doc_->string_buffer.data() - len - 1;
         uint64_t len_bits = (uint64_t)len;
         if (len_bits > 0xFFFFFF)
           len_bits = 0xFFFFFF;
-        uint64_t payload = (len_bits << 32) | (offset & 0xFFFFFFFF);
+        uint64_t payload = (len_bits << 32) | (off & 0xFFFFFFFF);
 
         push_tape(Element(Type::String, payload).data);
         return const_cast<char *>(scanned_end) + 1;
@@ -6855,66 +7040,41 @@ public:
     const char *start_digits = curr;
     uint64_t u = 0;
 
-    // Fast path: 8-digit SWAR loop (Branchless Check)
+    // Fast path: 8-digit SWAR detection (branchless check), correct per-byte
+    // expansion
     while (curr + 8 <= end_) {
       uint64_t val;
       std::memcpy(&val, curr, 8);
-      // t = val - '0' for each byte
       uint64_t t = val - 0x3030303030303030ULL;
-
-      // Check if any byte was < '0' (overflow in subtraction) or > '9'
-      // If t < 10, then t + (127-9) should not carry into sign bit?
-      // Use: (t + 0x76...) & 0x80...
-      // 0x76 = 118. 9 + 118 = 127 (0x7F). 10 + 118 = 128 (0x80).
-      if (((t | (t + 0x7676767676767676ULL)) & 0x8080808080808080ULL) == 0) {
-        // All bytes are digits 0-9
-        u = u * 100000000;
-        // Little Endian: curr[0] is LSB of val
-        // curr[0] is the most significant digit of this chunk?
-        // Example: "12345678" -> u = u*10^8 + 12345678
-        // curr[0] = '1'. val & 0xFF = '1'.
-        // So (t & 0xFF) needs to be multiplied by 10^7.
-        u += (t & 0xFF) * 10000000;
-        u += ((t >> 8) & 0xFF) * 1000000;
-        u += ((t >> 16) & 0xFF) * 100000;
-        u += ((t >> 24) & 0xFF) * 10000;
-        u += ((t >> 32) & 0xFF) * 1000;
-        u += ((t >> 40) & 0xFF) * 100;
-        u += ((t >> 48) & 0xFF) * 10;
-        u += ((t >> 56) & 0xFF);
-
-        curr += 8;
-      } else {
+      if (((t | (t + 0x7676767676767676ULL)) & 0x8080808080808080ULL) != 0)
         break;
-      }
+      // Per-byte extraction (LE: curr[0] → byte 0 = low byte)
+      u = u * 100000000ULL + (t & 0xFF) * 10000000ULL +
+          ((t >> 8) & 0xFF) * 1000000ULL + ((t >> 16) & 0xFF) * 100000ULL +
+          ((t >> 24) & 0xFF) * 10000ULL + ((t >> 32) & 0xFF) * 1000ULL +
+          ((t >> 40) & 0xFF) * 100ULL + ((t >> 48) & 0xFF) * 10ULL +
+          ((t >> 56) & 0xFF);
+      curr += 8;
     }
 
-    // 4-digit unroll fallback
+    // 4-digit: branchless check, correct per-byte expansion
     while (curr + 4 <= end_) {
-      char c0 = curr[0];
-      if (c0 < '0' || c0 > '9')
+      uint32_t val;
+      std::memcpy(&val, curr, 4);
+      uint32_t t = val - 0x30303030U;
+      if (((t | (t + 0x76767676U)) & 0x80808080U) != 0)
         break;
-      char c1 = curr[1];
-      if (c1 < '0' || c1 > '9')
-        break;
-      char c2 = curr[2];
-      if (c2 < '0' || c2 > '9')
-        break;
-      char c3 = curr[3];
-      if (c3 < '0' || c3 > '9')
-        break;
-
-      u = u * 10000 + (c0 - '0') * 1000 + (c1 - '0') * 100 + (c2 - '0') * 10 +
-          (c3 - '0');
+      u = u * 10000ULL + (t & 0xFF) * 1000ULL + ((t >> 8) & 0xFF) * 100ULL +
+          ((t >> 16) & 0xFF) * 10ULL + ((t >> 24) & 0xFF);
       curr += 4;
     }
 
-    // Single digit fallback
+    // 1-digit scalar tail (branchless digit check)
     while (curr < end_) {
-      char c = *curr;
-      if (c < '0' || c > '9')
+      uint8_t c = (uint8_t)*curr - (uint8_t)'0';
+      if (c > 9)
         break;
-      u = u * 10 + (c - '0');
+      u = u * 10 + c;
       curr++;
     }
 
@@ -7321,6 +7481,7 @@ public:
     const char *str_base = doc_.external_buffer
                                ? doc_.external_buffer
                                : (const char *)doc_.string_buffer.data();
+    const char *json_base = doc_.json_input ? doc_.json_input : str_base;
 
     const uint64_t *tape = doc_.tape.data();
     const uint64_t *t_end = tape + doc_.tape.size();
@@ -7346,71 +7507,71 @@ public:
     int depth = -1;
     uint8_t stack[1024]; // Max depth 1024
 
-            static void *dt[256] = {
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_String    , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Int64Full , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_StringInlineExt,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Array     ,
-        &&L_Error     , &&L_EndArray  , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Double    , &&L_Error     , &&L_False     , &&L_Error     ,
-        &&L_Error     , &&L_Int64     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Null      , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_StringInline,
-        &&L_True      , &&L_UInt64    , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Object    ,
-        &&L_Error     , &&L_EndObject , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
-        &&L_Error     , &&L_Error     , &&L_Error     , &&L_Error     ,
+    static void *dt[256] = {
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_String,    &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Int64Full, &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_StringInlineExt,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Array,
+        &&L_Error,  &&L_EndArray,  &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Double, &&L_Error,     &&L_False,     &&L_Error,
+        &&L_Error,  &&L_Int64,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Null,      &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_RawString, &&L_StringInline,
+        &&L_True,   &&L_UInt64,    &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Object,
+        &&L_Error,  &&L_EndObject, &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
+        &&L_Error,  &&L_Error,     &&L_Error,     &&L_Error,
     };
 
     while (t < t_end) {
@@ -7522,6 +7683,21 @@ public:
       state = next_state_table[state];
       continue;
     }
+    L_RawString: {
+      // Zero-copy: string is in original JSON buffer, already unescaped
+      uint64_t payload = val & 0x00FFFFFFFFFFFFFFULL;
+      uint32_t slen = (uint32_t)(payload >> 32);
+      uint32_t off = (uint32_t)(payload & 0xFFFFFFFF);
+      *cursor++ = '"';
+      // Direct copy from JSON source: no escape processing needed (no-escape
+      // strings)
+      std::memcpy(cursor, json_base + off, slen);
+      cursor += slen;
+      *cursor++ = '"';
+      t++;
+      state = next_state_table[state];
+      continue;
+    }
 
     L_StringInline: {
       uint32_t len = (uint32_t)((val >> 48) & 0xFF);
@@ -7586,7 +7762,6 @@ public:
     out_.resize(cursor - &out_[0]);
   }
 };
-
 
 // Bitmap Parser (Branchless Tape Builder)
 // ============================================================================
