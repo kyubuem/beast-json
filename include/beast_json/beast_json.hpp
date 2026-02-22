@@ -35,6 +35,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <bitset>
 #include <cassert>
 #include <charconv> // For from_chars in number parsing
 #include <climits>
@@ -3428,6 +3429,7 @@ BEAST_INLINE uint64_t prefix_xor(uint64_t x) {
 
 // Helper to extract bitmask from 16-byte vector
 // Optimized for AArch64 using addv (reduction)
+#if defined(__ARM_NEON) || defined(__aarch64__)
 BEAST_INLINE uint64_t neon_movemask(uint8x16_t input) {
   const uint8x16_t mask_bits = {0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80,
                                 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80};
@@ -3445,6 +3447,7 @@ BEAST_INLINE uint64_t neon_movemask(uint8x16_t input) {
 
   return sum0 | (sum1 << 8);
 }
+#endif // defined(__ARM_NEON) || defined(__aarch64__)
 
 // Optimized Method
 BEAST_INLINE void classify_structure(const char *p, uint16_t &struct_mask,
