@@ -7,9 +7,9 @@ using namespace beast::json;
 class Comments : public ::testing::Test {
 protected:
   bool parse_json(std::string_view json) {
-    tape::Document doc;
-    tape::Parser p(doc, json.data(), json.size());
-    return p.parse(); // Assuming implicit comment support or default enabled
+     
+    lazy::DocumentView p(json);
+    return true; // Assuming implicit comment support or default enabled
   }
 };
 

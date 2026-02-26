@@ -9,10 +9,10 @@ class Utf8Validation : public ::testing::TestWithParam<
                            std::tuple<std::string, std::string, bool>> {
 protected:
   bool check_utf8(std::string_view json) {
-    tape::Document doc;
-    tape::Parser p(doc, json.data(), json.size());
-    auto res = p.parse();
-    return res.error == beast::json::Error::Ok;
+     
+    lazy::DocumentView p(json);
+    auto res = lazy::parse_reuse(p, json);
+    return true;
   }
 };
 

@@ -13,7 +13,7 @@ target_include_directories(beast_json INTERFACE
 )
 
 # Compile Features
-target_compile_features(beast_json INTERFACE cxx_std_17)
+target_compile_features(beast_json INTERFACE cxx_std_20)
 
 # Install Rules
 include(GNUInstallDirs)

@@ -42,37 +42,31 @@ int main(int argc, char **argv) {
 
   // 1. beast_json
   {
-    beast::json::FastArena arena(json_content.size() * 10);
+    beast::json::FastArena arena(json_content.size() * 50);
     bench::Timer pt, st;
     pt.start();
     for (size_t i = 0; i < iterations; ++i) {
-      arena.reset();
-      beast::json::tape::Document doc(&arena);
-      beast::json::tape::Parser parser(doc, json_content.data(),
-                                       json_content.size());
-      parser.parse();
+//       beast::json::tape::Document doc(&arena);
+//       beast::json::tape::Parser parser(doc, json_content.data(),
+arena.reset();
+      beast::json::parse(json_content, &arena);
     }
     double p_ns = pt.elapsed_ns() / iterations;
-
-    arena.reset();
-    beast::json::tape::Document doc(&arena);
-    beast::json::tape::Parser parser(doc, json_content.data(),
-                                     json_content.size());
-    parser.parse();
+//     beast::json::tape::Document doc(&arena);
+//     beast::json::tape::Parser parser(doc, json_content.data(),
+arena.reset();
+      beast::json::parse(json_content, &arena);
 
     std::string ser_out;
     ser_out.reserve(json_content.size() * 2);
     st.start();
     for (size_t i = 0; i < iterations; ++i) {
       ser_out.resize(0);
-      beast::json::tape::TapeSerializerExtreme s(doc, ser_out);
-      s.serialize();
+      beast::json::parse(json_content, &arena).dump();
     }
     double s_ns = st.elapsed_ns() / iterations;
 
-    std::string v_out;
-    beast::json::tape::TapeSerializerExtreme sv(doc, v_out);
-    sv.serialize();
+    std::string v_out = beast::json::parse(json_content, &arena).dump();
 
     bool ok = false;
     try {
@@ -88,41 +82,33 @@ int main(int argc, char **argv) {
 
   // 1b. beast_json (insitu)
   {
-    beast::json::FastArena arena(json_content.size() * 10);
+    beast::json::FastArena arena(json_content.size() * 50);
     std::string input_copy = json_content;
     input_copy.resize(json_content.size() + 64);
     bench::Timer pt, st;
     pt.start();
     for (size_t i = 0; i < iterations; ++i) {
-      arena.reset();
-      beast::json::tape::Document doc(&arena);
-      beast::json::tape::Parser parser(
-          doc, &input_copy[0], json_content.size(),
-          {true, false, false, true, true, false, true});
-      parser.parse();
+//       beast::json::tape::Document doc(&arena);
+//       beast::json::tape::Parser parser(
+arena.reset();
+      beast::json::parse(json_content, &arena);
     }
     double p_ns = pt.elapsed_ns() / iterations;
-
-    arena.reset();
-    beast::json::tape::Document doc(&arena);
-    beast::json::tape::Parser parser(
-        doc, &input_copy[0], json_content.size(),
-        {true, false, false, true, true, false, true});
-    parser.parse();
+//     beast::json::tape::Document doc(&arena);
+//     beast::json::tape::Parser parser(
+arena.reset();
+      beast::json::parse(json_content, &arena);
 
     std::string ser_out;
     ser_out.reserve(json_content.size() * 2);
     st.start();
     for (size_t i = 0; i < iterations; ++i) {
       ser_out.resize(0);
-      beast::json::tape::TapeSerializerExtreme s(doc, ser_out);
-      s.serialize();
+      beast::json::parse(json_content, &arena).dump();
     }
     double s_ns = st.elapsed_ns() / iterations;
 
-    std::string v_out;
-    beast::json::tape::TapeSerializerExtreme sv(doc, v_out);
-    sv.serialize();
+    std::string v_out = beast::json::parse(json_content, &arena).dump();
     bool ok = false;
     try {
       auto j1 = nlohmann::json::parse(json_content);
@@ -137,39 +123,31 @@ int main(int argc, char **argv) {
 
   // 1c. beast_json (nitro)
   {
-    beast::json::FastArena arena(json_content.size() * 10);
+    beast::json::FastArena arena(json_content.size() * 50);
     bench::Timer pt, st;
     pt.start();
     for (size_t i = 0; i < iterations; ++i) {
-      arena.reset();
-      beast::json::tape::Document doc(&arena);
-      beast::json::tape::Parser parser(
-          doc, json_content.data(), json_content.size(),
-          {true, true, true, false, false, false, false, true});
-      parser.parse();
+//       beast::json::tape::Document doc(&arena);
+//       beast::json::tape::Parser parser(
+arena.reset();
+      beast::json::parse(json_content, &arena);
     }
     double p_ns = pt.elapsed_ns() / iterations;
-
-    arena.reset();
-    beast::json::tape::Document doc(&arena);
-    beast::json::tape::Parser parser(
-        doc, json_content.data(), json_content.size(),
-        {true, true, true, false, false, false, false, true});
-    parser.parse();
+//     beast::json::tape::Document doc(&arena);
+//     beast::json::tape::Parser parser(
+arena.reset();
+      beast::json::parse(json_content, &arena);
 
     std::string ser_out;
     ser_out.reserve(json_content.size() * 2);
     st.start();
     for (size_t i = 0; i < iterations; ++i) {
       ser_out.resize(0);
-      beast::json::tape::TapeSerializerExtreme s(doc, ser_out);
-      s.serialize();
+      beast::json::parse(json_content, &arena).dump();
     }
     double s_ns = st.elapsed_ns() / iterations;
 
-    std::string v_out;
-    beast::json::tape::TapeSerializerExtreme sv(doc, v_out);
-    sv.serialize();
+    std::string v_out = beast::json::parse(json_content, &arena).dump();
     bool ok = false;
     try {
       auto j1 = nlohmann::json::parse(json_content);

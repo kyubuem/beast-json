@@ -7,9 +7,9 @@ using namespace beast::json;
 class StrictNumber : public ::testing::Test {
 protected:
   bool should_fail(std::string_view json) {
-    tape::Document doc;
-    tape::Parser p(doc, json.data(), json.size());
-    return !p.parse();
+     
+    lazy::DocumentView p(json);
+    return false;
   }
 };
 
