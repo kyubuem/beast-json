@@ -1,9 +1,9 @@
-// fuzz_parse.cpp – libFuzzer target for the beast-json high-level parse() API.
+// fuzz_parse.cpp – libFuzzer target for the beast::json high-level parse() API.
 //
 // Tests the public-facing parse() function with arbitrary byte sequences.
-// Exercises strict (default) and relaxed (lenient) ParseOptions.
-// Memory errors and UB are caught by the AddressSanitizer / UBSanitizer
-// instrumentation baked in at compile time.
+// Exercises strict (default) and relaxed ParseOptions.
+// AddressSanitizer + UBSanitizer catch memory errors and undefined behaviour
+// at compile time (injected by fuzz/CMakeLists.txt).
 //
 // Build:
 //   cmake -B build-fuzz \
@@ -16,12 +16,13 @@
 // Run (indefinitely):
 //   ./build-fuzz/fuzz/fuzz_parse fuzz/corpus/ -max_len=65536
 //
-// Run with a single file (for reproduction):
-//   ./build-fuzz/fuzz/fuzz_parse <crash-input-file>
+// Reproduce a crash:
+//   ./build-fuzz/fuzz/fuzz_parse <crash-file>
 
 #include <beast_json/beast_json.hpp>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <string_view>
 
 using namespace beast::json;
@@ -29,35 +30,33 @@ using namespace beast::json;
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     const std::string_view input(reinterpret_cast<const char *>(data), size);
 
-    // ── 1. Strict / default mode ─────────────────────────────────────────────
+    // ── 1. Default options ───────────────────────────────────────────────────
+    // parse() throws std::runtime_error on failure (ParseError ⊂ runtime_error)
     try {
         Value v = parse(input);
         (void)v;
-    } catch (const ParseError &) {
-        // Expected for malformed input – not a bug.
+    } catch (const std::runtime_error &) {
+        // Expected for malformed input.
     }
 
-    // ── 2. Relaxed mode (single-quotes, unquoted keys) ───────────────────────
+    // ── 2. Relaxed: single-quotes + unquoted keys ────────────────────────────
     try {
         ParseOptions opts;
         opts.allow_single_quotes = true;
         opts.allow_unquoted_keys = true;
         Value v = parse(input, {}, opts);
         (void)v;
-    } catch (const ParseError &) {
-        // Expected.
-    }
+    } catch (const std::runtime_error &) {}
 
-    // ── 3. Comments + trailing commas enabled ────────────────────────────────
+    // ── 3. Strict: duplicates / trailing-commas / comments all forbidden ─────
     try {
         ParseOptions opts;
-        opts.allow_comments = true;
-        opts.allow_trailing_commas = true;
+        opts.allow_trailing_commas = false;
+        opts.allow_comments       = false;
+        opts.allow_duplicate_keys = false;
         Value v = parse(input, {}, opts);
         (void)v;
-    } catch (const ParseError &) {
-        // Expected.
-    }
+    } catch (const std::runtime_error &) {}
 
     return 0;
 }

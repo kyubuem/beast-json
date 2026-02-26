@@ -104,6 +104,8 @@
 
 // SIMD Detection (compile-time)
 #if defined(BEAST_ARCH_X86_64)
+// SSE2 is mandatory on x86-64 (part of the ABI); always include it.
+#include <emmintrin.h>
 #if defined(__AVX512F__)
 #define BEAST_HAS_AVX512 1
 #include <immintrin.h>
