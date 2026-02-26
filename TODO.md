@@ -33,10 +33,27 @@ We dropped from 284μs down to an incredible 236μs by fundamentally attacking m
    - Considered rewriting the object parser to strictly expect "key": value sequences.
    - *Status*: Dropped. The Phase 26 string double-pump implicitly reproduces this behavior inside the flat `switch` without duplicating multi-type value parsing code.
 
-## 🎯 Next Steps: Bridging the Final 66μs 
-We have eliminated almost all fat from the main token extraction. To reach `yyjson`'s ~170μs:
+## 🎯 Phase 31+ Roadmap: Bridging the Final 66μs 
+We have eliminated almost all fat from the main token extraction. To reach `yyjson`'s ~170μs benchmark, we must focus on architectural and branchless optimizations:
 
-- [ ] **Data Layout / Tape Size Tuning**: `yyjson` DOM nodes are 16 bytes. Ours are 16 bytes. But `yyjson` doesn't track `prev` siblings. Can we remove variables from `beast-json` `TapeNode`? (e.g. `flags` and `aux`)
-- [ ] **Zero-Branch Number Parsing**: Currently we fall back to a long scalar `while` for floating point digits. `simdjson` uses Lemire's floating point math algorithm directly bypassing scalar scans.
-- [ ] **SIMD Structural Dispatch**: Currently we still do a `switch(c)` per token. `yyjson` pads the file with zeros and reads characters via a 256-byte static jump table `[action, ws, error]`. We might replace `switch(c)` with a branchless `if (!(type = table[c])) { dispatch }` mechanism to guarantee instruction cache hits.
-- [ ] **Compile Flags Analysis**: Apple Clang might be emitting less optimal loops. Can we test GCC or unroll loop pragmas?
+- [ ] **1. Data Layout & Tape Size Tuning (AST Compaction)**
+  - *Context*: `yyjson` nodes are 16 bytes, and they achieve extreme cache locality by stripping out backward `prev` pointers.
+  - *Action*: Investigate removing `prev` or merging `flags`/`aux` variables inside `beast-json`'s `TapeNode` to shrink the memory footprint and reduce L1 cache misses during large object parsing.
+  - *Goal*: Increase nodes-per-cache-line.
+
+- [ ] **2. Zero-Branch Eisel-Lemire Number Parsing**
+  - *Context*: Currently, we fall back to a long scalar `while` loop for double/float digit extraction. `simdjson` and `yyjson` use Lemire's `fast_float` or similar exact float math to bypass scalar scans.
+  - *Action*: Replace the `std::strtod` fallback and manual scanning loop with a customized, zero-branch fast-path for IEEE 754 floating-point conversion.
+  - *Goal*: Eliminate branch mispredictions inside dense number arrays.
+
+- [ ] **3. Static SIMD Structural Dispatch (Jump Tables)**
+  - *Context*: We currently rely on a `switch(c)` block per extracted token. `yyjson` pads the file with trailing zeros and reads action characters via a 256-byte static jump table (`[action, ws, error]`).
+  - *Action*: Refactor the main `parse()` loop to use a computed goto or branchless `if (!(type = table[c]))` lookup mechanism to guarantee instruction cache hits across unpredictable JSON payloads.
+  - *Goal*: Remove CPU pipeline stalls caused by complex switch-case branch predictor misses.
+
+- [ ] **4. Clang vs GCC Compiler Loop Pragma Tuning**
+  - *Context*: Apple Clang might be emitting less optimal loops for ARM64 compared to GCC or Clang 18+. 
+  - *Action*: Test `#pragma GCC unroll` inside the exact hotspots (like the string SWAR loop) and analyze the generated assembly for `LDR/STR` pair optimizations.
+
+### 🧹 Infrastructure Note
+*Legacy DOM tests (`test_json_pointer.cpp`, `test_iterators.cpp`) were permanently removed in Phase 30. All future features and tests will be built exclusively around the zero-copy, streaming `beast::json::lazy::Value` architecture.*

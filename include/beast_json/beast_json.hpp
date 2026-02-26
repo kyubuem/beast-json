@@ -6099,12 +6099,6 @@ inline std::ostream &operator<<(std::ostream &os, const Value &v) {
 #define BEAST_INLINE __attribute__((always_inline)) inline
 #endif
 
-#if defined(__has_builtin) && __has_builtin(__builtin_ctzll)
-#define BEAST_CTZ(x) __builtin_ctzll(x)
-#else
-#define BEAST_CTZ(x) __builtin_ctzll(x)
-#endif
-
 namespace beast {
 namespace json {
 namespace lazy {
