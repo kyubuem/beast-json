@@ -4885,7 +4885,16 @@ namespace json {
 namespace lazy {
 
 // ─────────────────────────────────────────────────────────────
-// TapeNode — exactly 16 bytes (Phase A compaction)
+// TapeNode — 8 bytes (Phase D1 compaction)
+//
+// meta layout (uint32_t):
+//   bits 31-24 : TapeNodeType  (8 bits, values 0-10)
+//   bits 23-16 : flags         (8 bits, currently always 0)
+//   bits 15-0  : length        (16 bits, max 65535)
+//
+// Dropped: next_sib (4 bytes) — was written but never read.
+// Halves store operations per push(): 5 → 2.
+// Fits 8 nodes per 64-byte cache line (vs ~5 before).
 // ─────────────────────────────────────────────────────────────
 
 enum class TapeNodeType : uint8_t {
@@ -4903,18 +4912,25 @@ enum class TapeNodeType : uint8_t {
 };
 
 struct TapeNode {
-  TapeNodeType type; // 1 byte
-  uint8_t flags;     // 1 byte
-  uint16_t length;   // 2 bytes (max 65535 per string/number)
-  uint32_t offset;   // 4 bytes (byte offset into source, max 4GB)
-  uint32_t next_sib; // 4 bytes (skip-link for {}/[])
-                     // = 12 bytes total
+  uint32_t meta;   // bits 31-24: type | bits 23-16: flags | bits 15-0: length
+  uint32_t offset; // byte offset into source (max 4 GB)
+                   // = 8 bytes total
 
   TapeNode() = default;
-  TapeNode(TapeNodeType t, uint16_t l, uint32_t o, uint32_t sib = 0)
-      : type(t), flags(0), length(l), offset(o), next_sib(sib) {}
+
+  // Packed-meta constructor used by push()
+  TapeNode(TapeNodeType t, uint16_t l, uint32_t o)
+      : meta((static_cast<uint32_t>(t) << 24) | static_cast<uint32_t>(l)),
+        offset(o) {}
+
+  // Field accessors — inline, zero overhead in optimised builds
+  BEAST_INLINE TapeNodeType type()   const noexcept {
+    return static_cast<TapeNodeType>((meta >> 24) & 0xFFu);
+  }
+  BEAST_INLINE uint8_t  flags()  const noexcept { return (meta >> 16) & 0xFFu; }
+  BEAST_INLINE uint16_t length() const noexcept { return static_cast<uint16_t>(meta & 0xFFFFu); }
 };
-static_assert(sizeof(TapeNode) == 12, "TapeNode must be exactly 12 bytes");
+static_assert(sizeof(TapeNode) == 8, "TapeNode must be exactly 8 bytes");
 
 // ─────────────────────────────────────────────────────────────
 // TapeArena — Beast Flat Arena (Phase B)
@@ -5008,108 +5024,118 @@ public:
   Value(DocumentView *doc, uint32_t idx) : doc_(doc), idx_(idx) {}
 
   bool is_object() const {
-    return doc_->tape[idx_].type == TapeNodeType::ObjectStart;
+    return doc_->tape[idx_].type() == TapeNodeType::ObjectStart;
   }
   bool is_array() const {
-    return doc_->tape[idx_].type == TapeNodeType::ArrayStart;
+    return doc_->tape[idx_].type() == TapeNodeType::ArrayStart;
   }
 
   // Zero-copy serialization: context stack tracks object/array nesting.
   // Object: even elem_idx = key (emit ',' before all except first key)
   //         odd  elem_idx = value (emit ':' after key)
   // Array:  emit ',' before every element except the first
+  //
+  // Phase Serialize: flat-buffer rewrite.
+  // Instead of 3 × std::string::append per token (with bounds-check +
+  // size-update overhead on every call), we pre-allocate a raw char buffer
+  // and write directly via a pointer.  The buffer is large enough to hold
+  // compact JSON that is never larger than the pretty-printed source.
+  // At the end we create one std::string from the exact byte count.
+  //
+  // Separator logic uses three 64-bit bit-stacks (max depth 64, sufficient
+  // for all real JSON).  All state lives in CPU registers — no stack arrays.
+  //   obj_bits  — bit (top): depth is an object (clear = array)
+  //   key_bits  — bit (top): next element in object is a key
+  //   sep_bits  — bit (top): separator needed (has ≥1 element already)
+  // Replaces four bool[1024] arrays (4 KB stack) with 24 bytes.
   std::string dump() const {
     if (!doc_ || doc_->tape.size() == 0)
       return "null";
     const char *src = doc_->source.data();
-    const size_t n = doc_->tape.size();
+    const size_t ntape = doc_->tape.size();
 
+    // Phase E: separators pre-computed by parser into meta bits 23-16.
+    // dump() simply reads the flag and writes the separator — no bit-stacks,
+    // no emit_sep() overhead, no top/top_mask/obj_bits/key_bits/sep_bits.
+    //   sep == 0x00 → no separator (root or first element)
+    //   sep == 0x01 → comma
+    //   sep == 0x02 → colon
+    const size_t buf_cap = doc_->source.size() + 16;
     std::string out;
-    out.reserve(doc_->source.size());
+    out.resize(buf_cap);
+    char *w  = out.data();
+    char *w0 = w;
 
-    static constexpr int kD = 1024;
-    bool is_obj[kD];
-    uint32_t elem[kD];
-    int top = -1;
+    for (size_t i = 0; i < ntape; ++i) {
+      const TapeNode &nd = doc_->tape[i];
+      const uint32_t meta = nd.meta;
+      const auto type = static_cast<TapeNodeType>((meta >> 24) & 0xFF);
+      const uint8_t  sep  = (meta >> 16) & 0xFFu;
 
-    auto scalar = [&](const TapeNode &nd) {
-      if (top >= 0) {
-        if (is_obj[top]) {
-          uint32_t ei = elem[top]++;
-          if (ei % 2 == 0 && ei > 0)
-            out += ',';
-          else if (ei % 2 == 1)
-            out += ':';
+      // Write pre-computed separator (branch-free for common case)
+      if (sep) *w++ = (sep == 0x02u) ? ':' : ',';
+
+      switch (type) {
+
+      case TapeNodeType::ObjectStart: *w++ = '{'; break;
+      case TapeNodeType::ObjectEnd:   *w++ = '}'; break;
+      case TapeNodeType::ArrayStart:  *w++ = '['; break;
+      case TapeNodeType::ArrayEnd:    *w++ = ']'; break;
+
+      case TapeNodeType::StringRaw: {
+        const uint16_t slen = static_cast<uint16_t>(meta & 0xFFFFu);
+        const char *sp = src + nd.offset;
+        *w++ = '"';
+        // Unrolled 16-8-4-1 copy (Phase D3): avoids glibc dispatch overhead
+        // for short strings (twitter.json avg 16.9 chars, 84% ≤ 24 chars).
+        if (BEAST_LIKELY(slen <= 31)) {
+          uint16_t rem = slen;
+          if (rem >= 16) {
+            uint64_t a, b;
+            std::memcpy(&a, sp, 8);     std::memcpy(&b, sp + 8, 8);
+            std::memcpy(w,  &a, 8);     std::memcpy(w  + 8, &b, 8);
+            sp += 16; w += 16; rem = static_cast<uint16_t>(rem - 16);
+          }
+          if (rem >= 8) {
+            uint64_t a;
+            std::memcpy(&a, sp, 8); std::memcpy(w, &a, 8);
+            sp += 8; w += 8; rem = static_cast<uint16_t>(rem - 8);
+          }
+          if (rem >= 4) {
+            uint32_t a;
+            std::memcpy(&a, sp, 4); std::memcpy(w, &a, 4);
+            sp += 4; w += 4; rem = static_cast<uint16_t>(rem - 4);
+          }
+          while (rem--) *w++ = *sp++;
         } else {
-          if (elem[top]++ > 0)
-            out += ',';
+          std::memcpy(w, sp, slen);
+          w += slen;
         }
-      }
-      switch (nd.type) {
-      case TapeNodeType::StringRaw:
-        out += '"';
-        out.append(src + nd.offset, nd.length);
-        out += '"';
+        *w++ = '"';
         break;
+      }
+
       case TapeNodeType::Integer:
       case TapeNodeType::NumberRaw:
-      case TapeNodeType::Double:
-        out.append(src + nd.offset, nd.length);
+      case TapeNodeType::Double: {
+        const uint16_t nlen = static_cast<uint16_t>(meta & 0xFFFFu);
+        std::memcpy(w, src + nd.offset, nlen);
+        w += nlen;
         break;
+      }
+
       case TapeNodeType::BooleanTrue:
-        out += "true";
-        break;
+        std::memcpy(w, "true", 4); w += 4; break;
       case TapeNodeType::BooleanFalse:
-        out += "false";
-        break;
+        std::memcpy(w, "false", 5); w += 5; break;
       case TapeNodeType::Null:
-        out += "null";
-        break;
-      default:
-        break;
-      }
-    };
+        std::memcpy(w, "null", 4); w += 4; break;
 
-    auto open_ctx = [&](bool obj, char brace) {
-      if (top >= 0) {
-        if (is_obj[top]) {
-          uint32_t ei = elem[top]++;
-          if (ei % 2 == 0 && ei > 0)
-            out += ',';
-          else if (ei % 2 == 1)
-            out += ':';
-        } else {
-          if (elem[top]++ > 0)
-            out += ',';
-        }
-      }
-      is_obj[++top] = obj;
-      elem[top] = 0;
-      out += brace;
-    };
-
-    for (size_t i = 0; i < n; ++i) {
-      const TapeNode &nd = doc_->tape[i];
-      switch (nd.type) {
-      case TapeNodeType::ObjectStart:
-        open_ctx(true, '{');
-        break;
-      case TapeNodeType::ObjectEnd:
-        out += '}';
-        --top;
-        break;
-      case TapeNodeType::ArrayStart:
-        open_ctx(false, '[');
-        break;
-      case TapeNodeType::ArrayEnd:
-        out += ']';
-        --top;
-        break;
-      default:
-        scalar(nd);
-        break;
+      default: break;
       }
     }
+
+    out.resize(static_cast<size_t>(w - w0));
     return out;
   }
 };
@@ -5174,14 +5200,24 @@ class Parser {
   const char *data_;
   DocumentView *doc_;
   size_t depth_ = 0;
-  static constexpr size_t kMaxDepth = 1024;
-  uint32_t start_stack_[kMaxDepth];
 
   // Phase B1: context bit-stack.
-  // Bit i is set iff start_stack_[i] is an ObjectStart (0 = ArrayStart).
-  // Allows O(1) in-object check: (obj_bits_ >> (depth_-1)) & 1.
+  // Bit i is set iff depth i is an ObjectStart (0 = ArrayStart).
   // Supports up to 64 nesting levels (practical JSON: twitter.json ≤10).
   uint64_t obj_bits_ = 0;
+
+  // Phase E: pre-separator bit-stacks.
+  // Computed during parsing so dump() needs no bit-stack at all.
+  //   kv_key_bits_  — bit i: next push at depth i is an object KEY
+  //   has_elem_bits_ — bit i: depth i has ≥1 element already pushed
+  //   depth_mask_   — precomputed 1ULL << (depth_-1) (0 at root)
+  //                   maintained incrementally to eliminate variable shifts.
+  uint64_t kv_key_bits_   = 0;
+  uint64_t has_elem_bits_ = 0;
+  uint64_t depth_mask_    = 0; // = 1ULL << (depth_-1), updated on depth changes
+  // Overflow state for depths >= 64 (each byte: bit0=in_obj, bit1=is_key, bit2=has_elem)
+  static constexpr size_t kPresepDepth = 64;
+  uint8_t presep_overflow_[1024] = {};
 
   // Phase 19 Technique 8: local tape_head_ register variable.
   // Kept as a field but initialized from doc_->tape.base in parse().
@@ -5327,24 +5363,33 @@ class Parser {
     const uint64_t qm  = K * static_cast<uint8_t>('"');
     const uint64_t bsm = K * static_cast<uint8_t>('\\');
 
-    // SWAR-24 fast path (≤24-byte key, no backslash)
+    // SWAR cascaded fast path (≤24-byte key, no backslash).
+    // Phase D2: load v0 first; exit immediately for ≤8-char keys (most common
+    // twitter.json keys: "id", "text", "user", "lang" etc.) before loading v1/v2.
     if (BEAST_LIKELY(s + 24 <= end_)) {
-      uint64_t v0, v1, v2;
-      std::memcpy(&v0, s,      8);
-      std::memcpy(&v1, s + 8,  8);
-      std::memcpy(&v2, s + 16, 8);
+      uint64_t v0;
+      std::memcpy(&v0, s, 8);
       uint64_t hq0 = v0 ^ qm;  hq0 = (hq0 - K) & ~hq0 & H;
       uint64_t hb0 = v0 ^ bsm; hb0 = (hb0 - K) & ~hb0 & H;
-      uint64_t hq1 = v1 ^ qm;  hq1 = (hq1 - K) & ~hq1 & H;
-      uint64_t hb1 = v1 ^ bsm; hb1 = (hb1 - K) & ~hb1 & H;
-      uint64_t hq2 = v2 ^ qm;  hq2 = (hq2 - K) & ~hq2 & H;
-      uint64_t hb2 = v2 ^ bsm; hb2 = (hb2 - K) & ~hb2 & H;
-      if (BEAST_LIKELY(!(hb0 | hb1 | hb2))) {
-        if      (hq0) e = s      + (BEAST_CTZ(hq0) >> 3);
-        else if (hq1) e = s + 8  + (BEAST_CTZ(hq1) >> 3);
-        else if (hq2) e = s + 16 + (BEAST_CTZ(hq2) >> 3);
-        else goto skn_slow; // quote not found in 24 bytes → fall through
-        goto skn_found;
+      if (BEAST_LIKELY(!hb0)) {
+        if (hq0) { // ≤8-char key: quote in first chunk, no backslash
+          e = s + (BEAST_CTZ(hq0) >> 3);
+          goto skn_found;
+        }
+        // Key is 9-24 chars: load v1 and v2
+        uint64_t v1, v2;
+        std::memcpy(&v1, s + 8,  8);
+        std::memcpy(&v2, s + 16, 8);
+        uint64_t hq1 = v1 ^ qm;  hq1 = (hq1 - K) & ~hq1 & H;
+        uint64_t hb1 = v1 ^ bsm; hb1 = (hb1 - K) & ~hb1 & H;
+        uint64_t hq2 = v2 ^ qm;  hq2 = (hq2 - K) & ~hq2 & H;
+        uint64_t hb2 = v2 ^ bsm; hb2 = (hb2 - K) & ~hb2 & H;
+        if (BEAST_LIKELY(!(hb1 | hb2))) {
+          if      (hq1) e = s + 8  + (BEAST_CTZ(hq1) >> 3);
+          else if (hq2) e = s + 16 + (BEAST_CTZ(hq2) >> 3);
+          else goto skn_slow;
+          goto skn_found;
+        }
       }
       // Backslash found → fall through to full scan
     }
@@ -5383,13 +5428,49 @@ class Parser {
   // ── Phase 19 Technique 8: tape push via local register pointer ─
   // tape_head_ is kept in a CPU register across the parse() body.
   // No pointer chain: doc_->tape.head is only synced at the very end.
+  // push(): for every token EXCEPT ObjectEnd/ArrayEnd.
+  // Computes separator flag from current parse context, stores in meta bits
+  // 23-16 so dump() needs no bit-stack at all.
+  //   sep = 0  → no separator  (root, first array element, first object key)
+  //   sep = 1  → comma         (non-first array element or object key)
+  //   sep = 2  → colon         (object value, always)
   BEAST_INLINE void push(TapeNodeType t, uint16_t l, uint32_t o) noexcept {
+    const uint64_t mask = depth_mask_;             // precomputed: no variable shift
+    uint8_t sep = 0;
+    if (mask) {                                    // depths 1..64: bit-stack path
+      // Use bool casts to avoid bitwise-AND/NOT surprises
+      // (e.g. mask=2, !2=1: 2&1=0, not what we want for logical AND)
+      const bool in_obj = !!(obj_bits_ & mask);
+      const bool is_key = !!(kv_key_bits_ & mask);
+      const bool has_el = !!(has_elem_bits_ & mask);
+      // value-position in object → colon(2); else comma-or-none
+      const bool is_val = in_obj & !is_key;
+      sep = is_val ? uint8_t(2) : uint8_t(has_el);
+      // Toggle key↔value tracking (only meaningful in objects)
+      kv_key_bits_ ^= (in_obj ? mask : uint64_t(0));
+      has_elem_bits_ |= mask;
+    } else if (BEAST_UNLIKELY(depth_ > 0)) {       // depth > 64: overflow path
+      uint8_t &s = presep_overflow_[depth_ - kPresepDepth];
+      if (s & 1) {  // in object
+        if (s & 2) {  sep = (s & 4) ? 0x01u : 0u; s = (s & ~2u) | 4u; }  // key
+        else        {  sep = 0x02u;                 s |= (2u | 4u);     }  // val
+      } else {
+        sep = (s & 4) ? 0x01u : 0u;  // array
+        s |= 4;
+      }
+    }
     TapeNode *n = tape_head_++;
-    n->type = t;
-    n->flags = 0;
-    n->length = l;
+    n->meta   = (static_cast<uint32_t>(t)   << 24)
+              | (static_cast<uint32_t>(sep)  << 16)
+              |  static_cast<uint32_t>(l);
     n->offset = o;
-    n->next_sib = 0;
+  }
+
+  // push_end(): for ObjectEnd / ArrayEnd — always sep=0, no state update.
+  BEAST_INLINE void push_end(TapeNodeType t, uint32_t o) noexcept {
+    TapeNode *n = tape_head_++;
+    n->meta   = static_cast<uint32_t>(t) << 24; // sep=0, len=0
+    n->offset = o;
   }
 
   BEAST_INLINE uint32_t tape_size() const noexcept {
@@ -5421,34 +5502,40 @@ public:
       switch (static_cast<unsigned char>(c)) {
 
       case '{': {
-        uint32_t my = tape_size();
         push(TapeNodeType::ObjectStart, 0, static_cast<uint32_t>(p_ - data_));
-        obj_bits_ |= (uint64_t(1) << depth_); // mark this slot as object
-        start_stack_[depth_++] = my;
+        // Phase E: setup new depth's presep state.
+        // Depths 1..kPresepDepth: use 64-bit bit-stacks (depth_mask_).
+        // Depths >kPresepDepth:   use presep_overflow_[] byte array.
+        if (BEAST_LIKELY(depth_ < kPresepDepth)) {
+          const uint64_t nm = depth_mask_ ? depth_mask_ << 1 : uint64_t(1);
+          obj_bits_      |= nm;  kv_key_bits_ |= nm;
+          has_elem_bits_ &= ~nm; depth_mask_ = nm;
+        } else {
+          depth_mask_ = 0;  // signal: overflow active in push()
+          presep_overflow_[depth_ + 1 - kPresepDepth] = 0b011u;
+        }
+        ++depth_;
         ++p_;
-        // Inline peek: if next byte is > 0x20, it's the first key '"' or '}'
         if (BEAST_LIKELY(p_ < end_)) {
           unsigned char fc = static_cast<unsigned char>(*p_);
-          if (BEAST_LIKELY(fc > 0x20)) {
-            c = static_cast<char>(fc);
-            continue;
-          }
+          if (BEAST_LIKELY(fc > 0x20)) { c = static_cast<char>(fc); continue; }
         }
         break;
       }
       case '[': {
-        uint32_t my = tape_size();
         push(TapeNodeType::ArrayStart, 0, static_cast<uint32_t>(p_ - data_));
-        obj_bits_ &= ~(uint64_t(1) << depth_); // mark this slot as array
-        start_stack_[depth_++] = my;
+        if (BEAST_LIKELY(depth_ < kPresepDepth)) {
+          const uint64_t nm = depth_mask_ ? depth_mask_ << 1 : uint64_t(1);
+          obj_bits_      &= ~nm; has_elem_bits_ &= ~nm; depth_mask_ = nm;
+        } else {
+          depth_mask_ = 0;
+          presep_overflow_[depth_ + 1 - kPresepDepth] = 0b000u;
+        }
+        ++depth_;
         ++p_;
-        // Inline peek: if next byte is > 0x20, it's the first element or ']'
         if (BEAST_LIKELY(p_ < end_)) {
           unsigned char fc = static_cast<unsigned char>(*p_);
-          if (BEAST_LIKELY(fc > 0x20)) {
-            c = static_cast<char>(fc);
-            continue;
-          }
+          if (BEAST_LIKELY(fc > 0x20)) { c = static_cast<char>(fc); continue; }
         }
         break;
       }
@@ -5456,10 +5543,16 @@ public:
       case ']': {
         if (BEAST_UNLIKELY(depth_ == 0))
           goto fail;
-        uint32_t si = start_stack_[--depth_];
-        push(c == '}' ? TapeNodeType::ObjectEnd : TapeNodeType::ArrayEnd, 0,
-             static_cast<uint32_t>(p_ - data_));
-        doc_->tape.base[si].next_sib = tape_size();
+        --depth_;
+        // Restore depth_mask_ for the now-current depth.
+        // Common: was already in bit-stack region → just shift right.
+        // Rare: crossing back from overflow → recompute from depth_.
+        if (BEAST_LIKELY(depth_mask_ != 0))
+          depth_mask_ >>= 1;
+        else if (depth_ > 0 && depth_ <= kPresepDepth)
+          depth_mask_ = uint64_t(1) << (depth_ - 1);  // restore, rare
+        push_end(c == '}' ? TapeNodeType::ObjectEnd : TapeNodeType::ArrayEnd,
+                 static_cast<uint32_t>(p_ - data_));
         ++p_;
         break;
       }
@@ -5469,39 +5562,43 @@ public:
         constexpr uint64_t H = 0x8080808080808080ULL;
         const uint64_t qm = K * static_cast<uint8_t>('"');
         const uint64_t bsm = K * static_cast<uint8_t>('\\');
-        // SWAR cascade: 3 × 8 = 24 bytes inline, no backslash
-        // twitter.json coverage: ≤8 (28%), ≤16 (64%), ≤24 (90%)
+        // SWAR cascaded: load v0 first, early exit for ≤8-char strings
+        // (Phase D2: covers 36% of twitter.json strings without loading v1/v2).
+        // twitter.json coverage: ≤8 (36%), ≤16 (64%), ≤24 (84%)
         if (BEAST_LIKELY(s + 24 <= end_)) {
-          uint64_t v0, v1, v2;
+          uint64_t v0;
           std::memcpy(&v0, s, 8);
-          std::memcpy(&v1, s + 8, 8);
-          std::memcpy(&v2, s + 16, 8);
-          uint64_t hq0 = v0 ^ qm;
-          hq0 = (hq0 - K) & ~hq0 & H;
-          uint64_t hb0 = v0 ^ bsm;
-          hb0 = (hb0 - K) & ~hb0 & H;
-          uint64_t hq1 = v1 ^ qm;
-          hq1 = (hq1 - K) & ~hq1 & H;
-          uint64_t hb1 = v1 ^ bsm;
-          hb1 = (hb1 - K) & ~hb1 & H;
-          uint64_t hq2 = v2 ^ qm;
-          hq2 = (hq2 - K) & ~hq2 & H;
-          uint64_t hb2 = v2 ^ bsm;
-          hb2 = (hb2 - K) & ~hb2 & H;
-          if (BEAST_LIKELY(!(hb0 | hb1 | hb2))) {
-            if (hq0) {
+          uint64_t hq0 = v0 ^ qm; hq0 = (hq0 - K) & ~hq0 & H;
+          uint64_t hb0 = v0 ^ bsm; hb0 = (hb0 - K) & ~hb0 & H;
+          if (BEAST_LIKELY(!hb0)) {
+            if (hq0) { // ≤8-char string, no backslash
               e = s + (BEAST_CTZ(hq0) >> 3);
-            } else if (hq1) {
-              e = s + 8 + (BEAST_CTZ(hq1) >> 3);
-            } else if (hq2) {
-              e = s + 16 + (BEAST_CTZ(hq2) >> 3);
-            } else {
-              goto str_slow;
+              push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
+                   static_cast<uint32_t>(s - data_));
+              p_ = e + 1;
+              goto str_done;
             }
-            push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
-                 static_cast<uint32_t>(s - data_));
-            p_ = e + 1;
-            goto str_done;
+            // 9-24 chars: load v1 and v2
+            uint64_t v1, v2;
+            std::memcpy(&v1, s + 8, 8);
+            std::memcpy(&v2, s + 16, 8);
+            uint64_t hq1 = v1 ^ qm; hq1 = (hq1 - K) & ~hq1 & H;
+            uint64_t hb1 = v1 ^ bsm; hb1 = (hb1 - K) & ~hb1 & H;
+            uint64_t hq2 = v2 ^ qm; hq2 = (hq2 - K) & ~hq2 & H;
+            uint64_t hb2 = v2 ^ bsm; hb2 = (hb2 - K) & ~hb2 & H;
+            if (BEAST_LIKELY(!(hb1 | hb2))) {
+              if (hq1) {
+                e = s + 8 + (BEAST_CTZ(hq1) >> 3);
+              } else if (hq2) {
+                e = s + 16 + (BEAST_CTZ(hq2) >> 3);
+              } else {
+                goto str_slow;
+              }
+              push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
+                   static_cast<uint32_t>(s - data_));
+              p_ = e + 1;
+              goto str_done;
+            }
           }
         } else if (s + 8 <= end_) {
           uint64_t v;
@@ -5588,10 +5685,10 @@ public:
           if (BEAST_UNLIKELY(nc == ']' || nc == '}')) {
             if (BEAST_UNLIKELY(depth_ == 0))
               goto fail;
-            uint32_t si = start_stack_[--depth_];
-            push(nc == '}' ? TapeNodeType::ObjectEnd : TapeNodeType::ArrayEnd,
-                 0, static_cast<uint32_t>(p_ - data_));
-            doc_->tape.base[si].next_sib = tape_size();
+            --depth_;
+            if (BEAST_LIKELY(depth_ < kPresepDepth)) depth_mask_ >>= 1;
+            push_end(nc == '}' ? TapeNodeType::ObjectEnd : TapeNodeType::ArrayEnd,
+                     static_cast<uint32_t>(p_ - data_));
             ++p_;
             c = skip_to_action();
             if (BEAST_UNLIKELY(p_ >= end_))
@@ -5725,10 +5822,10 @@ public:
           if (BEAST_LIKELY(nc == ']' || nc == '}')) {
             if (BEAST_UNLIKELY(depth_ == 0))
               goto fail;
-            uint32_t si = start_stack_[--depth_];
-            push(nc == '}' ? TapeNodeType::ObjectEnd : TapeNodeType::ArrayEnd,
-                 0, static_cast<uint32_t>(p_ - data_));
-            doc_->tape.base[si].next_sib = tape_size();
+            --depth_;
+            if (BEAST_LIKELY(depth_ < kPresepDepth)) depth_mask_ >>= 1;
+            push_end(nc == '}' ? TapeNodeType::ObjectEnd : TapeNodeType::ArrayEnd,
+                     static_cast<uint32_t>(p_ - data_));
             ++p_;
             c = skip_to_action();
             if (BEAST_UNLIKELY(p_ >= end_))
