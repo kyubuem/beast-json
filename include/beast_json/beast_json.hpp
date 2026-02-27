@@ -39,15 +39,12 @@
 #include <cassert>
 #include <charconv> // For from_chars in number parsing
 #include <climits>
-#include <cmath> // <-- NEWER APIs can use std::isinf modern C++17 compilers
-#include <cmath> // For INFINITY, pow
+#include <cmath>
 #include <compare>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring> // for memcpy in optimizations
-#include <cstring> // For memcpy
-#include <filesystem>
+#include <cstring>
 #include <fstream>
 #include <future>
 #include <initializer_list>
@@ -65,7 +62,6 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-// #include <thread> // Unused
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -123,61 +119,10 @@
 #endif
 #endif
 
-// Runtime CPU Feature Detection
-namespace beast {
-namespace json {
-namespace simd {
-
-// CPU features detected at runtime
-struct CPUFeatures {
-  bool has_avx512{false};
-  bool has_avx2{false};
-  bool has_sse42{false};
-  bool has_neon{false};
-
-  static const CPUFeatures &get() {
-    static CPUFeatures features = detect();
-    return features;
-  }
-
-private:
-  static CPUFeatures detect() {
-    CPUFeatures f;
-
-#if defined(BEAST_ARCH_X86_64)
-// Use GCC/Clang built-in CPU detection
-#if defined(__GNUC__) || defined(__clang__)
-    __builtin_cpu_init();
-
-    f.has_sse42 = __builtin_cpu_supports("sse4.2");
-    f.has_avx2 = __builtin_cpu_supports("avx2");
-    f.has_avx512 = __builtin_cpu_supports("avx512f");
-#endif
-#elif defined(BEAST_ARCH_ARM64) || defined(BEAST_ARCH_ARM32)
-// ARM: NEON is always available on ARM64
-#if defined(__aarch64__)
-    f.has_neon = true;
-#elif defined(__ARM_NEON)
-    f.has_neon = true;
-#endif
-#endif
-
-    return f;
-  }
-};
-
-} // namespace simd
-} // namespace json
-} // namespace beast
 
 // ============================================================================
 // Data Types (C++20 PMR Aware)
 // ============================================================================
-
-#include <memory_resource>
-#include <string>
-#include <string_view>
-#include <vector>
 
 namespace beast {
 namespace json {
@@ -206,12 +151,14 @@ using Allocator = std::pmr::polymorphic_allocator<char>;
 #define BEAST_PREFETCH(addr) ((void)0)
 #endif
 
-// C++20 branch hinting macros for the state machine
-// IN C++20, [[likely]] must be on the statement, not inside the condition.
-// For now, we define these macros to just evaluate the condition boolean.
-// We will manually apply the branch hints to the State Machine switches.
+// Branch hinting macros
+#ifdef __GNUC__
+#define BEAST_LIKELY(x) __builtin_expect(!!(x), 1)
+#define BEAST_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
 #define BEAST_LIKELY(x) (x)
 #define BEAST_UNLIKELY(x) (x)
+#endif
 
 // Fallbacks for CLZ/CTZ use C++20 <bit> uniformly
 #include <bit>
@@ -229,8 +176,6 @@ enum class GhostType : uint8_t {
   BooleanTrue,
   BooleanFalse,
   Integer,
-  SimpleDecimal, // Optimization for short fractional numbers without scientific
-                 // notation
   NumberRaw,     // Lazy-Float representation
   StringRaw,     // Insitu strings
   ArrayStart,
@@ -406,10 +351,6 @@ private:
   size_t capacity_;
   std::atomic<size_t> offset_;
 
-  // Unique ID to handle address reuse
-  uint64_t id_;
-  static inline std::atomic<uint64_t> next_id_{1};
-
   // Debug stats
   std::atomic<size_t> tlab_hits_{0};
   std::atomic<size_t> tlab_refills_{0};
@@ -421,8 +362,7 @@ private:
 
 public:
   explicit FastArena(size_t initial_capacity = 65536)
-      : buffer_(nullptr), capacity_(initial_capacity), offset_(0),
-        id_(next_id_++) {
+      : buffer_(nullptr), capacity_(initial_capacity), offset_(0) {
     buffer_ = reinterpret_cast<char *>(std::malloc(capacity_));
     if (BEAST_UNLIKELY(!buffer_)) {
       throw std::bad_alloc();
@@ -726,12 +666,6 @@ BEAST_INLINE const char *get_2digits(unsigned val) {
 // Needs escape check
 BEAST_INLINE bool needs_escape(char c) {
   return escape_table[static_cast<unsigned char>(c)] != 0;
-}
-
-BEAST_INLINE bool is_structural(char c) {
-  // '{', '}', '[', ']', ':', ',', '"'
-  return c == '{' || c == '}' || c == '[' || c == ']' || c == ':' || c == ',' ||
-         c == '"';
 }
 
 } // namespace lookup
@@ -1761,34 +1695,6 @@ inline void format_shortest(double f, uint64_t &d_out, int &p_out) {
   p_out = -p;
 }
 
-// ============================================================================
-// Russ Cox: Fast Number Parsing
-// ============================================================================
-
-// Parse decimal string to float64 using Russ Cox algorithm
-inline double parse_decimal(uint64_t d, int p) {
-  if (d == 0)
-    return 0.0;
-  if (d > 10000000000000000000ULL)
-    return 0.0; // Too many digits
-
-  // Determine binary exponent e
-  int b = 64 - BEAST_CLZ(d);
-  int lp = log2_pow10(p);
-  int e = std::min(1074, 53 - b - lp);
-
-  // Scale decimal to binary
-  Scaler pre = prescale(e - (64 - b), p, lp);
-  Unrounded u = uscale(d << (64 - b), pre);
-
-  // Handle extra bit (branch-free)
-  int has_extra = (u >= Unrounded::unmin(1ULL << 53)) ? 1 : 0;
-  u = u.rsh(has_extra);
-  e -= has_extra;
-
-  uint64_t m = u.round();
-  return pack_float64(m, -e);
-}
 
 // ============================================================================
 // Error Handling
@@ -1908,20 +1814,6 @@ constexpr inline uint64_t has_byte(uint64_t x, uint8_t n) {
   return (v - 0x0101010101010101ULL) & ~v & 0x8080808080808080ULL;
 }
 
-// Check if uint64_t contains a control char (< 32)
-// Logic: if (x < 32) is complex in SWAR.
-// Easier: x < 0x20.
-// Can use: (x - 0x01..) ...
-// Proper way: (x - 0x2020...) & 0x8080... detects if any byte
-// exceeded/borrowed? No. Safe/Fast way for < 32: Use lookup table or multiple
-// checks. Or just check has_byte for 0..31? Too slow. Actually, standard JSON
-// string cannot have unescaped control characters. So we MUST check for them.
-// Optimization: Just check " and \ for now. Protocol assumes valid JSON often?
-// Beast safety: Must throw error.
-// Let's defer control char check for now and focus on " and \ for speed first.
-constexpr inline uint64_t has_quote(uint64_t x) { return has_byte(x, '"'); }
-
-constexpr inline uint64_t has_escape(uint64_t x) { return has_byte(x, '\\'); }
 
 // } // namespace detail REMOVED to keep append_uint inside detail
 // Fast integer to buffer (replacing format_base10/snprintf)
@@ -2634,8 +2526,6 @@ struct JsonMember {
     return first == other.first && second == other.second;
   }
 };
-static_assert(!std::is_same_v<JsonMember, std::filesystem::path>,
-              "JsonMember IS path!");
 
 // Object methods
 inline Object::iterator Object::begin() { return fields_.begin(); }
@@ -3259,45 +3149,8 @@ inline void Serializer::write(const Value &v) {
 }
 
 // ============================================================================
+// Two-Stage Parsing (Stage 1 Bitmap Infrastructure)
 // ============================================================================
-// Two-Stage Parsing (Phase B - simdjson-inspired)
-// ============================================================================
-
-// Enhanced Structural character indices with value tracking
-struct StructuralIndex {
-  std::vector<uint32_t> positions; // Structural character positions
-  std::vector<uint8_t> types;      // Character types
-
-  // NEW: Value tracking for literals/numbers
-  std::vector<uint32_t> value_positions; // Start positions of literals/numbers
-  std::vector<uint8_t> value_types;      // Value types
-
-  // Value type constants
-  static constexpr uint8_t VAL_NUMBER = 1;
-  static constexpr uint8_t VAL_TRUE = 2;
-  static constexpr uint8_t VAL_FALSE = 3;
-  static constexpr uint8_t VAL_NULL = 4;
-
-  size_t size() const { return positions.size(); }
-  size_t value_size() const { return value_positions.size(); }
-
-  BEAST_INLINE void add(uint32_t pos, uint8_t type) {
-    positions.push_back(pos);
-    types.push_back(type);
-  }
-
-  BEAST_INLINE void add_value(uint32_t pos, uint8_t vtype) {
-    value_positions.push_back(pos);
-    value_types.push_back(vtype);
-  }
-
-  void reserve(size_t n) {
-    positions.reserve(n);
-    types.reserve(n);
-    value_positions.reserve(n / 2);
-    value_types.reserve(n / 2);
-  }
-};
 
 // Bitmap Index for structural characters (replacing vector positions)
 struct BitmapIndex {
@@ -3770,586 +3623,6 @@ BEAST_INLINE const char *skip_string(const char *p, const char *end) {
   return end;
 }
 
-// Output must have at least len * 6 + 2 bytes capacity
-BEAST_INLINE char *escape_string(const char *src, size_t len, char *dst) {
-  const char *end = src + len;
-
-  static constexpr uint8_t escape_table[256] = {
-      1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-      1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0,
-      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-  };
-  static constexpr uint8_t escape_chars[256] = {
-      0, 0, 0, 0, 0, 0, 0, 0, 98, 116, 110, 0, 102, 114, 0,  0, 0, 0, 0, 0,
-      0, 0, 0, 0, 0, 0, 0, 0, 0,  0,   0,   0, 0,   0,   34, 0, 0, 0, 0, 0,
-      0, 0, 0, 0, 0, 0, 0, 0, 0,  0,   0,   0, 0,   0,   0,  0, 0, 0, 0, 0,
-      0, 0, 0, 0, 0, 0, 0, 0, 0,  0,   0,   0, 0,   0,   0,  0, 0, 0, 0, 0,
-      0, 0, 0, 0, 0, 0, 0, 0, 0,  0,   0,   0, 92,  0,   0,  0, 0, 0, 0, 0,
-      0, 0, 0, 0, 0, 0, 0, 0, 0,  0,   0,   0, 0,   0,   0,  0, 0, 0, 0, 0,
-      0, 0, 0, 0, 0, 0, 0, 0, 0,  0,   0,   0, 0,   0,   0,  0, 0, 0, 0, 0,
-      0, 0, 0, 0, 0, 0, 0, 0, 0,  0,   0,   0, 0,   0,   0,  0, 0, 0, 0, 0,
-      0, 0, 0, 0, 0, 0, 0, 0, 0,  0,   0,   0, 0,   0,   0,  0, 0, 0, 0, 0,
-      0, 0, 0, 0, 0, 0, 0, 0, 0,  0,   0,   0, 0,   0,   0,  0, 0, 0, 0, 0,
-      0, 0, 0, 0, 0, 0, 0, 0, 0,  0,   0,   0, 0,   0,   0,  0, 0, 0, 0, 0,
-      0, 0, 0, 0, 0, 0, 0, 0, 0,  0,   0,   0, 0,   0,   0,  0, 0, 0, 0, 0,
-      0, 0, 0, 0, 0, 0, 0, 0, 0,  0,   0,   0, 0,   0,   0,  0,
-  };
-
-  auto emit_escape = [&](uint8_t c) {
-    *dst++ = '\\';
-    uint8_t ec = escape_chars[c];
-    if (ec) {
-      *dst++ = (char)ec;
-    } else {
-      *dst++ = 'u';
-      *dst++ = '0';
-      *dst++ = '0';
-      *dst++ = "0123456789abcdef"[(c >> 4) & 0xF];
-      *dst++ = "0123456789abcdef"[c & 0xF];
-    }
-  };
-
-#if defined(__aarch64__) || defined(__ARM_NEON)
-  const uint8x16_t v_quote = vdupq_n_u8('"');
-  const uint8x16_t v_backslash = vdupq_n_u8('\\');
-  const uint8x16_t v_k32 = vdupq_n_u8(32);
-
-  // 32-byte unrolled main loop
-  while (src + 32 <= end) {
-    uint8x16_t v0 = vld1q_u8((const uint8_t *)src);
-    uint8x16_t v1 = vld1q_u8((const uint8_t *)src + 16);
-
-    uint8x16_t m0 =
-        vorrq_u8(vorrq_u8(vceqq_u8(v0, v_quote), vceqq_u8(v0, v_backslash)),
-                 vcltq_u8(v0, v_k32));
-    uint8x16_t m1 =
-        vorrq_u8(vorrq_u8(vceqq_u8(v1, v_quote), vceqq_u8(v1, v_backslash)),
-                 vcltq_u8(v1, v_k32));
-
-    if (vmaxvq_u8(vorrq_u8(m0, m1)) == 0) {
-      vst1q_u8((uint8_t *)dst, v0);
-      vst1q_u8((uint8_t *)dst + 16, v1);
-      src += 32;
-      dst += 32;
-      continue;
-    }
-
-    // Process first 16 bytes
-    if (vmaxvq_u8(m0) == 0) {
-      vst1q_u8((uint8_t *)dst, v0);
-      src += 16;
-      dst += 16;
-    } else {
-      const char *be = src + 16;
-      while (src < be) {
-        uint8_t c = (uint8_t)*src++;
-        if (!escape_table[c])
-          *dst++ = (char)c;
-        else
-          emit_escape(c);
-      }
-    }
-
-    // Process second 16 bytes
-    if (vmaxvq_u8(m1) == 0) {
-      vst1q_u8((uint8_t *)dst, v1);
-      src += 16;
-      dst += 16;
-    } else {
-      const char *be = src + 16;
-      while (src < be) {
-        uint8_t c = (uint8_t)*src++;
-        if (!escape_table[c])
-          *dst++ = (char)c;
-        else
-          emit_escape(c);
-      }
-    }
-  }
-
-  // 16-byte tail
-  while (src + 16 <= end) {
-    uint8x16_t val = vld1q_u8((const uint8_t *)src);
-    uint8x16_t mask =
-        vorrq_u8(vorrq_u8(vceqq_u8(val, v_quote), vceqq_u8(val, v_backslash)),
-                 vcltq_u8(val, v_k32));
-    if (vmaxvq_u8(mask) == 0) {
-      vst1q_u8((uint8_t *)dst, val);
-      src += 16;
-      dst += 16;
-      continue;
-    }
-    const char *be = src + 16;
-    while (src < be) {
-      uint8_t c = (uint8_t)*src++;
-      if (!escape_table[c])
-        *dst++ = (char)c;
-      else
-        emit_escape(c);
-    }
-  }
-
-#elif defined(__SSE2__) || defined(__x86_64__) || defined(_M_X64)
-  const __m128i v_quote = _mm_set1_epi8('"');
-  const __m128i v_backslash = _mm_set1_epi8('\\');
-  const __m128i v_k32 = _mm_set1_epi8(32);
-  const __m128i v_neg1 = _mm_set1_epi8(-1);
-
-  // 32-byte unrolled main loop
-  while (src + 32 <= end) {
-    __m128i v0 = _mm_loadu_si128((const __m128i *)src);
-    __m128i v1 = _mm_loadu_si128((const __m128i *)(src + 16));
-
-    __m128i ctrl0 =
-        _mm_and_si128(_mm_cmplt_epi8(v0, v_k32), _mm_cmpgt_epi8(v0, v_neg1));
-    __m128i ctrl1 =
-        _mm_and_si128(_mm_cmplt_epi8(v1, v_k32), _mm_cmpgt_epi8(v1, v_neg1));
-    __m128i m0 =
-        _mm_or_si128(_mm_cmpeq_epi8(v0, v_quote),
-                     _mm_or_si128(_mm_cmpeq_epi8(v0, v_backslash), ctrl0));
-    __m128i m1 =
-        _mm_or_si128(_mm_cmpeq_epi8(v1, v_quote),
-                     _mm_or_si128(_mm_cmpeq_epi8(v1, v_backslash), ctrl1));
-
-    int bits0 = _mm_movemask_epi8(m0);
-    int bits1 = _mm_movemask_epi8(m1);
-
-    if ((bits0 | bits1) == 0) {
-      _mm_storeu_si128((__m128i *)dst, v0);
-      _mm_storeu_si128((__m128i *)(dst + 16), v1);
-      src += 32;
-      dst += 32;
-      continue;
-    }
-
-    if (bits0 == 0) {
-      _mm_storeu_si128((__m128i *)dst, v0);
-      src += 16;
-      dst += 16;
-    } else {
-      const char *be = src + 16;
-      while (src < be) {
-        uint8_t c = (uint8_t)*src++;
-        if (!escape_table[c])
-          *dst++ = (char)c;
-        else
-          emit_escape(c);
-      }
-    }
-
-    if (bits1 == 0) {
-      _mm_storeu_si128((__m128i *)dst, v1);
-      src += 16;
-      dst += 16;
-    } else {
-      const char *be = src + 16;
-      while (src < be) {
-        uint8_t c = (uint8_t)*src++;
-        if (!escape_table[c])
-          *dst++ = (char)c;
-        else
-          emit_escape(c);
-      }
-    }
-  }
-
-  // 16-byte tail
-  while (src + 16 <= end) {
-    __m128i val = _mm_loadu_si128((const __m128i *)src);
-    __m128i ctrl =
-        _mm_and_si128(_mm_cmplt_epi8(val, v_k32), _mm_cmpgt_epi8(val, v_neg1));
-    __m128i mask =
-        _mm_or_si128(_mm_cmpeq_epi8(val, v_quote),
-                     _mm_or_si128(_mm_cmpeq_epi8(val, v_backslash), ctrl));
-    if (_mm_movemask_epi8(mask) == 0) {
-      _mm_storeu_si128((__m128i *)dst, val);
-      src += 16;
-      dst += 16;
-      continue;
-    }
-    const char *be = src + 16;
-    while (src < be) {
-      uint8_t c = (uint8_t)*src++;
-      if (!escape_table[c])
-        *dst++ = (char)c;
-      else
-        emit_escape(c);
-    }
-  }
-#endif
-
-  // Scalar tail (< 16 bytes remaining)
-  while (src < end) {
-    uint8_t c = (uint8_t)*src++;
-    if (!escape_table[c])
-      *dst++ = (char)c;
-    else
-      emit_escape(c);
-  }
-  return dst;
-}
-
-// Combined Stage 1: Fill Bitmap + Find Split Points (One Pass)
-BEAST_INLINE std::vector<const char *>
-fill_bitmap_and_find_splits(const char *src, size_t len, int partitions,
-                            beast::json::BitmapIndex &idx) {
-  std::vector<const char *> splits;
-  std::vector<size_t> comma_offsets;
-  if (partitions <= 1)
-    return splits;
-
-  idx.structural_bits.clear();
-  idx.structural_bits.reserve(len / 64 + 1);
-
-  const char *p = src;
-  const char *end = src + len;
-
-  bool in_string = false;
-  int depth = 0;
-
-  size_t step = len / partitions;
-  size_t next_partition = 1;
-  size_t target_split = step;
-
-  // Align to 16 bytes? (Optional, but good for SIMD)
-  // For now, simple loop
-
-  while (p + 64 <= end) {
-
-    uint64_t str_bits;
-    uint16_t s0, q0, e0, n0, s1, q1, e1, n1, s2, q2, e2, n2, s3, q3, e3, n3;
-
-    // 1. Generate Raw Masks (SIMD)
-    classify_structure(p + 0, s0, q0, e0, n0);
-    classify_structure(p + 16, s1, q1, e1, n1);
-    classify_structure(p + 32, s2, q2, e2, n2);
-    classify_structure(p + 48, s3, q3, e3, n3);
-
-    // Combine for Bitmap
-    str_bits = (uint64_t)(s0 | q0) | ((uint64_t)(s1 | q1) << 16) |
-               ((uint64_t)(s2 | q2) << 32) | ((uint64_t)(s3 | q3) << 48);
-    idx.structural_bits.push_back(str_bits);
-
-    // 2. Track Depth & Find Commas (Scalar logic on 64-bit word) -
-    // "Micro-Scalar"
-    uint64_t combined_q = (uint64_t)q0 | ((uint64_t)q1 << 16) |
-                          ((uint64_t)q2 << 32) | ((uint64_t)q3 << 48);
-
-    if (combined_q == 0) {
-      if (!in_string) {
-        // --- OPTIMIZATION: Zero-Closing Skip ---
-#if defined(__aarch64__) || defined(__ARM_NEON)
-        const uint8_t mask_d[] = {1, 2, 4, 8, 16, 32, 64, 128,
-                                  1, 2, 4, 8, 16, 32, 64, 128};
-        uint8x16_t bit_mask = vld1q_u8(mask_d);
-
-        auto to_mask = [&](uint8x16_t v) -> uint16_t {
-          uint8x16_t masked = vandq_u8(v, bit_mask);
-          return vaddv_u8(vget_low_u8(masked)) |
-                 (vaddv_u8(vget_high_u8(masked)) << 8);
-        };
-
-        uint64_t combined_close = 0;
-        uint64_t combined_open = 0;
-        uint8x16_t open_sq = vdupq_n_u8('[');
-        uint8x16_t open_cur = vdupq_n_u8('{');
-        uint8x16_t close_sq = vdupq_n_u8(']');
-        uint8x16_t close_cur = vdupq_n_u8('}');
-
-        // Block 0
-        {
-          uint8x16_t chunk = vld1q_u8((const uint8_t *)(p + 0));
-          uint8x16_t m_cl =
-              vorrq_u8(vceqq_u8(chunk, close_sq), vceqq_u8(chunk, close_cur));
-          uint8x16_t m_op =
-              vorrq_u8(vceqq_u8(chunk, open_sq), vceqq_u8(chunk, open_cur));
-          combined_close |= (uint64_t)to_mask(m_cl);
-          combined_open |= (uint64_t)to_mask(m_op);
-        }
-        // Block 1
-        {
-          uint8x16_t chunk = vld1q_u8((const uint8_t *)(p + 16));
-          uint8x16_t m_cl =
-              vorrq_u8(vceqq_u8(chunk, close_sq), vceqq_u8(chunk, close_cur));
-          uint8x16_t m_op =
-              vorrq_u8(vceqq_u8(chunk, open_sq), vceqq_u8(chunk, open_cur));
-          combined_close |= ((uint64_t)to_mask(m_cl) << 16);
-          combined_open |= ((uint64_t)to_mask(m_op) << 16);
-        }
-        // Block 2
-        {
-          uint8x16_t chunk = vld1q_u8((const uint8_t *)(p + 32));
-          uint8x16_t m_cl =
-              vorrq_u8(vceqq_u8(chunk, close_sq), vceqq_u8(chunk, close_cur));
-          uint8x16_t m_op =
-              vorrq_u8(vceqq_u8(chunk, open_sq), vceqq_u8(chunk, open_cur));
-          combined_close |= ((uint64_t)to_mask(m_cl) << 32);
-          combined_open |= ((uint64_t)to_mask(m_op) << 32);
-        }
-        // Block 3
-        {
-          uint8x16_t chunk = vld1q_u8((const uint8_t *)(p + 48));
-          uint8x16_t m_cl =
-              vorrq_u8(vceqq_u8(chunk, close_sq), vceqq_u8(chunk, close_cur));
-          uint8x16_t m_op =
-              vorrq_u8(vceqq_u8(chunk, open_sq), vceqq_u8(chunk, open_cur));
-          combined_close |= ((uint64_t)to_mask(m_cl) << 48);
-          combined_open |= ((uint64_t)to_mask(m_op) << 48);
-        }
-
-        if (combined_close == 0) {
-          if (depth > 1) {
-            depth += __builtin_popcountll(combined_open);
-            p += 64;
-            continue;
-          }
-          if (depth == 1 && combined_open == 0) {
-            // Optimization: Large Array Skip
-            // If we are at depth 1, have no brackets, we only have commas.
-            // If we are far from the target split, we can skip processing
-            // these commas.
-            size_t current_off = p - src;
-            if (current_off + 64 < target_split) {
-              p += 64;
-              continue;
-            }
-          }
-        }
-#endif
-        uint64_t work_bits = str_bits;
-        while (work_bits) {
-          int cur_bit = __builtin_ctzll(work_bits);
-          size_t off = (p - src) + cur_bit;
-          char c = src[off];
-          if (c == '[')
-            depth++;
-          else if (c == ']')
-            depth--;
-          else if (c == '{')
-            depth++;
-          else if (c == '}')
-            depth--;
-          else if (c == ',' && depth == 1) {
-            if (off >= target_split && next_partition < (size_t)partitions) {
-              splits.push_back(src + off);
-              next_partition++;
-              target_split = next_partition * step;
-            }
-          }
-          work_bits &= work_bits - 1;
-        }
-      }
-    } else {
-      // Quotes present. Check if we can optimized (no escapes).
-      uint64_t combined_e = (uint64_t)e0 | ((uint64_t)e1 << 16) |
-                            ((uint64_t)e2 << 32) | ((uint64_t)e3 << 48);
-
-      bool handled = false;
-#if defined(__aarch64__) || defined(__ARM_NEON)
-      if (combined_e ==
-          0) { // NO escapes -> we can compute string mask perfectly
-        // Compute Quote Mask
-        uint64_t q_mask = combined_q; // 1 at quote positions
-
-        // Prefix XOR to propagate string state
-        // If in_string, we start with 1.
-        // x = q_mask.
-        // string_mask = prefix_xor(x) ^ (in_string ? -1 : 0).
-        // Wait. quote toggles state.
-        // 100100 -> 111000.
-        // If in_string=0: strings are between pairs of 1s in q_mask.
-        // prefix_xor(100100) = 111000. Correct (inclusive of first quote,
-        // exclusive of second?) Logic: q: 00100100 px:00111000 We want mask
-        // of "inside string". Usually we want bits strictly BETWEEN quotes?
-        // Or does structure parsing ignore the quotes themselves?
-        // classify_structure includes quotes in s_mask?
-        // s_mask = []{}:, "
-        // str_bits includes quotes.
-        // If we mask with string_mask, we might mask out the quotes
-        // themselves? It doesn't matter for depth. Quotes don't change depth.
-        // We just need to ignore []{}, inside strings.
-
-        uint64_t m = q_mask;
-        m ^= m << 1;
-        m ^= m << 2;
-        m ^= m << 4;
-        m ^= m << 8;
-        m ^= m << 16;
-        m ^= m << 32;
-
-        if (in_string)
-          m = ~m;
-
-        // m now has 1s where string is active.
-        // Check logic: q=001100. px=001000.
-        // q=1100. px=1000.
-        // q=1010. px=1100. (Range 0-2).
-        // Correct.
-
-        // Mask out structural bits that are inside strings
-        // str_bits contains []{}, and "
-        // We want to count []{}, outside strings.
-        // structure bits in m are INVALID.
-
-        // We need separate open/close masks to update depth
-        // We can re-use the NEON logic from above?
-        // Yes, define lambda or use copy-paste.
-
-        const uint8_t mask_d[] = {1, 2, 4, 8, 16, 32, 64, 128,
-                                  1, 2, 4, 8, 16, 32, 64, 128};
-        uint8x16_t bit_mask = vld1q_u8(mask_d);
-        auto to_mask = [&](uint8x16_t v) -> uint16_t {
-          uint8x16_t masked = vandq_u8(v, bit_mask);
-          return vaddv_u8(vget_low_u8(masked)) |
-                 (vaddv_u8(vget_high_u8(masked)) << 8);
-        };
-
-        uint64_t combined_close = 0;
-        uint64_t combined_open = 0;
-        uint8x16_t open_sq = vdupq_n_u8('[');
-        uint8x16_t open_cur = vdupq_n_u8('{');
-        uint8x16_t close_sq = vdupq_n_u8(']');
-        uint8x16_t close_cur = vdupq_n_u8('}');
-
-        // We only need to compute this once. (Maybe hoist it?)
-        // For now duplicating for safety inside this block.
-        {
-          uint8x16_t chunk = vld1q_u8((const uint8_t *)(p + 0));
-          uint8x16_t m_cl =
-              vorrq_u8(vceqq_u8(chunk, close_sq), vceqq_u8(chunk, close_cur));
-          uint8x16_t m_op =
-              vorrq_u8(vceqq_u8(chunk, open_sq), vceqq_u8(chunk, open_cur));
-          combined_close |= (uint64_t)to_mask(m_cl);
-          combined_open |= (uint64_t)to_mask(m_op);
-        }
-        {
-          uint8x16_t chunk = vld1q_u8((const uint8_t *)(p + 16));
-          uint8x16_t m_cl =
-              vorrq_u8(vceqq_u8(chunk, close_sq), vceqq_u8(chunk, close_cur));
-          uint8x16_t m_op =
-              vorrq_u8(vceqq_u8(chunk, open_sq), vceqq_u8(chunk, open_cur));
-          combined_close |= ((uint64_t)to_mask(m_cl) << 16);
-          combined_open |= ((uint64_t)to_mask(m_op) << 16);
-        }
-        {
-          uint8x16_t chunk = vld1q_u8((const uint8_t *)(p + 32));
-          uint8x16_t m_cl =
-              vorrq_u8(vceqq_u8(chunk, close_sq), vceqq_u8(chunk, close_cur));
-          uint8x16_t m_op =
-              vorrq_u8(vceqq_u8(chunk, open_sq), vceqq_u8(chunk, open_cur));
-          combined_close |= ((uint64_t)to_mask(m_cl) << 32);
-          combined_open |= ((uint64_t)to_mask(m_op) << 32);
-        }
-        {
-          uint8x16_t chunk = vld1q_u8((const uint8_t *)(p + 48));
-          uint8x16_t m_cl =
-              vorrq_u8(vceqq_u8(chunk, close_sq), vceqq_u8(chunk, close_cur));
-          uint8x16_t m_op =
-              vorrq_u8(vceqq_u8(chunk, open_sq), vceqq_u8(chunk, open_cur));
-          combined_close |= ((uint64_t)to_mask(m_cl) << 48);
-          combined_open |= ((uint64_t)to_mask(m_op) << 48);
-        }
-
-        // Mask out structure in strings
-        combined_close &= ~m;
-        combined_open &= ~m;
-
-        // Update in_string state for next block
-        // Determine parity of quotes in this block
-        // q_mask popcount.
-        if (__builtin_popcountll(q_mask) % 2 != 0) {
-          in_string = !in_string;
-        }
-
-        // Check for split point possibility
-        // If we are far from target, and (depth > 1 or (depth==1 && no
-        // open)), skip.
-
-        // Always update depth (safe)
-        depth += __builtin_popcountll(combined_open) -
-                 __builtin_popcountll(combined_close);
-
-        // Do we need to scan for commas?
-        size_t current_off = p - src;
-        if (current_off + 64 < target_split) {
-          // We are far from split.
-          // We don't need to find commas.
-          // We handled depth updating.
-          // We handled in_string updating.
-          p += 64;
-          handled = true;
-        }
-      }
-#endif
-      if (!handled) {
-        // Fallback to scalar loop
-        // Need to reset in_string state if we messed it up?
-        // No, if handled is false, we didn't update in_string.
-        // Correct.
-
-        uint64_t work_bits = str_bits;
-        size_t base_off = p - src;
-        while (work_bits) {
-          int cur_bit = __builtin_ctzll(work_bits);
-          size_t off = base_off + cur_bit;
-          if ((combined_q >> cur_bit) & 1) {
-            bool escaped = false;
-            // Optimized escape check
-            if (off > 0 && src[off - 1] == '\\') {
-              size_t k = off - 1;
-              int cnt = 0;
-              while (src[k] == '\\') {
-                cnt++;
-                if (k == 0)
-                  break;
-                k--;
-              }
-              if ((cnt % 2) != 0)
-                escaped = true;
-            }
-            if (!escaped)
-              in_string = !in_string;
-          }
-          if (!in_string) {
-            char c = src[off];
-            if (c == '[')
-              depth++;
-            else if (c == ']')
-              depth--;
-            else if (c == '{')
-              depth++;
-            else if (c == '}')
-              depth--;
-            else if (c == ',' && depth == 1) {
-              if (off >= target_split && next_partition < (size_t)partitions) {
-                splits.push_back(src + off);
-                next_partition++;
-                target_split = next_partition * step;
-              }
-            }
-          }
-          work_bits &= work_bits - 1;
-        }
-      }
-    }
-    p += 64;
-  }
-
-  if (p < end) {
-    ::beast::json::simd::fill_bitmap(p, end - p, idx); // Appends to idx
-  }
-
-  return splits;
-}
-
 // Recursively skips a JSON value.
 BEAST_INLINE const char *skip_value(const char *p, const char *end) {
   p = ::beast::json::simd::skip_whitespace(p, end);
@@ -4544,458 +3817,6 @@ phase2:
   return splits;
 }
 
-// Legacy fallback (now unused mostly)
-BEAST_INLINE std::vector<const char *>
-find_array_boundaries(const char * /*p*/, size_t /*len*/, int /*partitions*/) {
-  // ... (Keep existing implementation just in case, or delete?)
-  // I will overwrite it with the implementation that builds a temp index?
-  // Or just leave it for potential scalar fallback?
-  // I'll keep it but rename or just let the tool overwrite.
-  // I'll overwrite with the new signature and add the overload.
-
-  std::vector<const char *> splits;
-  // ... implementation ...
-  return splits;
-}
-
-// ============================================================================
-// SIMD Number Parsing (Phase C-1) - ARM64 NEON
-// ============================================================================
-
-#if defined(__ARM_NEON) || defined(__aarch64__)
-// Parse up to 8 digits with ARM NEON - 3x faster than scalar
-BEAST_INLINE int parse_8digits_neon(const char *p, uint64_t &out) {
-  // Load 8 bytes
-  uint8x8_t chunk = vld1_u8((const uint8_t *)p);
-
-  // Convert ASCII to digits (subtract '0')
-  uint8x8_t zeros = vdup_n_u8('0');
-  uint8x8_t digits = vsub_u8(chunk, zeros);
-
-  // Check if all are valid digits (0-9)
-  uint8x8_t nine = vdup_n_u8(9);
-  uint8x8_t valid = vcle_u8(digits, nine);
-
-  // Get mask of valid digits
-  uint64_t valid_mask;
-  vst1_u8((uint8_t *)&valid_mask, valid);
-
-  // Count consecutive valid digits
-  int num_digits = 0;
-  for (int i = 0; i < 8; ++i) {
-    if (((uint8_t *)&valid_mask)[i] == 0xFF) {
-      num_digits++;
-    } else {
-      break;
-    }
-  }
-
-  if (num_digits == 0) {
-    return 0;
-  }
-
-  // Convert to number (optimized scalar)
-  uint64_t result = 0;
-  for (int i = 0; i < num_digits; ++i) {
-    result = result * 10 + (p[i] - '0');
-  }
-  out = result;
-
-  return num_digits;
-}
-#endif
-
-// Parse digits with SIMD acceleration when available
-BEAST_INLINE const char *parse_digits_simd(const char *p, const char *end,
-                                           uint64_t &d, int &digits) {
-#if defined(__ARM_NEON) || defined(__aarch64__)
-  // ARM64 NEON path - 8 digits at once
-  while (p + 8 <= end && digits < 19) {
-    uint64_t chunk_val = 0;
-    int chunk_digits = parse_8digits_neon(p, chunk_val);
-
-    if (chunk_digits == 0) {
-      break; // No more digits
-    }
-
-    if (chunk_digits == 8) {
-      // Fast path: all 8 digits valid
-      d = d * 100000000ULL + chunk_val;
-      digits += 8;
-      p += 8;
-    } else {
-      // Partial chunk
-      uint64_t multiplier = 1;
-      for (int i = 0; i < chunk_digits; ++i) {
-        multiplier *= 10;
-      }
-      d = d * multiplier + chunk_val;
-      digits += chunk_digits;
-      p += chunk_digits;
-      break;
-    }
-  }
-#endif
-
-  // Scalar fallback for remaining digits
-  while (p < end && lookup::is_digit(*p) && digits < 19) {
-    d = d * 10 + (*p - '0');
-    p++;
-    digits++;
-  }
-
-  return p;
-}
-
-// Parse integer using SIMD (NEON/SSE)
-// Reads 8 bytes at a time
-BEAST_INLINE uint64_t parse_uint64_fast(const char *p, int *num_digits) {
-  uint64_t result = 0;
-  int digits = 0;
-
-#if defined(__ARM_NEON) || defined(__aarch64__) || defined(BEAST_USE_SSE2NEON)
-  // NEON accelerated digit parsing (8 digits at once)
-  // We check digits + 8 <= 18 to ensure we don't overflow uint64_t
-  while (digits + 8 <= 18) {
-    // Load 8 bytes (unaligned load is fine on ARM64)
-    uint8x8_t chunk = vld1_u8((const uint8_t *)p);
-    uint8x8_t zeros = vdup_n_u8('0');
-    uint8x8_t nines = vdup_n_u8('9');
-
-    // Check if all are digits: '0' <= c <= '9'
-    uint8x8_t ge_zero = vcge_u8(chunk, zeros);
-    uint8x8_t le_nine = vcle_u8(chunk, nines);
-    uint8x8_t is_digit = vand_u8(ge_zero, le_nine);
-
-    // Check if all all bits are set (all 8 bytes are digits)
-    uint64_t mask;
-    vst1_u8((uint8_t *)&mask, is_digit);
-
-    if (mask != 0xFFFFFFFFFFFFFFFFULL) {
-      // Partial chunk: Found a non-digit
-      // In Little Endian, non-digits (0x00) will appear in higher or
-      // lower bits? mask bytes: 0xFF for digit, 0x00 for non-digit. e.g.
-      // "123," -> FF FF FF 00 ... ~mask -> 00 00 00 FF ... ctz(~mask) ->
-      // 24 bits (3 bytes)
-      int trailing_zeros = __builtin_ctzll(~mask);
-      int valid_bytes = trailing_zeros / 8;
-
-      for (int i = 0; i < valid_bytes; ++i) {
-        result = result * 10 + (p[i] - '0');
-      }
-      digits += valid_bytes;
-      p += valid_bytes;
-      break;
-    }
-
-    // All 8 are digits - accumulate them
-    // Unrolled for ILP (Instruction Level Parallelism)
-    // result * 10^8 + (d0*10^7 + ... + d7)
-    // Horizontal SIMD (NEON)
-    uint8x8_t digits_vec = vsub_u8(chunk, vdup_n_u8('0'));
-
-    const uint8x8_t mul_10_1 = {10, 1, 10, 1, 10, 1, 10, 1};
-    uint16x8_t p1 = vmull_u8(digits_vec, mul_10_1);
-
-    uint16x4_t p2 = vpadd_u16(vget_low_u16(p1), vget_high_u16(p1));
-
-    const uint16x4_t mul_100_1 = {100, 1, 100, 1};
-    uint32x4_t p3 = vmull_u16(p2, mul_100_1);
-
-    uint32x2_t p4 = vpadd_u32(vget_low_u32(p3), vget_high_u32(p3));
-
-    uint64_t chunk_val =
-        (uint64_t)vget_lane_u32(p4, 0) * 10000 + vget_lane_u32(p4, 1);
-
-    result = result * 100000000ULL + chunk_val;
-
-    p += 8;
-    digits += 8;
-  }
-#endif
-
-  // Scalar tail for remaining items
-  while (digits < 18) {
-    char c = *p;
-    if (c < '0' || c > '9')
-      break;
-    result = result * 10 + (c - '0');
-    p++;
-    digits++;
-  }
-
-  *num_digits = digits;
-  return result;
-}
-
-BEAST_INLINE bool validate_utf8(const char *data, size_t len) {
-  const unsigned char *str = (const unsigned char *)data;
-  const unsigned char *end = str + len;
-  while (str < end) {
-#if defined(__aarch64__) || defined(__ARM_NEON)
-    // SIMD ASCII Fast Path
-    if (str + 16 <= end) {
-      uint8x16_t chunk = vld1q_u8((const uint8_t *)str);
-      if (vmaxvq_u8(chunk) < 0x80) {
-        str += 16;
-        continue;
-      }
-    }
-#endif
-    if (*str < 0x80) {
-      str++;
-      continue;
-    }
-    unsigned char c = *str++;
-    if (c < 0xC2 || c > 0xF4)
-      return false; // Invalid start
-    int n = (c < 0xE0) ? 1 : (c < 0xF0) ? 2 : 3;
-    if (str + n > end)
-      return false;
-
-    unsigned char c2 = *str++;
-    if ((c2 & 0xC0) != 0x80)
-      return false;
-    if (n == 1)
-      continue; // 2-byte
-
-    unsigned char c3 = *str++;
-    if ((c3 & 0xC0) != 0x80)
-      return false;
-    if (c == 0xE0 && c2 < 0xA0)
-      return false; // Overlong
-    if (c == 0xED && c2 >= 0xA0)
-      return false; // Surrogate
-    if (n == 2)
-      continue; // 3-byte
-
-    unsigned char c4 = *str++;
-    if ((c4 & 0xC0) != 0x80)
-      return false;
-    if (c == 0xF0 && c2 < 0x90)
-      return false; // Overlong
-    if (c == 0xF4 && c2 >= 0x90)
-      return false; // Out of range
-  }
-  return true;
-}
-
-struct DetectResult {
-  const char *end;
-  bool has_escape;
-  bool has_non_ascii;
-};
-
-// Return: {end, has_escape, has_non_ascii}
-BEAST_INLINE DetectResult scan_string_detect(const char *src,
-                                             const char *limit) {
-  bool has_utf8 = false;
-#if defined(__aarch64__) || defined(__ARM_NEON)
-  const uint8x16_t quote = vdupq_n_u8('"');
-  const uint8x16_t backslash = vdupq_n_u8('\\');
-  const uint8x16_t control = vdupq_n_u8(0x1F);
-
-  while (src + 16 <= limit) {
-    uint8x16_t chunk = vld1q_u8((const uint8_t *)src);
-    uint8x16_t m1 = vceqq_u8(chunk, quote);
-    uint8x16_t m2 = vceqq_u8(chunk, backslash);
-    uint8x16_t m3 = vcleq_u8(chunk, control);
-    uint8x16_t mask = vorrq_u8(vorrq_u8(m1, m2), m3);
-
-    // Accumulate UTF8 flag (high bit check)
-    // vmaxvq gives max byte. If >= 0x80, we have non-ascii.
-    if (vmaxvq_u8(chunk) >= 0x80)
-      has_utf8 = true;
-
-    if (vmaxvq_u8(mask) != 0) {
-      uint64_t low = vgetq_lane_u64(vreinterpretq_u64_u8(mask), 0);
-      int idx;
-      if (low != 0) {
-        idx = __builtin_ctzll(low) / 8;
-      } else {
-        uint64_t high = vgetq_lane_u64(vreinterpretq_u64_u8(mask), 1);
-        idx = 8 + __builtin_ctzll(high) / 8;
-      }
-
-      // Scalar check for UTF8 in the prefix up to idx?
-      // For simplicity, we flag entire chunk. Validation will handle false
-      // positives.
-      return {src + idx, src[idx] == '\\', has_utf8};
-    }
-    src += 16;
-  }
-#endif
-  // Scalar fallback
-  while (src < limit) {
-    char c = *src;
-    if ((unsigned char)c >= 0x80)
-      has_utf8 = true;
-    if (c == '"' || c == '\\' || (unsigned char)c <= 0x1F)
-      break;
-    src++;
-  }
-  return {src, src < limit && *src == '\\', has_utf8};
-}
-
-// Count number of escape sequences in a string (for tier selection)
-BEAST_INLINE size_t count_escapes_neon(const char *src, const char *limit) {
-  size_t total = 0;
-#if defined(__aarch64__) || defined(__ARM_NEON)
-  const uint8x16_t backslash = vdupq_n_u8('\\');
-
-  while (src + 16 <= limit) {
-    uint8x16_t chunk = vld1q_u8((const uint8_t *)src);
-    uint8x16_t mask = vceqq_u8(chunk, backslash);
-
-    // Count matches: each 0xFF byte in mask = 1 escape
-    // Use horizontal sum to count escapes in this chunk
-    uint8x16_t ones =
-        vshrq_n_u8(mask, 7); // Convert 0xFF → 1
-#if defined(__ARM_FEATURE_DOTPROD)
-                             // Use dot product for faster sum on newer ARM
-    uint32x4_t sum = vpaddlq_u16(vpaddlq_u8(ones));
-    total += vaddvq_u32(sum);
-#else
-                             // Fallback: manual horizontal add
-    uint64x2_t sum64 = vpaddlq_u32(vpaddlq_u16(vpaddlq_u8(ones)));
-    total += vgetq_lane_u64(sum64, 0) + vgetq_lane_u64(sum64, 1);
-#endif
-
-    src += 16;
-  }
-#endif
-
-  // Scalar fallback for remaining bytes
-  while (src < limit) {
-    if (*src == '\\')
-      total++;
-    src++;
-  }
-
-  return total;
-}
-
-template <typename CharT> struct CopyResult {
-  CharT *src_end;
-  char *dst_end;
-  bool has_non_ascii;
-};
-
-template <typename CharT>
-BEAST_INLINE CopyResult<CharT> scan_copy_string(CharT *src, CharT *src_end,
-                                                char *dst, char *dst_end) {
-  bool has_utf8 = false;
-#if defined(__aarch64__) || defined(__ARM_NEON)
-  const uint8x16_t quote = vdupq_n_u8('"');
-  const uint8x16_t backslash = vdupq_n_u8('\\');
-  const uint8x16_t control = vdupq_n_u8(0x1F);
-  const uint8x16_t high80 = vdupq_n_u8(0x80);
-
-  bool no_write = ((const char *)src == (const char *)dst);
-
-  // 32-byte unrolled loop (2 x 16-byte NEON)
-  while (src + 32 <= src_end && dst + 32 <= dst_end) {
-    uint8x16_t a, b;
-    std::memcpy(&a, src, 16);
-    std::memcpy(&b, src + 16, 16);
-
-    uint8x16_t ma =
-        vorrq_u8(vorrq_u8(vceqq_u8(a, quote), vceqq_u8(a, backslash)),
-                 vcleq_u8(a, control));
-    uint8x16_t mb =
-        vorrq_u8(vorrq_u8(vceqq_u8(b, quote), vceqq_u8(b, backslash)),
-                 vcleq_u8(b, control));
-
-    // Accumulate UTF-8 flag (any byte ≥ 0x80) across both chunks
-    uint8x16_t high_a = vcgeq_u8(a, high80);
-    uint8x16_t high_b = vcgeq_u8(b, high80);
-    if (vmaxvq_u8(vorrq_u8(high_a, high_b)) != 0)
-      has_utf8 = true;
-
-    // Combined special-char check
-    uint8x16_t combined = vorrq_u8(ma, mb);
-    if (BEAST_LIKELY(vmaxvq_u8(combined) == 0)) {
-      // No specials: bulk copy 32 bytes
-      if (!no_write) {
-        vst1q_u8((uint8_t *)dst, a);
-        vst1q_u8((uint8_t *)dst + 16, b);
-      }
-      src += 32;
-      dst += 32;
-      continue;
-    }
-
-    // Special char found — determine which chunk and exact index
-    uint64_t low_a = vgetq_lane_u64(vreinterpretq_u64_u8(ma), 0);
-    int idx;
-    if (vmaxvq_u8(ma) != 0) {
-      if (low_a != 0) {
-        idx = __builtin_ctzll(low_a) / 8;
-      } else {
-        uint64_t high = vgetq_lane_u64(vreinterpretq_u64_u8(ma), 1);
-        idx = 8 + __builtin_ctzll(high) / 8;
-      }
-      if (!no_write)
-        std::memcpy(dst, src, idx);
-      return {src + idx, dst + idx, has_utf8};
-    } else {
-      // Special char is in chunk b (bytes 16..31)
-      if (!no_write)
-        vst1q_u8((uint8_t *)dst, a);
-      uint64_t low_b = vgetq_lane_u64(vreinterpretq_u64_u8(mb), 0);
-      if (low_b != 0) {
-        idx = 16 + __builtin_ctzll(low_b) / 8;
-      } else {
-        uint64_t high_b2 = vgetq_lane_u64(vreinterpretq_u64_u8(mb), 1);
-        idx = 24 + __builtin_ctzll(high_b2) / 8;
-      }
-      if (!no_write)
-        std::memcpy(dst + 16, src + 16, idx - 16);
-      return {src + idx, dst + idx, has_utf8};
-    }
-  }
-
-  // 16-byte tail
-  while (src + 16 <= src_end && dst + 16 <= dst_end) {
-    uint8x16_t chunk;
-    std::memcpy(&chunk, src, 16);
-
-    uint8x16_t mask =
-        vorrq_u8(vorrq_u8(vceqq_u8(chunk, quote), vceqq_u8(chunk, backslash)),
-                 vcleq_u8(chunk, control));
-
-    if (vmaxvq_u8(vcgeq_u8(chunk, high80)) != 0)
-      has_utf8 = true;
-
-    if (vmaxvq_u8(mask) != 0) {
-      uint64_t low = vgetq_lane_u64(vreinterpretq_u64_u8(mask), 0);
-      int idx = (low != 0) ? __builtin_ctzll(low) / 8
-                           : 8 + __builtin_ctzll(vgetq_lane_u64(
-                                     vreinterpretq_u64_u8(mask), 1)) /
-                                     8;
-      if (!no_write)
-        std::memcpy(dst, src, idx);
-      return {src + idx, dst + idx, has_utf8};
-    }
-    if (!no_write)
-      vst1q_u8((uint8_t *)dst, chunk);
-    src += 16;
-    dst += 16;
-  }
-#endif
-  // Scalar tail
-  while (src < src_end && dst < dst_end) {
-    char c = *src;
-    if ((unsigned char)c >= 0x80)
-      has_utf8 = true;
-    if (c == '"' || c == '\\' || (unsigned char)c <= 0x1F)
-      break;
-    *dst++ = c;
-    src++;
-  }
-  return {src, dst, has_utf8};
-}
-
 // Read-only scan for " or \ or control. Returns pointer to stopping char.
 // Updates has_utf8 flag.
 BEAST_INLINE const char *scan_string(const char *src, const char *src_end,
@@ -5112,32 +3933,6 @@ public:
     skip_ws();
     if (p_ < end_) {
       throw_error("Unexpected content after JSON");
-    }
-    return result;
-  }
-
-  // Parses a sequence of comma-separated values until end of fragment.
-  // Used by parallel parser.
-  Vector<Value> parse_array_sequence(const char *fragment_end) {
-    Vector<Value> result(alloc_);
-    p_ = simd::skip_whitespace(p_, fragment_end);
-
-    // If chunk starts with [, skip it
-    if (p_ < fragment_end && *p_ == '[')
-      p_++;
-
-    while (p_ < fragment_end) {
-      p_ = simd::skip_whitespace(p_, fragment_end);
-      if (p_ >= fragment_end)
-        break;
-      if (*p_ == ']')
-        break; // End of array
-      if (*p_ == ',') {
-        p_++;
-        continue;
-      }
-
-      result.push_back(parse_value());
     }
     return result;
   }
@@ -6084,25 +4879,6 @@ inline std::ostream &operator<<(std::ostream &os, const Value &v) {
 #ifndef BEAST_JSON_DOCUMENT_VIEW_HPP
 #define BEAST_JSON_DOCUMENT_VIEW_HPP
 
-#include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-
-#if defined(__aarch64__) || defined(__ARM_NEON)
-#include <arm_neon.h>
-#define BEAST_HAS_NEON 1
-#else
-#define BEAST_HAS_NEON 0
-#endif
-
-#ifndef BEAST_LIKELY
-#define BEAST_LIKELY(x) __builtin_expect(!!(x), 1)
-#define BEAST_UNLIKELY(x) __builtin_expect(!!(x), 0)
-#define BEAST_INLINE __attribute__((always_inline)) inline
-#endif
 
 namespace beast {
 namespace json {
@@ -6132,14 +4908,13 @@ struct TapeNode {
   uint16_t length;   // 2 bytes (max 65535 per string/number)
   uint32_t offset;   // 4 bytes (byte offset into source, max 4GB)
   uint32_t next_sib; // 4 bytes (skip-link for {}/[])
-  uint32_t aux;      // 4 bytes (reserved)
-                     // = 16 bytes, zero padding
+                     // = 12 bytes total
 
   TapeNode() = default;
   TapeNode(TapeNodeType t, uint16_t l, uint32_t o, uint32_t sib = 0)
-      : type(t), flags(0), length(l), offset(o), next_sib(sib), aux(0) {}
+      : type(t), flags(0), length(l), offset(o), next_sib(sib) {}
 };
-static_assert(sizeof(TapeNode) == 16, "TapeNode must be exactly 16 bytes");
+static_assert(sizeof(TapeNode) == 12, "TapeNode must be exactly 12 bytes");
 
 // ─────────────────────────────────────────────────────────────
 // TapeArena — Beast Flat Arena (Phase B)
@@ -6387,35 +5162,6 @@ static BEAST_INLINE uint16_t neon_movemask(uint8x16_t mask) noexcept {
   return (uint16_t)(vgetq_lane_u64(s64, 0) | (vgetq_lane_u64(s64, 1) << 8));
 }
 
-// Scan 16 bytes for whitespace.
-// All-WS fast path: vmaxvq_u8(vmvnq_u8(is_ws)) == 0 → skip=16 (2 NEON ops).
-// Mixed path: scalar loop finds exact position (data already in cache from
-// vld).
-struct NextToken {
-  int skip;
-  char ch;
-};
-
-static BEAST_INLINE NextToken neon_find_next(const char *p) noexcept {
-  uint8x16_t chunk = vld1q_u8((const uint8_t *)p);
-  uint8x16_t is_ws = vorrq_u8(vorrq_u8(vceqq_u8(chunk, vdupq_n_u8(' ')),
-                                       vceqq_u8(chunk, vdupq_n_u8('\t'))),
-                              vorrq_u8(vceqq_u8(chunk, vdupq_n_u8('\n')),
-                                       vceqq_u8(chunk, vdupq_n_u8('\r'))));
-  // Hot path: all 16 bytes are WS (dense whitespace regions in pretty JSON)
-  // vmvnq = NOT, vmaxvq = horizontal max — if 0, all bytes were WS
-  if (BEAST_LIKELY(vmaxvq_u8(vmvnq_u8(is_ws)) == 0)) {
-    return {16, 0};
-  }
-  // Slow path: find exact first non-WS position (data already in L1 cache)
-  for (int i = 0; i < 16; ++i) {
-    unsigned char c = static_cast<unsigned char>(p[i]);
-    if (c != ' ' && c != '\t' && c != '\n' && c != '\r')
-      return {i, static_cast<char>(c)};
-  }
-  return {16, 0}; // unreachable
-}
-
 #endif // BEAST_HAS_NEON
 
 // ─────────────────────────────────────────────────────────────
@@ -6467,6 +5213,19 @@ class Parser {
       p_ += 16;
     }
 #else
+    while (BEAST_LIKELY(p_ + 32 <= end_)) {
+      uint64_t a0 = swar_action_mask(load64(p_));
+      uint64_t a1 = swar_action_mask(load64(p_ + 8));
+      uint64_t a2 = swar_action_mask(load64(p_ + 16));
+      uint64_t a3 = swar_action_mask(load64(p_ + 24));
+      if (BEAST_LIKELY(a0 | a1 | a2 | a3)) {
+        if (a0) { p_ += BEAST_CTZ(a0) >> 3; return *p_; }
+        if (a1) { p_ += 8  + (BEAST_CTZ(a1) >> 3); return *p_; }
+        if (a2) { p_ += 16 + (BEAST_CTZ(a2) >> 3); return *p_; }
+        p_ += 24 + (BEAST_CTZ(a3) >> 3); return *p_;
+      }
+      p_ += 32;
+    }
     while (BEAST_LIKELY(p_ + 8 <= end_)) {
       uint64_t am = swar_action_mask(load64(p_));
       if (BEAST_LIKELY(am != 0)) {
@@ -6486,6 +5245,7 @@ class Parser {
     }
     return 0;
   }
+
 
   // ── SWAR-16 string scanner ─────────────────────────────────
   BEAST_INLINE const char *scan_string_end(const char *p) noexcept {
@@ -6592,7 +5352,6 @@ class Parser {
     n->length = l;
     n->offset = o;
     n->next_sib = 0;
-    n->aux = 0;
   }
 
   BEAST_INLINE uint32_t tape_size() const noexcept {
