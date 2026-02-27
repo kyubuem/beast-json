@@ -72,8 +72,8 @@ endforeach()
 
 # Optimization and PGO
 if(NOT CMAKE_BUILD_TYPE MATCHES "Debug")
-    add_compile_options(-O3 -march=native -flto)
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+    add_compile_options(-O3 -flto -fuse-ld=lld)
+    add_link_options(-fuse-ld=lld -flto)
 endif()
 
 set(PGO_MODE "" CACHE STRING "PGO mode: GENERATE or USE")

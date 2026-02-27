@@ -1,97 +1,97 @@
-# Beast JSON — twitter.json 성능 역전 개발계획서
+# Beast JSON — twitter.json Performance Overtake Development Plan
 
-> **작성일**: 2026-02-27
-> **현황**: beast::lazy 314μs vs yyjson 250μs (twitter.json 기준)
-> **목표**: twitter.json에서 yyjson 동등 또는 추월
+> **Date**: 2026-02-27
+> **Current State**: beast::lazy 314μs vs yyjson 250μs (twitter.json benchmark)
+> **Goal**: Match or surpass yyjson on twitter.json
 
 ---
 
-## 1. 근본 원인 진단
+## 1. Root Cause Diagnosis
 
-실측 데이터 기반의 정확한 병목 분석 결과:
+Precise bottleneck analysis based on measured data:
 
-| 특성 | twitter.json | gsoc-2018.json | canada.json |
+| Characteristic | twitter.json | gsoc-2018.json | canada.json |
 |:---|:---:|:---:|:---:|
-| 공백 비율 | **29.6%** (pretty-print) | 18.7% | 0% |
-| 중간 문자열 길이 | 15 bytes | 19 bytes | 7 bytes |
-| ≤16bytes 문자열 비율 | **50.9%** | 29.9% | 75% |
-| 객체당 평균 키 수 | **10.6** | 5.0 | 2.0 |
-| 평균 중첩 깊이 | 4.4 | 2.5 | 6.7 |
-| 토큰 종류 다양성 | strings+numbers+bool+null+`{[` | strings만 | numbers만 |
+| Whitespace ratio | **29.6%** (pretty-print) | 18.7% | 0% |
+| Median string length | 15 bytes | 19 bytes | 7 bytes |
+| Strings ≤16 bytes | **50.9%** | 29.9% | 75% |
+| Avg keys per object | **10.6** | 5.0 | 2.0 |
+| Avg nesting depth | 4.4 | 2.5 | 6.7 |
+| Token type diversity | strings+numbers+bool+null+`{[` | strings only | numbers only |
 
-**핵심 결론**: beast-json이 yyjson에 지는 이유는 파서 알고리즘이 약해서가 아니다.
-twitter.json이 pretty-print + 토큰 다양성이 높아서 **`skip_to_action()` 호출 빈도가 극도로 높아지는 구조 문제**다.
+**Key conclusion**: beast-json losing to yyjson is not due to a weak parser algorithm.
+twitter.json's pretty-print format and high token diversity cause **extremely frequent `skip_to_action()` calls — a structural problem**.
 
-- gsoc-2018, canada, citm_catalog에서는 beast::lazy가 yyjson을 압도 (3/4 승리)
-- twitter.json의 167KB 공백(전체의 29.6%)이 `skip_to_action()` 반복 호출을 폭발적으로 증가시킴
-- beast-json에는 이미 Stage1 bitmap 인프라가 존재하지만 **parse_reuse 경로와 연결되지 않은 것**이 유일한 구조적 약점
-
----
-
-## 2. 전체 로드맵 요약
-
-| 우선순위 | Phase | 작업 | 예상 개선 | 난이도 |
-|:---:|:---:|:---|:---:|:---:|
-| 1 | A1 | Stage1 bitmap → parse_reuse 통합 | ~15-20% | 높음 |
-| 2 | A2 | 32-byte SWAR quad-pump whitespace skip | ~5-8% | 낮음 |
-| 3 | B1 | Value→Separator→Key 3-way 융합 스캐너 | ~5-7% | 중간 |
-| 4 | B2 | ≤8byte 인라인 문자열 tape 내장 | 조회/직렬화 ~10% | 중간 |
-| 5 | C1 | next_sib 기반 멀티스레드 분할 파싱 | ~40%+ (멀티코어) | 매우 높음 |
-| 보조 | C2 | TLAB 직결 파싱 (tape 사전 할당 완전 제거) | ~2-3% | 중간 |
+- On gsoc-2018, canada, citm_catalog, beast::lazy dominates yyjson (3/4 wins)
+- twitter.json's 167KB of whitespace (29.6% of total) causes explosive repeated `skip_to_action()` calls
+- beast-json already has Stage1 bitmap infrastructure, but **it is not wired into the parse_reuse path** — the sole structural weakness
 
 ---
 
-## 3. Phase A — 즉시 임팩트 (bitmap 기반 재설계)
+## 2. Overall Roadmap Summary
 
-### A1. Stage1 bitmap을 parse_reuse 핫 경로에 통합
+| Priority | Phase | Work | Expected Gain | Difficulty | Status |
+|:---:|:---:|:---|:---:|:---:|:---:|
+| 1 | A1 | Stage1 bitmap → parse_reuse integration | ~15-20% | High | ❌ Reverted — fill_bitmap() O(n) pre-scan costs more than it saves on 616KB file (regression observed) |
+| 2 | A2 | 32-byte SWAR quad-pump whitespace skip | ~5-8% | Low | ✅ Done (x86-64 `#else` branch) |
+| 3 | B1 | Value→Separator→Key 3-way fused scanner | ~5-7% | Medium | Pending |
+| 4 | B2 | ≤8-byte inline string embedded in tape | ~10% (lookup/serialize) | Medium | Pending |
+| 5 | C1 | next_sib-based multi-threaded split parsing | ~40%+ (multi-core) | Very High | Pending |
+| Aux | C2 | TLAB direct parsing (eliminate tape pre-allocation) | ~2-3% | Medium | Pending |
 
-**목표**: twitter.json의 167KB 공백 처리에서 `skip_to_action()` 호출을 0으로 줄인다.
+---
 
-**현재 구조의 문제**:
+## 3. Phase A — Immediate Impact (Bitmap-Based Redesign)
+
+### A1. Integrate Stage1 Bitmap into parse_reuse Hot Path
+
+**Goal**: Reduce `skip_to_action()` calls to zero when processing twitter.json's 167KB of whitespace.
+
+**Current structural problem**:
 
 ```
-현재 beast-json 두 경로가 완전히 분리됨:
+Current beast-json has two completely separate paths:
 
 beast::lazy (parse_reuse → Phase 19 Parser)
-  → byte-by-byte 스캔
-  → skip_to_action() 반복 호출
-  → 29.6% 공백마다 루프 오버헤드 발생
+  → byte-by-byte scanning
+  → repeated skip_to_action() calls
+  → loop overhead for every 29.6% whitespace byte
 
-Stage1 fill_bitmap (별도 경로)
-  → 64바이트 블록 단위로 모든 구조적 위치를 한 번에 인덱싱
-  → SWAR prefix-XOR로 문자열 내부 추적
-  → 구조적 문자 위치를 비트맵에 수집
-  → 현재 parse_reuse에서 활용 안 됨
+Stage1 fill_bitmap (separate path)
+  → indexes all structural positions in 64-byte blocks at once
+  → tracks string interiors with SWAR prefix-XOR
+  → collects structural character positions into a bitmap
+  → currently NOT used by parse_reuse
 ```
 
-**목표 구조**:
+**Target structure**:
 
 ```
-현재: token → skip_ws → switch → token → skip_ws → switch (반복)
+Current: token → skip_ws → switch → token → skip_ws → switch (repeated)
 
-목표: [pre-scan: fill_bitmap → position array 생성]
-       → [walk positions array: switch만, skip_ws 없음]
+Target:  [pre-scan: fill_bitmap → generate positions array]
+          → [walk positions array: switch only, no skip_ws]
 ```
 
-**구현 단계**:
+**Implementation steps**:
 
-1. `fill_bitmap()` 출력에서 압축 위치 배열 `uint32_t positions[]` 생성
-2. Phase 19 Parser가 raw bytes 대신 positions 배열을 순회하도록 수정
-3. `skip_to_action()` 호출 경로 제거 (positions 배열이 이미 공백을 건너뜀)
-4. positions 배열은 스택 또는 TLAB에서 할당 (heap 할당 없음)
+1. From `fill_bitmap()` output, generate compressed position array `uint32_t positions[]`
+2. Modify Phase 19 Parser to iterate over positions array instead of raw bytes
+3. Remove `skip_to_action()` call path (positions array already skips whitespace)
+4. Allocate positions array from stack or TLAB (no heap allocation)
 
-**예상 효과**: twitter.json `skip_to_action()` 호출 제거 → **~15-20% 단축**
+**Expected effect**: Eliminate `skip_to_action()` calls for twitter.json → **~15-20% speedup**
 
 ---
 
-### A2. 32-byte SWAR quad-pump whitespace skip (SIMD 없이)
+### A2. 32-byte SWAR Quad-Pump Whitespace Skip (No SIMD)
 
-**목표**: A1 구현 전/후 fallback 경로에서도 공백 처리 처리량 4배 향상.
+**Goal**: 4x throughput improvement in whitespace processing on fallback paths, before and after A1.
 
-**현재 코드 (8바이트씩)**:
+**Current code (8 bytes at a time)**:
 
 ```cpp
-// 현재 (8바이트씩)
+// Current (8 bytes at a time)
 while (p_ + 8 <= end_) {
     uint64_t am = swar_action_mask(load64(p_));
     if (am) { p_ += CTZ(am) >> 3; return *p_; }
@@ -99,17 +99,17 @@ while (p_ + 8 <= end_) {
 }
 ```
 
-**목표 코드 (32바이트 4-pump)**:
+**Target code (32 bytes, SWAR 4-pump)**:
 
 ```cpp
-// 목표 (32바이트씩, SWAR 4-pump)
+// Target (32 bytes at a time, SWAR 4-pump)
 while (p_ + 32 <= end_) {
     uint64_t a0 = swar_action_mask(load64(p_));
     uint64_t a1 = swar_action_mask(load64(p_ + 8));
     uint64_t a2 = swar_action_mask(load64(p_ + 16));
     uint64_t a3 = swar_action_mask(load64(p_ + 24));
     if (a0 | a1 | a2 | a3) {
-        // 첫 번째 hit 위치를 정확히 탐색
+        // Find exact position of first hit
         if (a0) { p_ += CTZ(a0) >> 3; return *p_; }
         if (a1) { p_ += 8 + (CTZ(a1) >> 3); return *p_; }
         if (a2) { p_ += 16 + (CTZ(a2) >> 3); return *p_; }
@@ -117,84 +117,84 @@ while (p_ + 32 <= end_) {
     }
     p_ += 32;
 }
-// 기존 8바이트 fallback...
+// Existing 8-byte fallback...
 ```
 
-**구현 포인트**:
-- `a0|a1|a2|a3`로 OR 병합 → 분기 1회로 32바이트 체크
-- 현대 CPU OOO(Out-of-Order) 실행으로 4개 load64가 파이프라인에서 병렬 처리됨
-- SIMD 없이 x86-64 / ARM64 모두 동작
+**Implementation notes**:
+- OR-merge with `a0|a1|a2|a3` → check 32 bytes with a single branch
+- Modern CPU out-of-order execution pipelines four `load64` calls in parallel
+- Works on both x86-64 and ARM64 without SIMD
 
-**예상 효과**: pretty-print JSON 공백 처리량 4배 → twitter.json **~5-8% 단축**
+**Expected effect**: 4x throughput for pretty-print JSON whitespace → **~5-8% speedup** on twitter.json
 
 ---
 
-## 4. Phase B — 중간 임팩트 (fused scanner 확장)
+## 4. Phase B — Medium Impact (Fused Scanner Extensions)
 
-### B1. Value→Separator→Key 3-way 융합 스캐너
+### B1. Value→Separator→Key 3-Way Fused Scanner
 
-**목표**: 객체당 10.6쌍인 twitter.json에서 반복적인 함수 호출 오버헤드 제거.
+**Goal**: Eliminate repeated function call overhead for twitter.json objects with 10.6 key-value pairs each.
 
-**현재 경로**:
+**Current path**:
 
 ```
-[string 파싱]
-  → [double-pump: , 소비]
+[parse string]
+  → [double-pump: consume ,]
   → [skip_to_action]
-  → [" 확인]
+  → [check for "]
   → [scan_key_colon_next]
-  (→ 다음 쌍으로 반복)
+  (→ repeat for next pair)
 ```
 
-**목표 경로**:
+**Target path**:
 
 ```
-[string 파싱]
-  → [fused_val_sep_key: , 즉시 탐지 → 키 스캔 → : 소비]
-  → 단일 함수에서 완결
+[parse string]
+  → [fused_val_sep_key: detect , immediately → scan key → consume :]
+  → complete in a single function
 ```
 
-**구현 핵심**:
-- `scan_key_colon_next()`를 확장하여 앞선 값의 종료 구분자(`,` 또는 `}`)까지 처리
-- twitter.json 객체 10.6쌍 × 함수 호출 절감 = 반복 오버헤드 대폭 감소
-- `skip_to_action()` 중복 호출 경로 통합 제거
+**Implementation key**:
+- Extend `scan_key_colon_next()` to also handle the preceding value's closing delimiter (`,` or `}`)
+- twitter.json: 10.6 pairs/object × reduced function calls = significant reduction in iteration overhead
+- Consolidate and eliminate duplicate `skip_to_action()` call paths
 
-**예상 효과**: twitter.json 객체 내 순회 함수 호출 제거 → **~5-7% 단축**
+**Expected effect**: Eliminate intra-object traversal function calls on twitter.json → **~5-7% speedup**
 
 ---
 
-### B2. ≤8byte 인라인 문자열 tape 직접 내장
+### B2. ≤8-byte Inline String Embedded Directly in Tape
 
-**목표**: twitter.json 38.7% 문자열(≤8bytes)에 대한 캐시 미스 제거.
+**Goal**: Eliminate cache misses for the 38.7% of twitter.json strings that are ≤8 bytes.
 
-**현재 TapeNode 구조**:
+**Current TapeNode structure**:
 
 ```cpp
 struct TapeNode {
     TapeNodeType type;   // 1 byte
     uint8_t flags;       // 1 byte
     uint16_t length;     // 2 bytes
-    uint32_t offset;     // 4 bytes  ← 원본 JSON 위치 포인터 (캐시 미스 원인)
+    uint32_t offset;     // 4 bytes  ← pointer into original JSON (cache miss source)
     uint32_t next_sib;   // 4 bytes
-    uint32_t aux;        // 4 bytes  ← 현재 미사용
+    uint32_t aux;        // 4 bytes  ← currently unused
 };  // 16 bytes total
 ```
 
-**목표 구조 (inline-string 모드 추가)**:
+**Target structure (add inline-string mode)**:
 
 ```cpp
-// flags 비트 정의
+// Flag bit definition
 constexpr uint8_t INLINE_STR = 0x01;
 
-// ≤8bytes 문자열: next_sib(4) + aux(4) = 8바이트에 직접 내용 복사
-// 파싱 시:
+// For strings ≤8 bytes: copy content directly into next_sib(4) + aux(4) = 8 bytes
+// At parse time:
 if (node.length <= 8) {
     node.flags |= INLINE_STR;
     memcpy(&node.next_sib, src_ptr, node.length);
-    // offset은 0으로 (unused)
+    // offset is 0 (unused)
 }
 
-// 조회 시:
+// At lookup time:
 inline std::string_view get_string_sv() const {
     if (flags & INLINE_STR) {
         return std::string_view(
@@ -204,128 +204,128 @@ inline std::string_view get_string_sv() const {
 }
 ```
 
-**구현 포인트**:
-- 파싱 시 `memcpy` 8바이트 → 컴파일러가 단일 `STR` 명령으로 최적화
-- `find()`, `get_string()` 호출 시 원본 JSON 메모리 접근(캐시 미스) 없이 tape만으로 완결
-- 직렬화(dump) 경로도 동일하게 캐시 미스 감소
+**Implementation notes**:
+- `memcpy` of 8 bytes at parse time → compiler optimizes to a single `STR` instruction
+- `find()` and `get_string()` calls resolve entirely from tape without accessing original JSON memory (no cache miss)
+- Serialization (dump) path benefits from the same cache miss reduction
 
-**예상 효과**: 단순 키-값 조회 및 직렬화에서 캐시 미스 감소 → **~10% 향상**
+**Expected effect**: Fewer cache misses on simple key-value lookups and serialization → **~10% improvement**
 
 ---
 
-## 5. Phase C — 고유 혁신 (업계 미존재 기법)
+## 5. Phase C — Unique Innovations (Industry-Novel Techniques)
 
-### C1. next_sib를 이용한 투기적 병렬 파싱
+### C1. Speculative Parallel Parsing via next_sib Links
 
-**목표**: beast-json의 고유 next_sib 링크 구조를 멀티스레드 분할 파싱에 활용.
+**Goal**: Leverage beast-json's unique next_sib link structure for multi-threaded split parsing.
 
-**원리**:
+**Principle**:
 
 ```
-{                    ← next_sib 링크로 파싱 완료 위치 즉시 접근 가능
-  "key1": <subtree1> ← 스레드 1 담당
-  "key2": <subtree2> ← 스레드 2 담당
-  "key3": <subtree3> ← 스레드 3 담당
+{                    ← next_sib links allow instant access to parsed positions
+  "key1": <subtree1> ← Thread 1 handles
+  "key2": <subtree2> ← Thread 2 handles
+  "key3": <subtree3> ← Thread 3 handles
 }
 ```
 
-**전제 조건**:
-- Phase A1의 Stage1 bitmap pre-scan 완성 → 상위 깊이 오브젝트 키 위치 사전 파악
-- TLAB가 스레드별 독립 할당 지원 → 합병 오버헤드 최소화
+**Prerequisites**:
+- Phase A1 Stage1 bitmap pre-scan completed → top-level object key positions known in advance
+- TLAB supports independent per-thread allocation → minimal merge overhead
 
-**구현 단계**:
-1. Stage1 bitmap에서 depth=1 키 위치 목록 추출 (O(n) pre-scan)
-2. 키 개수 기준으로 스레드 작업 분할
-3. 각 스레드가 독립 TLAB에서 subtree 파싱
-4. 메인 스레드에서 next_sib 링크로 결과 합병
+**Implementation steps**:
+1. Extract depth=1 key position list from Stage1 bitmap (O(n) pre-scan)
+2. Partition work among threads based on key count
+3. Each thread parses its subtree in an independent TLAB
+4. Main thread merges results via next_sib links
 
-**예상 효과**: 멀티코어 활용 → **~40%+ 단축** (4코어 기준)
-
----
-
-### C2. TLAB 직결 파싱 (tape 사전 할당 완전 제거)
-
-**목표**: `parse_reuse` 내 malloc/realloc 판단 로직 및 경계 체크 제거.
-
-**현재**:
-```
-parse_reuse → tape.base 크기 확인 → 불충분하면 realloc
-             → tape_head_ 설정 → arena->head 경계 체크
-```
-
-**목표**:
-```
-TLAB 공간 직결 → tape_head_++ → arena 내부에서만 동작
-               → 경계 체크 불필요 (TLAB 크기가 JSON보다 항상 크게 사전 설정)
-```
-
-**구현 포인트**:
-- TLAB를 `json.size() * 2` 기준으로 사전 예약 (twitter.json: ~1.2MB)
-- `tape_head_`가 TLAB 내부 포인터로 직접 동작
-- realloc path 코드 제거 → 분기 감소
-
-**예상 효과**: 파싱 초기화 오버헤드 제거 → **~2-3% 단축**
+**Expected effect**: Multi-core utilization → **~40%+ speedup** (4-core baseline)
 
 ---
 
-## 6. 구현 순서 및 마일스톤
+### C2. TLAB Direct Parsing (Fully Eliminate Tape Pre-allocation)
+
+**Goal**: Remove malloc/realloc decision logic and bounds checking in `parse_reuse`.
+
+**Current**:
+```
+parse_reuse → check tape.base size → realloc if insufficient
+             → set tape_head_ → check arena->head bounds
+```
+
+**Target**:
+```
+Direct TLAB write → tape_head_++ → operates entirely within arena
+                  → no bounds check (TLAB pre-sized larger than JSON)
+```
+
+**Implementation notes**:
+- Pre-reserve TLAB based on `json.size() * 2` (twitter.json: ~1.2MB)
+- `tape_head_` operates directly as a pointer within TLAB
+- Remove realloc path code → fewer branches
+
+**Expected effect**: Eliminate parse initialization overhead → **~2-3% speedup**
+
+---
+
+## 6. Implementation Order and Milestones
 
 ```
 Week 1: Phase A2 (32-byte SWAR quad-pump)
-  → 난이도 낮음, 즉시 twitter.json 5-8% 개선
-  → 기존 NEON fallback과 공존 가능
+  → Low difficulty, immediate 5-8% improvement on twitter.json
+  → Compatible with existing NEON fallback
 
-Week 2-3: Phase A1 (Stage1 bitmap → parse_reuse 통합)
-  → 핵심 구조 변경, 충분한 테스트 필요
-  → 완성 시 twitter.json 15-20% 추가 개선
-  → 81개 기존 테스트 전체 통과 유지 필수
+Week 2-3: Phase A1 (Stage1 bitmap → parse_reuse integration)
+  → Core structural change, requires thorough testing
+  → Upon completion: 15-20% additional improvement on twitter.json
+  → Must maintain all 81 existing tests passing
 
-Week 4: Phase B1 (3-way 융합 스캐너)
-  → A1 완성 후 시너지 극대화
-  → scan_key_colon_next() 확장
+Week 4: Phase B1 (3-way fused scanner)
+  → Maximize synergy after A1 completion
+  → Extend scan_key_colon_next()
 
-Week 5-6: Phase B2 (인라인 문자열 tape 내장)
-  → TapeNode 레이아웃 변경 → 하위 호환성 검토
-  → find() / get_string() / dump() 전체 수정
+Week 5-6: Phase B2 (inline string tape embedding)
+  → TapeNode layout change → review backward compatibility
+  → Update find() / get_string() / dump() throughout
 
-Week 7+: Phase C1 (멀티스레드 분할 파싱)
-  → A1 완성이 전제 조건
-  → 설계 → 프로토타입 → 스레드 안전성 검증
+Week 7+: Phase C1 (multi-threaded split parsing)
+  → Requires A1 completion as prerequisite
+  → Design → prototype → thread safety verification
 ```
 
 ---
 
-## 7. 테스트 및 검증 기준
+## 7. Testing and Verification Criteria
 
-### 회귀 방지
-- 모든 변경 후 `ctest --output-on-failure` 통과 필수 (81개 테스트)
-- canada.json, citm_catalog.json, gsoc-2018.json 성능 회귀 없어야 함
+### Regression Prevention
+- All changes must pass `ctest --output-on-failure` (81 tests)
+- No performance regression on canada.json, citm_catalog.json, gsoc-2018.json
 
-### 성능 목표
+### Performance Targets
 
-| 마일스톤 | twitter.json 목표 | 기준 |
+| Milestone | twitter.json Target | Baseline |
 |:---|:---:|:---|
-| A2 완료 | ≤300μs | 현재 314μs |
-| A1 완료 | ≤265μs | yyjson 250μs에 근접 |
-| A1+B1 완료 | ≤250μs | yyjson 동등 |
-| A1+B1+B2 완료 | ≤230μs | yyjson 추월 |
-| C1 완료 (4코어) | ≤150μs | yyjson 압도 |
+| A2 complete | ≤300μs | Current 314μs |
+| A1 complete | ≤265μs | Approaching yyjson 250μs |
+| A1+B1 complete | ≤250μs | Equal to yyjson |
+| A1+B1+B2 complete | ≤230μs | Surpasses yyjson |
+| C1 complete (4-core) | ≤150μs | Dominates yyjson |
 
-### 벤치마크 환경
-- 현재 환경: Linux x86-64, GCC 13.3.0 `-O3`, 300 iterations
-- A1 이후: ARM64 NEON 경로도 별도 측정
-- C1 이후: 코어 수별 스케일링 측정 추가
+### Benchmark Environment
+- Current: Linux x86-64, GCC 13.3.0 `-O3`, 300 iterations
+- After A1: ARM64 NEON path measured separately
+- After C1: Per-core scaling measurements added
 
 ---
 
-## 8. 핵심 메시지
+## 8. Key Message
 
-> **A1 하나만 제대로 구현해도 twitter.json에서 yyjson와 동등하거나 앞설 가능성이 높다.**
+> **Implementing A1 alone is likely sufficient to match or surpass yyjson on twitter.json.**
 
-beast-json은 이미 bitmap 인프라, TLAB, next_sib 링크라는 세 가지 고유 강점을 보유하고 있다.
-이 강점들이 아직 parse_reuse 핫 경로와 연결되지 않은 것이 현재의 유일한 구조적 약점이다.
+beast-json already has three unique strengths: bitmap infrastructure, TLAB, and next_sib links.
+The sole structural weakness is that these strengths are not yet wired into the parse_reuse hot path.
 
-연결이 완성되면:
-- **단기 (A 완료)**: twitter.json에서 yyjson 추월
-- **중기 (B 완료)**: 모든 벤치마크에서 yyjson 압도
-- **장기 (C 완료)**: 멀티코어 기준 세계 최속 JSON 파서 달성
+Once connected:
+- **Short-term (A complete)**: Surpass yyjson on twitter.json
+- **Mid-term (B complete)**: Dominate yyjson across all benchmarks
+- **Long-term (C complete)**: Achieve world's fastest JSON parser on multi-core
