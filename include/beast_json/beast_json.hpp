@@ -5164,21 +5164,50 @@ public:
         --top;
         break;
 
-      case TapeNodeType::StringRaw:
+      case TapeNodeType::StringRaw: {
         emit_sep();
+        const uint16_t slen = nd.length(); // cache: avoid re-reading nd.meta
+        const char *sp = src + nd.offset;
         *w++ = '"';
-        std::memcpy(w, src + nd.offset, nd.length());
-        w += nd.length();
+        // Phase D3: unrolled 16-8-4-1 copy for strings ≤ 31 chars.
+        // Avoids glibc memcpy dispatch overhead for small sizes.
+        // twitter.json: avg 16.9 chars, 84% ≤ 24 chars.
+        if (BEAST_LIKELY(slen <= 31)) {
+          uint16_t rem = slen;
+          if (rem >= 16) {
+            uint64_t a, b;
+            std::memcpy(&a, sp, 8);     std::memcpy(&b, sp + 8, 8);
+            std::memcpy(w,  &a, 8);     std::memcpy(w  + 8, &b, 8);
+            sp += 16; w += 16; rem = static_cast<uint16_t>(rem - 16);
+          }
+          if (rem >= 8) {
+            uint64_t a;
+            std::memcpy(&a, sp, 8); std::memcpy(w, &a, 8);
+            sp += 8; w += 8; rem = static_cast<uint16_t>(rem - 8);
+          }
+          if (rem >= 4) {
+            uint32_t a;
+            std::memcpy(&a, sp, 4); std::memcpy(w, &a, 4);
+            sp += 4; w += 4; rem = static_cast<uint16_t>(rem - 4);
+          }
+          while (rem--) *w++ = *sp++;
+        } else {
+          std::memcpy(w, sp, slen);
+          w += slen;
+        }
         *w++ = '"';
         break;
+      }
 
       case TapeNodeType::Integer:
       case TapeNodeType::NumberRaw:
-      case TapeNodeType::Double:
+      case TapeNodeType::Double: {
         emit_sep();
-        std::memcpy(w, src + nd.offset, nd.length());
-        w += nd.length();
+        const uint16_t nlen = nd.length();
+        std::memcpy(w, src + nd.offset, nlen);
+        w += nlen;
         break;
+      }
 
       case TapeNodeType::BooleanTrue:
         emit_sep();
