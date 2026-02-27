@@ -5046,40 +5046,54 @@ public:
     char *w  = out.data();
     char *w0 = w;
 
-    // Three bit-stacks replace four bool[1024] arrays.
-    // Supports nesting depth 0–63 (all real-world JSON files).
-    // top_mask = 1ULL << top (maintained incrementally via << 1 / >> 1),
-    // eliminating the variable-shift `1 << top` from every emit_sep call.
-    uint64_t obj_bits  = 0; // bit (top): depth is an object
-    uint64_t key_bits  = 0; // bit (top): next token at this depth is an obj key
-    uint64_t sep_bits  = 0; // bit (top): depth has ≥1 element already
-    uint64_t top_mask  = 0; // = 1ULL << top  (0 when top = -1)
+    // Three 64-bit bit-stacks hold nesting state for depth 0–62 entirely in
+    // CPU registers.  top_mask = 1ULL << top is maintained incrementally
+    // (shift left on push, shift right on pop) so emit_sep avoids a
+    // variable-count shift on every call.
+    //
+    // For the rare case of depth ≥ 63 (not seen in any real JSON benchmark)
+    // an overflow byte-array is used as a fallback.  Each byte packs 3 flags:
+    //   bit 0 = is_obj   bit 1 = is_key   bit 2 = has_sep
+    static constexpr int kBitDepth = 63; // bit-stacks cover depth 0..62
+    uint64_t obj_bits = 0;  // bit (top): depth is an object
+    uint64_t key_bits = 0;  // bit (top): next token is an obj key
+    uint64_t sep_bits = 0;  // bit (top): ≥1 element already emitted
+    uint64_t top_mask = 0;  // = 1ULL << top  (0 when top == -1)
     int top = -1;
+    uint8_t overflow[1024 - kBitDepth] = {};  // fallback for deep nesting
 
-    // Emit the separator that must appear BEFORE writing a new element.
-    // All state lives in CPU registers — no memory loads/stores.
     auto emit_sep = [&]() __attribute__((always_inline)) {
-      if (BEAST_UNLIKELY(!top_mask))
+      if (BEAST_UNLIKELY(top < 0))
         return;
+      if (BEAST_UNLIKELY(top >= kBitDepth)) {
+        // ── overflow path (depth ≥ 63) ──────────────────────────
+        uint8_t &b = overflow[top - kBitDepth];
+        if (b & 1) { // is_obj
+          if (b & 2) { // is_key: emit ',' if not first key
+            if (b & 4) *w++ = ','; else b |= 4;
+            b &= ~uint8_t(2); // next token is value
+          } else {
+            *w++ = ':';
+            b |= 2; // next token is key
+          }
+        } else { // array
+          if (b & 4) *w++ = ','; else b |= 4;
+        }
+        return;
+      }
+      // ── fast path: bit-stacks (depth 0..62) ────────────────────
       if (obj_bits & top_mask) {
         if (key_bits & top_mask) {
-          // About to write a key: emit ',' if not first
-          if (sep_bits & top_mask)
-            *w++ = ',';
-          else
-            sep_bits |= top_mask;  // mark: first key written
-          key_bits ^= top_mask;    // clear: next will be a value
+          if (sep_bits & top_mask) *w++ = ',';
+          else sep_bits |= top_mask;
+          key_bits ^= top_mask;
         } else {
-          // About to write a value: always ':' after key
           *w++ = ':';
-          key_bits |= top_mask;    // next will be a key again
+          key_bits |= top_mask;
         }
       } else {
-        // Array: emit ',' if not first element
-        if (sep_bits & top_mask)
-          *w++ = ',';
-        else
-          sep_bits |= top_mask;    // mark: first element written
+        if (sep_bits & top_mask) *w++ = ',';
+        else sep_bits |= top_mask;
       }
     };
 
@@ -5089,32 +5103,48 @@ public:
 
       case TapeNodeType::ObjectStart:
         emit_sep();
-        top_mask = top_mask ? top_mask << 1 : 1; // advance depth
         ++top;
-        obj_bits |=  top_mask;  // it's an object
-        key_bits |=  top_mask;  // expect a key first
-        sep_bits &= ~top_mask;  // no separator before first key
+        if (BEAST_LIKELY(top < kBitDepth)) {
+          top_mask = top_mask ? top_mask << 1 : 1;
+          obj_bits |=  top_mask;
+          key_bits |=  top_mask;
+          sep_bits &= ~top_mask;
+        } else {
+          top_mask = 0; // sentinel: overflow active
+          overflow[top - kBitDepth] = 0b011; // is_obj=1, is_key=1, has_sep=0
+        }
         *w++ = '{';
         break;
 
       case TapeNodeType::ObjectEnd:
         *w++ = '}';
-        top_mask >>= 1;  // retreat depth (0 when top reaches -1)
+        if (BEAST_LIKELY(top < kBitDepth))
+          top_mask >>= 1;
+        else if (top == kBitDepth)
+          top_mask = 1ULL << (kBitDepth - 1); // restore last bit-stack mask
         --top;
         break;
 
       case TapeNodeType::ArrayStart:
         emit_sep();
-        top_mask = top_mask ? top_mask << 1 : 1; // advance depth
         ++top;
-        obj_bits &= ~top_mask;  // it's an array
-        sep_bits &= ~top_mask;  // no separator before first element
+        if (BEAST_LIKELY(top < kBitDepth)) {
+          top_mask = top_mask ? top_mask << 1 : 1;
+          obj_bits &= ~top_mask;
+          sep_bits &= ~top_mask;
+        } else {
+          top_mask = 0;
+          overflow[top - kBitDepth] = 0b000; // is_obj=0, is_key=0, has_sep=0
+        }
         *w++ = '[';
         break;
 
       case TapeNodeType::ArrayEnd:
         *w++ = ']';
-        top_mask >>= 1;  // retreat depth
+        if (BEAST_LIKELY(top < kBitDepth))
+          top_mask >>= 1;
+        else if (top == kBitDepth)
+          top_mask = 1ULL << (kBitDepth - 1);
         --top;
         break;
 
