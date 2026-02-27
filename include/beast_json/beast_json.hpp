@@ -5177,6 +5177,12 @@ class Parser {
   static constexpr size_t kMaxDepth = 1024;
   uint32_t start_stack_[kMaxDepth];
 
+  // Phase B1: context bit-stack.
+  // Bit i is set iff start_stack_[i] is an ObjectStart (0 = ArrayStart).
+  // Allows O(1) in-object check: (obj_bits_ >> (depth_-1)) & 1.
+  // Supports up to 64 nesting levels (practical JSON: twitter.json ≤10).
+  uint64_t obj_bits_ = 0;
+
   // Phase 19 Technique 8: local tape_head_ register variable.
   // Kept as a field but initialized from doc_->tape.base in parse().
   // The compiler will register-allocate this across the entire parse() body,
@@ -5309,17 +5315,49 @@ class Parser {
   // If there's whitespace between '"' and ':', do a normal SWAR skip.
   // Returns the char that follows the ':' (the start of the value, or 0 on
   // error). Also sets p_ to the position of that char.
+  //
+  // Phase B1 upgrade: SWAR-24 fast path (same as main switch case '"':) covers
+  // ≤24-byte keys with no backslash, accounting for 90%+ of twitter.json keys.
   BEAST_INLINE char scan_key_colon_next(const char *s,
                                         const char **key_end_out) noexcept {
     // s is the char after the opening '"' of the key.
-    const char *e = skip_string(s);
+    const char *e;
+    constexpr uint64_t K = 0x0101010101010101ULL;
+    constexpr uint64_t H = 0x8080808080808080ULL;
+    const uint64_t qm  = K * static_cast<uint8_t>('"');
+    const uint64_t bsm = K * static_cast<uint8_t>('\\');
+
+    // SWAR-24 fast path (≤24-byte key, no backslash)
+    if (BEAST_LIKELY(s + 24 <= end_)) {
+      uint64_t v0, v1, v2;
+      std::memcpy(&v0, s,      8);
+      std::memcpy(&v1, s + 8,  8);
+      std::memcpy(&v2, s + 16, 8);
+      uint64_t hq0 = v0 ^ qm;  hq0 = (hq0 - K) & ~hq0 & H;
+      uint64_t hb0 = v0 ^ bsm; hb0 = (hb0 - K) & ~hb0 & H;
+      uint64_t hq1 = v1 ^ qm;  hq1 = (hq1 - K) & ~hq1 & H;
+      uint64_t hb1 = v1 ^ bsm; hb1 = (hb1 - K) & ~hb1 & H;
+      uint64_t hq2 = v2 ^ qm;  hq2 = (hq2 - K) & ~hq2 & H;
+      uint64_t hb2 = v2 ^ bsm; hb2 = (hb2 - K) & ~hb2 & H;
+      if (BEAST_LIKELY(!(hb0 | hb1 | hb2))) {
+        if      (hq0) e = s      + (BEAST_CTZ(hq0) >> 3);
+        else if (hq1) e = s + 8  + (BEAST_CTZ(hq1) >> 3);
+        else if (hq2) e = s + 16 + (BEAST_CTZ(hq2) >> 3);
+        else goto skn_slow; // quote not found in 24 bytes → fall through
+        goto skn_found;
+      }
+      // Backslash found → fall through to full scan
+    }
+  skn_slow:
+    e = skip_string(s);
     if (BEAST_UNLIKELY(e >= end_ || *e != '"'))
       return 0; // malformed
+  skn_found:
+    if (key_end_out)
+      *key_end_out = e;
     push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
          static_cast<uint32_t>(s - data_));
     p_ = e + 1; // advance past closing '"'
-    if (key_end_out)
-      *key_end_out = e;
 
     // Now: consume ':' and skip whitespace to the value start.
     // Common case: p_ is already on ':' (no space between key and colon)
@@ -5385,6 +5423,7 @@ public:
       case '{': {
         uint32_t my = tape_size();
         push(TapeNodeType::ObjectStart, 0, static_cast<uint32_t>(p_ - data_));
+        obj_bits_ |= (uint64_t(1) << depth_); // mark this slot as object
         start_stack_[depth_++] = my;
         ++p_;
         // Inline peek: if next byte is > 0x20, it's the first key '"' or '}'
@@ -5400,6 +5439,7 @@ public:
       case '[': {
         uint32_t my = tape_size();
         push(TapeNodeType::ArrayStart, 0, static_cast<uint32_t>(p_ - data_));
+        obj_bits_ &= ~(uint64_t(1) << depth_); // mark this slot as array
         start_stack_[depth_++] = my;
         ++p_;
         // Inline peek: if next byte is > 0x20, it's the first element or ']'
@@ -5488,7 +5528,7 @@ public:
         p_ = e + 1;
 
       str_done:
-        // ── Phase 26: String Double Pump ──────────────────────
+        // ── Phase 26 + B1: String Double Pump with fused key scanner ──
         // Strings are almost always followed by ':', ',', '}', or ']'.
         if (BEAST_LIKELY(p_ < end_)) {
           unsigned char nc = static_cast<unsigned char>(*p_);
@@ -5498,8 +5538,48 @@ public:
               goto done;
             nc = static_cast<unsigned char>(c);
           }
-          if (BEAST_LIKELY(nc == ':' || nc == ',')) {
+          if (BEAST_LIKELY(nc == ':')) {
+            // After a key: consume ':' and find value start.
             ++p_;
+            c = skip_to_action();
+            if (BEAST_UNLIKELY(p_ >= end_))
+              goto done;
+            continue; // bypass loop bottom, straight to value
+          }
+          if (nc == ',') {
+            // After a value: consume ',' and find next token.
+            ++p_;
+            // ── Phase B1: fused val→sep→key scanner ───────────────────
+            // If inside an object (depth ≤ 64), the next token is a key.
+            // Fuse: skip WS + scan key + consume ':' + skip WS in one shot,
+            // eliminating one switch dispatch and one extra skip_to_action().
+            if (BEAST_LIKELY(depth_ > 0 && depth_ <= 64 &&
+                             (obj_bits_ >> (depth_ - 1)) & 1)) {
+              // In object: expect next key string
+              if (BEAST_LIKELY(p_ < end_)) {
+                unsigned char fc = static_cast<unsigned char>(*p_);
+                if (fc <= 0x20) {
+                  fc = static_cast<unsigned char>(skip_to_action());
+                  if (BEAST_UNLIKELY(p_ >= end_))
+                    goto done;
+                }
+                if (BEAST_LIKELY(fc == '"')) {
+                  // Fused key scan: SWAR-24 + push + ':' consume + WS skip
+                  char vc = scan_key_colon_next(p_ + 1, nullptr);
+                  if (BEAST_UNLIKELY(vc == 0))
+                    goto fail;
+                  if (BEAST_UNLIKELY(p_ >= end_))
+                    goto done;
+                  c = vc;
+                  continue; // directly to value — no switch for key!
+                }
+                // fc != '"': end of object or malformed; handle normally
+                c = static_cast<char>(fc);
+                continue;
+              }
+              goto done;
+            }
+            // Not in object (in array, or depth > 64): find next element
             c = skip_to_action();
             if (BEAST_UNLIKELY(p_ >= end_))
               goto done;
@@ -5598,11 +5678,10 @@ public:
         push(flt ? TapeNodeType::NumberRaw : TapeNodeType::Integer,
              static_cast<uint16_t>(p_ - s), static_cast<uint32_t>(s - data_));
 
-        // ── Phase 25: Double-pump Number Parsing ───────────────────
+        // ── Phase 25 + B1: Double-pump Number Parsing with fused key scanner ─
         // Numbers are values. They are ALWAYS followed by ',' or ']' or '}'.
         // Instead of falling back to the top of the switch loop, we peek at the
-        // next char. If it's a separator we consume it inline. If it's a brace,
-        // we process the end-of-container inline as well.
+        // next char. If it's ',' in an object, fuse the next key scan.
         if (BEAST_LIKELY(p_ < end_)) {
           unsigned char nc = static_cast<unsigned char>(*p_);
           if (nc <= 0x20) {
@@ -5613,6 +5692,30 @@ public:
           }
           if (BEAST_LIKELY(nc == ',')) {
             ++p_;
+            // Phase B1: fused key scan after ',' in object context
+            if (BEAST_LIKELY(depth_ > 0 && depth_ <= 64 &&
+                             (obj_bits_ >> (depth_ - 1)) & 1)) {
+              if (BEAST_LIKELY(p_ < end_)) {
+                unsigned char fc = static_cast<unsigned char>(*p_);
+                if (fc <= 0x20) {
+                  fc = static_cast<unsigned char>(skip_to_action());
+                  if (BEAST_UNLIKELY(p_ >= end_))
+                    goto done;
+                }
+                if (BEAST_LIKELY(fc == '"')) {
+                  char vc = scan_key_colon_next(p_ + 1, nullptr);
+                  if (BEAST_UNLIKELY(vc == 0))
+                    goto fail;
+                  if (BEAST_UNLIKELY(p_ >= end_))
+                    goto done;
+                  c = vc;
+                  continue; // directly to value
+                }
+                c = static_cast<char>(fc);
+                continue;
+              }
+              goto done;
+            }
             c = skip_to_action();
             if (BEAST_UNLIKELY(p_ >= end_))
               goto done;

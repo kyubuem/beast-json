@@ -71,9 +71,11 @@ foreach(file ${BENCHMARK_FILES})
 endforeach()
 
 # Optimization and PGO
+# Note: -fuse-ld=lld is incompatible with GCC LTO (GIMPLE IR).
+# Use the default linker (bfd/gold) which understands GCC LTO bitcode.
 if(NOT CMAKE_BUILD_TYPE MATCHES "Debug")
-    add_compile_options(-O3 -flto -fuse-ld=lld)
-    add_link_options(-fuse-ld=lld -flto)
+    add_compile_options(-O3 -flto)
+    add_link_options(-flto)
 endif()
 
 set(PGO_MODE "" CACHE STRING "PGO mode: GENERATE or USE")
