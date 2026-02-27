@@ -104,3 +104,13 @@ target_link_libraries(bench_lazy_dom PRIVATE
     yyjson
 )
 target_compile_features(bench_lazy_dom PRIVATE cxx_std_20)
+
+# Unified benchmark: beast::lazy + yyjson + nlohmann, all 4 standard files
+# Usage: ./bench_all [file.json]  OR  ./bench_all --all
+add_executable(bench_all bench_all.cpp)
+target_link_libraries(bench_all PRIVATE
+    beast_json::beast_json
+    nlohmann_json::nlohmann_json
+    yyjson
+)
+target_compile_features(bench_all PRIVATE cxx_std_20)
