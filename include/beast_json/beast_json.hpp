@@ -6921,7 +6921,9 @@ public:
 
 inline Value parse_reuse(DocumentView &doc, std::string_view json) {
   doc.source = json;
-  const size_t needed = json.size() / 6 + 64;
+  // Worst-case tape nodes == json.size() (e.g. "[[[...]]]" produces one node
+  // per character). Use json.size() + 64 as a guaranteed upper bound.
+  const size_t needed = json.size() + 64;
   if (BEAST_UNLIKELY(!doc.tape.base ||
                      static_cast<size_t>(doc.tape.cap - doc.tape.base) <
                          needed)) {

@@ -4,28 +4,47 @@
 
 using namespace beast::json;
 
-TEST(Unicode, Escapes) {
-  // \u0041 -> 'A'
-  // \u0024 -> '$'
-  // \u20AC -> '€' (Euro Sign - 3 bytes UTF-8: E2 82 AC)
-  std::string json = R"({"utf8": "\u0041\u0024\u20AC"})";
+// The lazy parser stores strings as raw bytes from source. Unicode escape
+// sequences (\uXXXX) are NOT decoded; they are stored and re-emitted as-is.
+// dump() reproduces the exact source bytes (compact, no whitespace).
 
-  lazy::DocumentView p(json);
-  ASSERT_TRUE(true);
-
-  std::string val("utf");
-
-  EXPECT_EQ(val, "A$€");
+TEST(Unicode, EscapeRoundTrip) {
+  // \u0041='A', \u0024='$', \u20AC=euro — stored raw, re-emitted unchanged
+  // Use compact JSON (no spaces) since dump() outputs compact form.
+  std::string json = R"({"utf8":"\u0041\u0024\u20AC"})";
+  lazy::DocumentView doc;
+  auto v = lazy::parse_reuse(doc, json);
+  EXPECT_EQ(v.dump(), json);
 }
 
-TEST(Unicode, SurrogatePairs) {
-  // Surrogate Pair Test: G Clef (U+1D11E) -> \uD834\uDD1E
-  std::string json2 = R"({"music": "\uD834\uDD1E"})";
-  lazy::DocumentView doc2;
-  lazy::DocumentView p2(json2);
-  ASSERT_TRUE(true);
+TEST(Unicode, SurrogatePairRoundTrip) {
+  // Surrogate pair \uD834\uDD1E (G Clef U+1D11E) stored as raw bytes
+  std::string json = R"({"music":"\uD834\uDD1E"})";
+  lazy::DocumentView doc;
+  auto v = lazy::parse_reuse(doc, json);
+  EXPECT_EQ(v.dump(), json);
+}
 
-  std::string music("mus");
-  // U+1D11E in UTF-8: F0 9D 84 9E
-  EXPECT_EQ(music, "\xF0\x9D\x84\x9E");
+TEST(Unicode, LiteralUtf8RoundTrip) {
+  // Literal UTF-8 bytes round-trip unchanged
+  std::string json = "{\"key\":\"\xE2\x82\xAC\"}"; // Euro sign as UTF-8
+  lazy::DocumentView doc;
+  auto v = lazy::parse_reuse(doc, json);
+  EXPECT_EQ(v.dump(), json);
+}
+
+TEST(Unicode, MixedEscapesRoundTrip) {
+  // Mix of escape sequences
+  std::string json = R"({"a":"hello\nworld","b":"test"})";
+  lazy::DocumentView doc;
+  auto v = lazy::parse_reuse(doc, json);
+  EXPECT_EQ(v.dump(), json);
+}
+
+TEST(Unicode, EmojiRoundTrip) {
+  // 4-byte UTF-8 emoji (U+1F30D globe)
+  std::string json = "{\"emoji\":\"\xF0\x9F\x8C\x8D\"}";
+  lazy::DocumentView doc;
+  auto v = lazy::parse_reuse(doc, json);
+  EXPECT_EQ(v.dump(), json);
 }

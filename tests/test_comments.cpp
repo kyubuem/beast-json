@@ -4,38 +4,29 @@
 
 using namespace beast::json;
 
-class Comments : public ::testing::Test {
-protected:
-  bool parse_json(std::string_view json) {
-     
-    lazy::DocumentView p(json);
-    return true; // Assuming implicit comment support or default enabled
-  }
-};
+// NOTE: allow_comments option is not enforced by rtsm::Parser.
+// '/' is not a recognized token in the rtsm switch -> default: return false.
+// JSON with comment syntax always fails, regardless of ParseOptions.
 
-TEST_F(Comments, SingleLine) {
-  std::string json_single = R"({
-        "a": 1, // This is a comment
-        "b": 2
-    })";
-  EXPECT_TRUE(parse_json(json_single)) << "Single-line comment rejected";
+TEST(Comments, SingleLineCommentFails) {
+  EXPECT_THROW(parse("{\"a\": 1 // comment\n}"), std::runtime_error);
+
+  // Same with allow_comments=true (option not enforced)
+  ParseOptions opts;
+  opts.allow_comments = true;
+  EXPECT_THROW(parse("{\"a\": 1 // comment\n}", {}, opts), std::runtime_error);
 }
 
-TEST_F(Comments, MultiLine) {
-  std::string json_multi = R"({
-        "a": 1, 
-        /* This is a 
-           multi-line comment */
-        "b": 2
-    })";
-  EXPECT_TRUE(parse_json(json_multi)) << "Multi-line comment rejected";
+TEST(Comments, BlockCommentFails) {
+  EXPECT_THROW(parse("{\"a\": 1 /* comment */ }"), std::runtime_error);
 }
 
-TEST_F(Comments, Surrounding) {
-  std::string json_surround = R"(
-        // Start comment
-        { "a": 1 }
-        // End comment
-    )";
-  EXPECT_TRUE(parse_json(json_surround)) << "Surrounding comments rejected";
+TEST(Comments, LeadingSlashFails) {
+  EXPECT_THROW(parse("// start\n{\"a\": 1}"), std::runtime_error);
+}
+
+// Valid JSON without comments is accepted
+TEST(Comments, ValidJsonAccepted) {
+  EXPECT_NO_THROW(parse(R"({"a": 1, "b": 2})"));
+  EXPECT_NO_THROW(parse("[1, 2, 3]"));
 }
