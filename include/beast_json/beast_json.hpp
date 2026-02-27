@@ -5026,10 +5026,12 @@ public:
   // compact JSON that is never larger than the pretty-printed source.
   // At the end we create one std::string from the exact byte count.
   //
-  // Separator logic uses a pair of booleans per nesting level:
-  //   obj_is_key[top]   — true when the next element is an object key
-  //   obj_need_sep[top] — true after the first key has been emitted
-  // This replaces the `elem % 2` modulo arithmetic of the old code.
+  // Separator logic uses three 64-bit bit-stacks (max depth 64, sufficient
+  // for all real JSON).  All state lives in CPU registers — no stack arrays.
+  //   obj_bits  — bit (top): depth is an object (clear = array)
+  //   key_bits  — bit (top): next element in object is a key
+  //   sep_bits  — bit (top): separator needed (has ≥1 element already)
+  // Replaces four bool[1024] arrays (4 KB stack) with 24 bytes.
   std::string dump() const {
     if (!doc_ || doc_->tape.size() == 0)
       return "null";
@@ -5044,37 +5046,40 @@ public:
     char *w  = out.data();
     char *w0 = w;
 
-    static constexpr int kD = 1024;
-    bool is_obj[kD];
-    bool obj_is_key[kD];   // true  → next element in this object is a key
-    bool obj_need_sep[kD]; // true  → need ',' before the next key
-    bool arr_nonempty[kD]; // true  → array has at least one element already
+    // Three bit-stacks replace four bool[1024] arrays.
+    // Supports nesting depth 0–63 (all real-world JSON files).
+    // top_mask = 1ULL << top (maintained incrementally via << 1 / >> 1),
+    // eliminating the variable-shift `1 << top` from every emit_sep call.
+    uint64_t obj_bits  = 0; // bit (top): depth is an object
+    uint64_t key_bits  = 0; // bit (top): next token at this depth is an obj key
+    uint64_t sep_bits  = 0; // bit (top): depth has ≥1 element already
+    uint64_t top_mask  = 0; // = 1ULL << top  (0 when top = -1)
     int top = -1;
 
-    // Emit the separator that must appear BEFORE writing a new element at the
-    // current nesting level.  Only called for non-closing nodes.
+    // Emit the separator that must appear BEFORE writing a new element.
+    // All state lives in CPU registers — no memory loads/stores.
     auto emit_sep = [&]() __attribute__((always_inline)) {
-      if (top < 0)
+      if (BEAST_UNLIKELY(!top_mask))
         return;
-      if (is_obj[top]) {
-        if (obj_is_key[top]) {
-          // About to write a key
-          if (obj_need_sep[top])
+      if (obj_bits & top_mask) {
+        if (key_bits & top_mask) {
+          // About to write a key: emit ',' if not first
+          if (sep_bits & top_mask)
             *w++ = ',';
           else
-            obj_need_sep[top] = true;
-          obj_is_key[top] = false; // next will be the value
+            sep_bits |= top_mask;  // mark: first key written
+          key_bits ^= top_mask;    // clear: next will be a value
         } else {
-          // About to write a value (key was just written + ':' pending)
+          // About to write a value: always ':' after key
           *w++ = ':';
-          obj_is_key[top] = true; // next will be a key again
+          key_bits |= top_mask;    // next will be a key again
         }
       } else {
-        // Array context
-        if (arr_nonempty[top])
+        // Array: emit ',' if not first element
+        if (sep_bits & top_mask)
           *w++ = ',';
         else
-          arr_nonempty[top] = true;
+          sep_bits |= top_mask;    // mark: first element written
       }
     };
 
@@ -5084,26 +5089,32 @@ public:
 
       case TapeNodeType::ObjectStart:
         emit_sep();
-        is_obj[++top]      = true;
-        obj_is_key[top]    = true;
-        obj_need_sep[top]  = false;
+        top_mask = top_mask ? top_mask << 1 : 1; // advance depth
+        ++top;
+        obj_bits |=  top_mask;  // it's an object
+        key_bits |=  top_mask;  // expect a key first
+        sep_bits &= ~top_mask;  // no separator before first key
         *w++ = '{';
         break;
 
       case TapeNodeType::ObjectEnd:
         *w++ = '}';
+        top_mask >>= 1;  // retreat depth (0 when top reaches -1)
         --top;
         break;
 
       case TapeNodeType::ArrayStart:
         emit_sep();
-        is_obj[++top]       = false;
-        arr_nonempty[top]   = false;
+        top_mask = top_mask ? top_mask << 1 : 1; // advance depth
+        ++top;
+        obj_bits &= ~top_mask;  // it's an array
+        sep_bits &= ~top_mask;  // no separator before first element
         *w++ = '[';
         break;
 
       case TapeNodeType::ArrayEnd:
         *w++ = ']';
+        top_mask >>= 1;  // retreat depth
         --top;
         break;
 
