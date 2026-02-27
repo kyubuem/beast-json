@@ -5115,7 +5115,13 @@ public:
 
     for (size_t i = 0; i < ntape; ++i) {
       const TapeNode &nd = doc_->tape[i];
-      switch (nd.type()) {
+
+      // Phase D4: read meta once; derive type and length from it
+      // without re-reading nd.meta twice (type check + length extraction).
+      const uint32_t meta = nd.meta;
+      const auto type = static_cast<TapeNodeType>((meta >> 24) & 0xFF);
+
+      switch (type) {
 
       case TapeNodeType::ObjectStart:
         emit_sep();
@@ -5166,7 +5172,7 @@ public:
 
       case TapeNodeType::StringRaw: {
         emit_sep();
-        const uint16_t slen = nd.length(); // cache: avoid re-reading nd.meta
+        const uint16_t slen = static_cast<uint16_t>(meta & 0xFFFFu); // from cached meta
         const char *sp = src + nd.offset;
         *w++ = '"';
         // Phase D3: unrolled 16-8-4-1 copy for strings ≤ 31 chars.
@@ -5203,7 +5209,7 @@ public:
       case TapeNodeType::NumberRaw:
       case TapeNodeType::Double: {
         emit_sep();
-        const uint16_t nlen = nd.length();
+        const uint16_t nlen = static_cast<uint16_t>(meta & 0xFFFFu); // from cached meta
         std::memcpy(w, src + nd.offset, nlen);
         w += nlen;
         break;
