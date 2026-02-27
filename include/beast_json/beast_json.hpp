@@ -5018,98 +5018,136 @@ public:
   // Object: even elem_idx = key (emit ',' before all except first key)
   //         odd  elem_idx = value (emit ':' after key)
   // Array:  emit ',' before every element except the first
+  //
+  // Phase Serialize: flat-buffer rewrite.
+  // Instead of 3 × std::string::append per token (with bounds-check +
+  // size-update overhead on every call), we pre-allocate a raw char buffer
+  // and write directly via a pointer.  The buffer is large enough to hold
+  // compact JSON that is never larger than the pretty-printed source.
+  // At the end we create one std::string from the exact byte count.
+  //
+  // Separator logic uses a pair of booleans per nesting level:
+  //   obj_is_key[top]   — true when the next element is an object key
+  //   obj_need_sep[top] — true after the first key has been emitted
+  // This replaces the `elem % 2` modulo arithmetic of the old code.
   std::string dump() const {
     if (!doc_ || doc_->tape.size() == 0)
       return "null";
     const char *src = doc_->source.data();
-    const size_t n = doc_->tape.size();
+    const size_t ntape = doc_->tape.size();
 
+    // Compact JSON ≤ pretty-printed JSON in bytes, so source.size() suffices.
+    // Add 16 bytes of headroom for the outermost braces / safety margin.
+    const size_t buf_cap = doc_->source.size() + 16;
     std::string out;
-    out.reserve(doc_->source.size());
+    out.resize(buf_cap); // resize (not reserve) → direct char* write is safe
+    char *w  = out.data();
+    char *w0 = w;
 
     static constexpr int kD = 1024;
     bool is_obj[kD];
-    uint32_t elem[kD];
+    bool obj_is_key[kD];   // true  → next element in this object is a key
+    bool obj_need_sep[kD]; // true  → need ',' before the next key
+    bool arr_nonempty[kD]; // true  → array has at least one element already
     int top = -1;
 
-    auto scalar = [&](const TapeNode &nd) {
-      if (top >= 0) {
-        if (is_obj[top]) {
-          uint32_t ei = elem[top]++;
-          if (ei % 2 == 0 && ei > 0)
-            out += ',';
-          else if (ei % 2 == 1)
-            out += ':';
+    // Emit the separator that must appear BEFORE writing a new element at the
+    // current nesting level.  Only called for non-closing nodes.
+    auto emit_sep = [&]() __attribute__((always_inline)) {
+      if (top < 0)
+        return;
+      if (is_obj[top]) {
+        if (obj_is_key[top]) {
+          // About to write a key
+          if (obj_need_sep[top])
+            *w++ = ',';
+          else
+            obj_need_sep[top] = true;
+          obj_is_key[top] = false; // next will be the value
         } else {
-          if (elem[top]++ > 0)
-            out += ',';
+          // About to write a value (key was just written + ':' pending)
+          *w++ = ':';
+          obj_is_key[top] = true; // next will be a key again
         }
+      } else {
+        // Array context
+        if (arr_nonempty[top])
+          *w++ = ',';
+        else
+          arr_nonempty[top] = true;
       }
+    };
+
+    for (size_t i = 0; i < ntape; ++i) {
+      const TapeNode &nd = doc_->tape[i];
       switch (nd.type) {
-      case TapeNodeType::StringRaw:
-        out += '"';
-        out.append(src + nd.offset, nd.length);
-        out += '"';
+
+      case TapeNodeType::ObjectStart:
+        emit_sep();
+        is_obj[++top]      = true;
+        obj_is_key[top]    = true;
+        obj_need_sep[top]  = false;
+        *w++ = '{';
         break;
+
+      case TapeNodeType::ObjectEnd:
+        *w++ = '}';
+        --top;
+        break;
+
+      case TapeNodeType::ArrayStart:
+        emit_sep();
+        is_obj[++top]       = false;
+        arr_nonempty[top]   = false;
+        *w++ = '[';
+        break;
+
+      case TapeNodeType::ArrayEnd:
+        *w++ = ']';
+        --top;
+        break;
+
+      case TapeNodeType::StringRaw:
+        emit_sep();
+        *w++ = '"';
+        std::memcpy(w, src + nd.offset, nd.length);
+        w += nd.length;
+        *w++ = '"';
+        break;
+
       case TapeNodeType::Integer:
       case TapeNodeType::NumberRaw:
       case TapeNodeType::Double:
-        out.append(src + nd.offset, nd.length);
+        emit_sep();
+        std::memcpy(w, src + nd.offset, nd.length);
+        w += nd.length;
         break;
+
       case TapeNodeType::BooleanTrue:
-        out += "true";
+        emit_sep();
+        std::memcpy(w, "true", 4);
+        w += 4;
         break;
+
       case TapeNodeType::BooleanFalse:
-        out += "false";
+        emit_sep();
+        std::memcpy(w, "false", 5);
+        w += 5;
         break;
+
       case TapeNodeType::Null:
-        out += "null";
+        emit_sep();
+        std::memcpy(w, "null", 4);
+        w += 4;
         break;
-      default:
-        break;
-      }
-    };
 
-    auto open_ctx = [&](bool obj, char brace) {
-      if (top >= 0) {
-        if (is_obj[top]) {
-          uint32_t ei = elem[top]++;
-          if (ei % 2 == 0 && ei > 0)
-            out += ',';
-          else if (ei % 2 == 1)
-            out += ':';
-        } else {
-          if (elem[top]++ > 0)
-            out += ',';
-        }
-      }
-      is_obj[++top] = obj;
-      elem[top] = 0;
-      out += brace;
-    };
-
-    for (size_t i = 0; i < n; ++i) {
-      const TapeNode &nd = doc_->tape[i];
-      switch (nd.type) {
-      case TapeNodeType::ObjectStart:
-        open_ctx(true, '{');
-        break;
-      case TapeNodeType::ObjectEnd:
-        out += '}';
-        --top;
-        break;
-      case TapeNodeType::ArrayStart:
-        open_ctx(false, '[');
-        break;
-      case TapeNodeType::ArrayEnd:
-        out += ']';
-        --top;
-        break;
       default:
-        scalar(nd);
         break;
       }
     }
+
+    // Shrink the string to the exact number of bytes written.
+    out.resize(static_cast<size_t>(w - w0));
     return out;
   }
 };
