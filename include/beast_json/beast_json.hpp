@@ -4885,7 +4885,16 @@ namespace json {
 namespace lazy {
 
 // ─────────────────────────────────────────────────────────────
-// TapeNode — exactly 16 bytes (Phase A compaction)
+// TapeNode — 8 bytes (Phase D1 compaction)
+//
+// meta layout (uint32_t):
+//   bits 31-24 : TapeNodeType  (8 bits, values 0-10)
+//   bits 23-16 : flags         (8 bits, currently always 0)
+//   bits 15-0  : length        (16 bits, max 65535)
+//
+// Dropped: next_sib (4 bytes) — was written but never read.
+// Halves store operations per push(): 5 → 2.
+// Fits 8 nodes per 64-byte cache line (vs ~5 before).
 // ─────────────────────────────────────────────────────────────
 
 enum class TapeNodeType : uint8_t {
@@ -4903,18 +4912,25 @@ enum class TapeNodeType : uint8_t {
 };
 
 struct TapeNode {
-  TapeNodeType type; // 1 byte
-  uint8_t flags;     // 1 byte
-  uint16_t length;   // 2 bytes (max 65535 per string/number)
-  uint32_t offset;   // 4 bytes (byte offset into source, max 4GB)
-  uint32_t next_sib; // 4 bytes (skip-link for {}/[])
-                     // = 12 bytes total
+  uint32_t meta;   // bits 31-24: type | bits 23-16: flags | bits 15-0: length
+  uint32_t offset; // byte offset into source (max 4 GB)
+                   // = 8 bytes total
 
   TapeNode() = default;
-  TapeNode(TapeNodeType t, uint16_t l, uint32_t o, uint32_t sib = 0)
-      : type(t), flags(0), length(l), offset(o), next_sib(sib) {}
+
+  // Packed-meta constructor used by push()
+  TapeNode(TapeNodeType t, uint16_t l, uint32_t o)
+      : meta((static_cast<uint32_t>(t) << 24) | static_cast<uint32_t>(l)),
+        offset(o) {}
+
+  // Field accessors — inline, zero overhead in optimised builds
+  BEAST_INLINE TapeNodeType type()   const noexcept {
+    return static_cast<TapeNodeType>((meta >> 24) & 0xFFu);
+  }
+  BEAST_INLINE uint8_t  flags()  const noexcept { return (meta >> 16) & 0xFFu; }
+  BEAST_INLINE uint16_t length() const noexcept { return static_cast<uint16_t>(meta & 0xFFFFu); }
 };
-static_assert(sizeof(TapeNode) == 12, "TapeNode must be exactly 12 bytes");
+static_assert(sizeof(TapeNode) == 8, "TapeNode must be exactly 8 bytes");
 
 // ─────────────────────────────────────────────────────────────
 // TapeArena — Beast Flat Arena (Phase B)
@@ -5008,10 +5024,10 @@ public:
   Value(DocumentView *doc, uint32_t idx) : doc_(doc), idx_(idx) {}
 
   bool is_object() const {
-    return doc_->tape[idx_].type == TapeNodeType::ObjectStart;
+    return doc_->tape[idx_].type() == TapeNodeType::ObjectStart;
   }
   bool is_array() const {
-    return doc_->tape[idx_].type == TapeNodeType::ArrayStart;
+    return doc_->tape[idx_].type() == TapeNodeType::ArrayStart;
   }
 
   // Zero-copy serialization: context stack tracks object/array nesting.
@@ -5099,7 +5115,7 @@ public:
 
     for (size_t i = 0; i < ntape; ++i) {
       const TapeNode &nd = doc_->tape[i];
-      switch (nd.type) {
+      switch (nd.type()) {
 
       case TapeNodeType::ObjectStart:
         emit_sep();
@@ -5151,8 +5167,8 @@ public:
       case TapeNodeType::StringRaw:
         emit_sep();
         *w++ = '"';
-        std::memcpy(w, src + nd.offset, nd.length);
-        w += nd.length;
+        std::memcpy(w, src + nd.offset, nd.length());
+        w += nd.length();
         *w++ = '"';
         break;
 
@@ -5160,8 +5176,8 @@ public:
       case TapeNodeType::NumberRaw:
       case TapeNodeType::Double:
         emit_sep();
-        std::memcpy(w, src + nd.offset, nd.length);
-        w += nd.length;
+        std::memcpy(w, src + nd.offset, nd.length());
+        w += nd.length();
         break;
 
       case TapeNodeType::BooleanTrue:
@@ -5464,11 +5480,8 @@ class Parser {
   // No pointer chain: doc_->tape.head is only synced at the very end.
   BEAST_INLINE void push(TapeNodeType t, uint16_t l, uint32_t o) noexcept {
     TapeNode *n = tape_head_++;
-    n->type = t;
-    n->flags = 0;
-    n->length = l;
+    n->meta   = (static_cast<uint32_t>(t) << 24) | static_cast<uint32_t>(l);
     n->offset = o;
-    n->next_sib = 0;
   }
 
   BEAST_INLINE uint32_t tape_size() const noexcept {
@@ -5535,10 +5548,9 @@ public:
       case ']': {
         if (BEAST_UNLIKELY(depth_ == 0))
           goto fail;
-        uint32_t si = start_stack_[--depth_];
+        --depth_;
         push(c == '}' ? TapeNodeType::ObjectEnd : TapeNodeType::ArrayEnd, 0,
              static_cast<uint32_t>(p_ - data_));
-        doc_->tape.base[si].next_sib = tape_size();
         ++p_;
         break;
       }
@@ -5667,10 +5679,9 @@ public:
           if (BEAST_UNLIKELY(nc == ']' || nc == '}')) {
             if (BEAST_UNLIKELY(depth_ == 0))
               goto fail;
-            uint32_t si = start_stack_[--depth_];
+            --depth_;
             push(nc == '}' ? TapeNodeType::ObjectEnd : TapeNodeType::ArrayEnd,
                  0, static_cast<uint32_t>(p_ - data_));
-            doc_->tape.base[si].next_sib = tape_size();
             ++p_;
             c = skip_to_action();
             if (BEAST_UNLIKELY(p_ >= end_))
@@ -5804,10 +5815,9 @@ public:
           if (BEAST_LIKELY(nc == ']' || nc == '}')) {
             if (BEAST_UNLIKELY(depth_ == 0))
               goto fail;
-            uint32_t si = start_stack_[--depth_];
+            --depth_;
             push(nc == '}' ? TapeNodeType::ObjectEnd : TapeNodeType::ArrayEnd,
                  0, static_cast<uint32_t>(p_ - data_));
-            doc_->tape.base[si].next_sib = tape_size();
             ++p_;
             c = skip_to_action();
             if (BEAST_UNLIKELY(p_ >= end_))
