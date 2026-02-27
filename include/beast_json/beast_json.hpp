@@ -5422,24 +5422,33 @@ class Parser {
     const uint64_t qm  = K * static_cast<uint8_t>('"');
     const uint64_t bsm = K * static_cast<uint8_t>('\\');
 
-    // SWAR-24 fast path (≤24-byte key, no backslash)
+    // SWAR cascaded fast path (≤24-byte key, no backslash).
+    // Phase D2: load v0 first; exit immediately for ≤8-char keys (most common
+    // twitter.json keys: "id", "text", "user", "lang" etc.) before loading v1/v2.
     if (BEAST_LIKELY(s + 24 <= end_)) {
-      uint64_t v0, v1, v2;
-      std::memcpy(&v0, s,      8);
-      std::memcpy(&v1, s + 8,  8);
-      std::memcpy(&v2, s + 16, 8);
+      uint64_t v0;
+      std::memcpy(&v0, s, 8);
       uint64_t hq0 = v0 ^ qm;  hq0 = (hq0 - K) & ~hq0 & H;
       uint64_t hb0 = v0 ^ bsm; hb0 = (hb0 - K) & ~hb0 & H;
-      uint64_t hq1 = v1 ^ qm;  hq1 = (hq1 - K) & ~hq1 & H;
-      uint64_t hb1 = v1 ^ bsm; hb1 = (hb1 - K) & ~hb1 & H;
-      uint64_t hq2 = v2 ^ qm;  hq2 = (hq2 - K) & ~hq2 & H;
-      uint64_t hb2 = v2 ^ bsm; hb2 = (hb2 - K) & ~hb2 & H;
-      if (BEAST_LIKELY(!(hb0 | hb1 | hb2))) {
-        if      (hq0) e = s      + (BEAST_CTZ(hq0) >> 3);
-        else if (hq1) e = s + 8  + (BEAST_CTZ(hq1) >> 3);
-        else if (hq2) e = s + 16 + (BEAST_CTZ(hq2) >> 3);
-        else goto skn_slow; // quote not found in 24 bytes → fall through
-        goto skn_found;
+      if (BEAST_LIKELY(!hb0)) {
+        if (hq0) { // ≤8-char key: quote in first chunk, no backslash
+          e = s + (BEAST_CTZ(hq0) >> 3);
+          goto skn_found;
+        }
+        // Key is 9-24 chars: load v1 and v2
+        uint64_t v1, v2;
+        std::memcpy(&v1, s + 8,  8);
+        std::memcpy(&v2, s + 16, 8);
+        uint64_t hq1 = v1 ^ qm;  hq1 = (hq1 - K) & ~hq1 & H;
+        uint64_t hb1 = v1 ^ bsm; hb1 = (hb1 - K) & ~hb1 & H;
+        uint64_t hq2 = v2 ^ qm;  hq2 = (hq2 - K) & ~hq2 & H;
+        uint64_t hb2 = v2 ^ bsm; hb2 = (hb2 - K) & ~hb2 & H;
+        if (BEAST_LIKELY(!(hb1 | hb2))) {
+          if      (hq1) e = s + 8  + (BEAST_CTZ(hq1) >> 3);
+          else if (hq2) e = s + 16 + (BEAST_CTZ(hq2) >> 3);
+          else goto skn_slow;
+          goto skn_found;
+        }
       }
       // Backslash found → fall through to full scan
     }
@@ -5560,39 +5569,43 @@ public:
         constexpr uint64_t H = 0x8080808080808080ULL;
         const uint64_t qm = K * static_cast<uint8_t>('"');
         const uint64_t bsm = K * static_cast<uint8_t>('\\');
-        // SWAR cascade: 3 × 8 = 24 bytes inline, no backslash
-        // twitter.json coverage: ≤8 (28%), ≤16 (64%), ≤24 (90%)
+        // SWAR cascaded: load v0 first, early exit for ≤8-char strings
+        // (Phase D2: covers 36% of twitter.json strings without loading v1/v2).
+        // twitter.json coverage: ≤8 (36%), ≤16 (64%), ≤24 (84%)
         if (BEAST_LIKELY(s + 24 <= end_)) {
-          uint64_t v0, v1, v2;
+          uint64_t v0;
           std::memcpy(&v0, s, 8);
-          std::memcpy(&v1, s + 8, 8);
-          std::memcpy(&v2, s + 16, 8);
-          uint64_t hq0 = v0 ^ qm;
-          hq0 = (hq0 - K) & ~hq0 & H;
-          uint64_t hb0 = v0 ^ bsm;
-          hb0 = (hb0 - K) & ~hb0 & H;
-          uint64_t hq1 = v1 ^ qm;
-          hq1 = (hq1 - K) & ~hq1 & H;
-          uint64_t hb1 = v1 ^ bsm;
-          hb1 = (hb1 - K) & ~hb1 & H;
-          uint64_t hq2 = v2 ^ qm;
-          hq2 = (hq2 - K) & ~hq2 & H;
-          uint64_t hb2 = v2 ^ bsm;
-          hb2 = (hb2 - K) & ~hb2 & H;
-          if (BEAST_LIKELY(!(hb0 | hb1 | hb2))) {
-            if (hq0) {
+          uint64_t hq0 = v0 ^ qm; hq0 = (hq0 - K) & ~hq0 & H;
+          uint64_t hb0 = v0 ^ bsm; hb0 = (hb0 - K) & ~hb0 & H;
+          if (BEAST_LIKELY(!hb0)) {
+            if (hq0) { // ≤8-char string, no backslash
               e = s + (BEAST_CTZ(hq0) >> 3);
-            } else if (hq1) {
-              e = s + 8 + (BEAST_CTZ(hq1) >> 3);
-            } else if (hq2) {
-              e = s + 16 + (BEAST_CTZ(hq2) >> 3);
-            } else {
-              goto str_slow;
+              push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
+                   static_cast<uint32_t>(s - data_));
+              p_ = e + 1;
+              goto str_done;
             }
-            push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
-                 static_cast<uint32_t>(s - data_));
-            p_ = e + 1;
-            goto str_done;
+            // 9-24 chars: load v1 and v2
+            uint64_t v1, v2;
+            std::memcpy(&v1, s + 8, 8);
+            std::memcpy(&v2, s + 16, 8);
+            uint64_t hq1 = v1 ^ qm; hq1 = (hq1 - K) & ~hq1 & H;
+            uint64_t hb1 = v1 ^ bsm; hb1 = (hb1 - K) & ~hb1 & H;
+            uint64_t hq2 = v2 ^ qm; hq2 = (hq2 - K) & ~hq2 & H;
+            uint64_t hb2 = v2 ^ bsm; hb2 = (hb2 - K) & ~hb2 & H;
+            if (BEAST_LIKELY(!(hb1 | hb2))) {
+              if (hq1) {
+                e = s + 8 + (BEAST_CTZ(hq1) >> 3);
+              } else if (hq2) {
+                e = s + 16 + (BEAST_CTZ(hq2) >> 3);
+              } else {
+                goto str_slow;
+              }
+              push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
+                   static_cast<uint32_t>(s - data_));
+              p_ = e + 1;
+              goto str_done;
+            }
           }
         } else if (s + 8 <= end_) {
           uint64_t v;
