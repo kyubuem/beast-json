@@ -236,67 +236,33 @@ After the fix, objdump confirms `vpcmpeqb %ymm`, `vpor %ymm`, `vpmovmskb %ymm` i
 
 ---
 
-## Phase 42 — AVX-512 Native 64B String Scanner 🔜
+## Phase 42 — AVX-512 Native 64B String Scanner ✅
 
 **File**: `include/beast_json/beast_json.hpp` — `scan_string_end()`
 
-### Theory
-AVX-512 `zmm` registers hold 512 bits = 64 bytes. `_mm512_cmpeq_epi8_mask` directly produces a `uint64_t` bitmask, eliminating the `vpor` step needed with AVX2. Place this block above the AVX2 32B block:
+Added `#if BEAST_HAS_AVX512` block inside `#elif BEAST_HAS_AVX2` branch. AVX-512 64B loop runs first, AVX2 32B handles remaining `<64B` tail.
 
-```cpp
-#if BEAST_HAS_AVX512
-{
-  const __m512i vq512  = _mm512_set1_epi8('"');
-  const __m512i vbs512 = _mm512_set1_epi8('\\');
-  while (p + 64 <= end_) {
-    __m512i v = _mm512_loadu_si512(reinterpret_cast<const __m512i *>(p));
-    uint64_t mask = _mm512_cmpeq_epi8_mask(v, vq512)
-                  | _mm512_cmpeq_epi8_mask(v, vbs512);
-    if (mask) { p += __builtin_ctzll(mask); return p; }
-    p += 64;
-  }
-  // fall through to AVX2 32B for remaining <64B
-}
-#endif
-```
+**Results on Linux x86_64 AVX-512 (150 iter)**:
 
-**Expected gain**: gsoc/citm (long strings) **−10~15%** · twitter marginal (short strings already hit in 32B)
+| File | Phase 41 | Phase 42+43 | Improvement |
+|:---|---:|---:|:---:|
+| twitter (rtsm) | 351 μs | **307 μs** | **-12.4%** |
+| canada | 1,677 μs | **1,467 μs** | **-12.5%** |
+| citm | 797 μs | **721 μs** | **-9.5%** |
+| gsoc | 761 μs | **693 μs** | **-8.9%** |
 
 ---
 
-## Phase 43 — kActString Inline AVX-512 64B One-Shot Scan 🔜
+## Phase 43 — kActString Inline AVX-512 64B One-Shot Scan ✅
 
-**File**: `include/beast_json/beast_json.hpp` — `kActString` case in `parse()`
+**File**: `include/beast_json/beast_json.hpp` — `kActString` and `scan_key_colon_next()`
 
-Extends Phase 36's inline 32B scan to 64B. Strings ≤63 chars handled in a single zmm load without calling any helper.
+- Added `#if BEAST_HAS_AVX512` block before Phase 36 AVX2 32B block in both hot paths
+- Strings ≤63 chars handled in a single `zmm` load (one-shot)
+- `mask==0` path: added `skip_string_from64()` helper (AVX-512 + AVX2 + SSE2 + scalar cascade)
+- ctest 81/81 PASS, objdump confirms `vpcmpeqb %zmm`, `kmovq` instructions active
 
-```cpp
-#if BEAST_HAS_AVX512
-if (BEAST_LIKELY(s + 64 <= end_)) {
-  const __m512i _vq512  = _mm512_set1_epi8('"');
-  const __m512i _vbs512 = _mm512_set1_epi8('\\');
-  __m512i _v512 = _mm512_loadu_si512(reinterpret_cast<const __m512i *>(s));
-  uint64_t _mask512 = _mm512_cmpeq_epi8_mask(_v512, _vq512)
-                    | _mm512_cmpeq_epi8_mask(_v512, _vbs512);
-  if (BEAST_LIKELY(_mask512 != 0)) {
-    e = s + __builtin_ctzll(_mask512);
-    if (BEAST_LIKELY(*e == '"')) {
-      push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
-           static_cast<uint32_t>(s - data_));
-      p_ = e + 1;
-      goto str_done;
-    }
-    goto str_slow; // backslash first
-  }
-  // mask==0: bytes [s, s+64) clean → skip_string_from64(s) (future)
-  goto str_slow;
-}
-// fall through to AVX2 32B
-#elif BEAST_HAS_AVX2
-// ... existing Phase 36 code
-```
-
-**Expected gain**: citm (many long keys) **−5~10%** · twitter moderate
+**Actual gain**: See Phase 42 table above (measured together). citm -9.5%, canada -12.5%, gsoc -8.9%, twitter rtsm -12.4%.
 
 ---
 
@@ -341,7 +307,8 @@ perf report --sort=dso,symbol
 | 40 | `claude/review-todos-optimize-kJcdz` | ❌ Reverted |
 | 41 | `claude/review-todos-optimize-kJcdz` | ✅ Done |
 | AVX-512 fix | `claude/review-todos-optimize-kJcdz` | ✅ Done |
-| 42 | `claude/review-todos-optimize-kJcdz` | 🔜 Next |
+| 42 | `claude/continue-previous-work-Lxgie` | ✅ Done |
+| 43 | `claude/continue-previous-work-Lxgie` | ✅ Done |
 
 ---
 
