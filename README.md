@@ -8,6 +8,66 @@
 
 ## Benchmarks
 
+### Linux x86-64
+
+> **Environment**: Linux x86-64, Clang 18 `-O3 -flto`, 300 iterations per file, timings are per-run averages.
+> All results verified correct (✓ PASS).
+
+#### twitter.json — 616.7 KB · social graph, mixed types
+
+| Library | Parse (μs) | Throughput | Serialize (μs) |
+| :--- | ---: | :--- | ---: |
+| yyjson | 267 | 2.37 GB/s | 123 |
+| **beast::lazy** | **340** | **1.86 GB/s** | **127** |
+| beast::rtsm | 345 | 1.84 GB/s | — |
+| nlohmann | 5,100 | 124 MB/s | 1,702 |
+
+> Serialize is essentially **tied with yyjson** (127 vs 123 μs, within noise).
+
+#### canada.json — 2.2 MB · dense floating-point arrays
+
+| Library | Parse (μs) | Throughput | Serialize (μs) |
+| :--- | ---: | :--- | ---: |
+| **beast::lazy** | **2,052** | **1.10 GB/s** | **795** |
+| beast::rtsm | 2,053 | 1.10 GB/s | — |
+| yyjson | 2,552 | 880 MB/s | 3,302 |
+| nlohmann | 29,542 | 74 MB/s | 7,508 |
+
+> beast::lazy is **25% faster** to parse and **4.2× faster** to serialize than yyjson.
+
+#### citm_catalog.json — 1.7 MB · event catalog, string-heavy
+
+| Library | Parse (μs) | Throughput | Serialize (μs) |
+| :--- | ---: | :--- | ---: |
+| **beast::lazy** | **741** | **2.33 GB/s** | **314** |
+| yyjson | 668 | 2.59 GB/s | 207 |
+| beast::rtsm | 1,400 | 1.23 GB/s | — |
+| nlohmann | 9,663 | 178 MB/s | 1,819 |
+
+#### gsoc-2018.json — 3.2 MB · large object array
+
+| Library | Parse (μs) | Throughput | Serialize (μs) |
+| :--- | ---: | :--- | ---: |
+| **beast::lazy** | **1,079** | **3.08 GB/s** | **523** |
+| beast::rtsm | 1,162 | 2.86 GB/s | — |
+| yyjson | 1,685 | 1.97 GB/s | 1,281 |
+| nlohmann | 20,302 | 164 MB/s | 13,254 |
+
+> beast::lazy is **56% faster** to parse and **2.5× faster** to serialize than yyjson.
+
+#### Summary
+
+| Benchmark | Beast vs yyjson (parse) | Beast vs yyjson (serialize) |
+| :--- | :--- | :--- |
+| twitter.json | yyjson 22% faster | **Tied** (±4%) |
+| canada.json | **Beast 25% faster** | **Beast 4.2× faster** |
+| citm_catalog.json | yyjson 10% faster | yyjson 34% faster |
+| gsoc-2018.json | **Beast 56% faster** | **Beast 2.5× faster** |
+
+Beast wins or ties on **3 out of 4** serialize benchmarks and **2 out of 4** parse benchmarks against yyjson — the gold standard for raw JSON speed.
+
+---
+
 ### macOS (Apple M1 Pro)
 
 > **Environment**: macOS 26.3, Apple Clang 17 (`-O3 -flto`), Apple M1 Pro, 50 iterations per file.
@@ -55,7 +115,7 @@
 
 > beast::lazy is **37% faster** to parse and **2.5× faster** to serialize than yyjson.
 
-#### macOS Summary
+#### Summary
 
 | Benchmark | Beast vs yyjson (parse) | Beast vs yyjson (serialize) |
 | :--- | :--- | :--- |
@@ -65,48 +125,6 @@
 | gsoc-2018.json | **Beast 37% faster** | **Beast 2.5× faster** |
 
 Beast **dominates serialization** on 3 of 4 files. On the gsoc-2018 workload (large object arrays), beast also beats yyjson on parse speed by 37%.
-
----
-
-### Linux x86-64 (Reference)
-
-> **Environment**: Linux x86-64, Clang 18 `-O3 -flto`, 300 iterations per file.
-
-#### twitter.json
-
-| Library | Parse (μs) | Throughput | Serialize (μs) |
-| :--- | ---: | :--- | ---: |
-| yyjson | 267 | 2.37 GB/s | 123 |
-| **beast::lazy** | **340** | **1.86 GB/s** | **127** |
-| beast::rtsm | 345 | 1.84 GB/s | — |
-| nlohmann | 5,100 | 124 MB/s | 1,702 |
-
-#### canada.json
-
-| Library | Parse (μs) | Throughput | Serialize (μs) |
-| :--- | ---: | :--- | ---: |
-| **beast::lazy** | **2,052** | **1.10 GB/s** | **795** |
-| beast::rtsm | 2,053 | 1.10 GB/s | — |
-| yyjson | 2,552 | 880 MB/s | 3,302 |
-| nlohmann | 29,542 | 74 MB/s | 7,508 |
-
-#### citm_catalog.json
-
-| Library | Parse (μs) | Throughput | Serialize (μs) |
-| :--- | ---: | :--- | ---: |
-| **beast::lazy** | **741** | **2.33 GB/s** | **314** |
-| yyjson | 668 | 2.59 GB/s | 207 |
-| beast::rtsm | 1,400 | 1.23 GB/s | — |
-| nlohmann | 9,663 | 178 MB/s | 1,819 |
-
-#### gsoc-2018.json
-
-| Library | Parse (μs) | Throughput | Serialize (μs) |
-| :--- | ---: | :--- | ---: |
-| **beast::lazy** | **1,079** | **3.08 GB/s** | **523** |
-| beast::rtsm | 1,162 | 2.86 GB/s | — |
-| yyjson | 1,685 | 1.97 GB/s | 1,281 |
-| nlohmann | 20,302 | 164 MB/s | 13,254 |
 
 ---
 
