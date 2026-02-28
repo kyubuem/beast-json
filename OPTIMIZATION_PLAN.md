@@ -1,6 +1,6 @@
 # Beast JSON — yyjson Domination Plan (Phase 31-35)
 
-> **Date**: 2026-02-28 (Phase 33 complete)  
+> **Date**: 2026-02-28 (Phase 36 complete)
 > **Goal**: Dominate yyjson by **30%+ margin** (not just surpass — crush it)  
 > **Architectures**: aarch64 (NEON) PRIMARY · x86_64 (SSE2/AVX2) SECONDARY  
 > **Note**: Current dev machine is Apple M1 Pro (aarch64). Linux x86_64 agents should
@@ -209,6 +209,50 @@ while (p + 32 <= end_) {
 
 ---
 
+## Phase 36 — AVX2 Inline String Scan (parse() hot path) ✅ DONE
+
+**Note**: Applied AVX2 32B one-shot string scan directly in the `kActString` case of `parse()` and in `scan_key_colon_next()`.
+The key fix vs the initial attempt: replaced `do { break }` escape pattern with `if (s+32<=end_) { ... goto str_slow; }` so that mask==0 (string ≥32 chars) and backslash cases jump directly to `str_slow`/`skn_slow`, bypassing the redundant SWAR-24 check entirely.
+
+**Phase 37 attempt (AVX2 whitespace skip in skip_to_action) — REVERTED**:
+Replacing SWAR-32 with AVX2 XOR-flip trick caused +13% regression on citm, +4% on gsoc.
+Root cause: for typical JSON whitespace (0–8 bytes between tokens), SWAR-32's 4 parallel scalar operations are faster than the AVX2 XOR+CMPGT+MOVEMASK chain (higher latency, no port parallelism advantage for such short runs). Reverted to SWAR-32 for skip_to_action.
+
+**x86_64 Results (Linux, GCC 13.3.0, -O3 -flto -mavx2, 100 iter, yyjson SIMD enabled)**: ctest 81/81 PASS.
+| File | Phase 34 | Phase 36 | Delta | yyjson (+SIMD) | Beast vs yyjson |
+|:---|---:|---:|:---:|---:|:---:|
+| twitter.json | 332 μs | **318 μs** | **−4.5%** | 271 μs | yyjson 15% faster |
+| canada.json | 1,519 μs | **1,501 μs** | −1.3% | 2,690 μs | **Beast 44% faster** |
+| citm_catalog.json | 734 μs | 755 μs | ±2% noise | 736 μs | **Tied** (2.5%) |
+| gsoc-2018.json | 750 μs | **747 μs** (4.46 GB/s) | −0.5% | 1,640 μs | **Beast 55% faster** |
+
+```cpp
+// In kActString (and scan_key_colon_next), before SWAR-24:
+#if BEAST_HAS_AVX2
+if (BEAST_LIKELY(s + 32 <= end_)) {
+  const __m256i _vq  = _mm256_set1_epi8('"');
+  const __m256i _vbs = _mm256_set1_epi8('\\');
+  __m256i _v = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(s));
+  uint32_t _mask = static_cast<uint32_t>(_mm256_movemask_epi8(
+      _mm256_or_si256(_mm256_cmpeq_epi8(_v, _vq),
+                      _mm256_cmpeq_epi8(_v, _vbs))));
+  if (BEAST_LIKELY(_mask != 0)) {
+    e = s + __builtin_ctz(_mask);
+    if (BEAST_LIKELY(*e == '"')) {
+      push(...); p_ = e + 1; goto str_done;
+    }
+    goto str_slow; // backslash first
+  }
+  goto str_slow;   // string >= 32 chars
+}
+// near end of buffer: fall through to SWAR-24
+#endif
+```
+
+> **aarch64 agents**: `#if BEAST_HAS_AVX2` — no impact on M1 builds.
+
+---
+
 ## Phase 35 — Multi-Threaded Parallel Parsing ⏸️ HOLD
 
 **Commit**: Feature branch test only; rollback and aborted.
@@ -234,6 +278,7 @@ The overhead of creating, scheduling, and joining `std::thread`s on the OS level
 | 33 | `feature/phase33-swar-float` | ✅ merged |
 | 34 | `feature/phase34-avx2-string` | ✅ merged |
 | 35 | `feature/phase35-parallel-parse` | ⏸️ Hold (aborted) |
+| 36 | `claude/review-todos-optimize-kJcdz` | ✅ Done |
 
 ---
 

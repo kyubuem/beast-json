@@ -5333,6 +5333,7 @@ class Parser {
       p_ += 16;
     }
 #else
+    // SWAR-32 fallback (no SIMD available)
     while (BEAST_LIKELY(p_ + 32 <= end_)) {
       uint64_t a0 = swar_action_mask(load64(p_));
       uint64_t a1 = swar_action_mask(load64(p_ + 8));
@@ -5547,6 +5548,28 @@ class Parser {
     const uint64_t qm = K * static_cast<uint8_t>('"');
     const uint64_t bsm = K * static_cast<uint8_t>('\\');
 
+#if BEAST_HAS_AVX2
+    // ── Phase 36: AVX2 32B key scan ─────────────────────────────────────────
+    // Handles keys ≤31 chars in one 256-bit operation.
+    // mask==0 or backslash → goto skn_slow directly (no SWAR-24 redundancy).
+    if (BEAST_LIKELY(s + 32 <= end_)) {
+      const __m256i _vq  = _mm256_set1_epi8('"');
+      const __m256i _vbs = _mm256_set1_epi8('\\');
+      __m256i _v = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(s));
+      uint32_t _mask = static_cast<uint32_t>(_mm256_movemask_epi8(
+          _mm256_or_si256(_mm256_cmpeq_epi8(_v, _vq),
+                          _mm256_cmpeq_epi8(_v, _vbs))));
+      if (BEAST_LIKELY(_mask != 0)) {
+        e = s + __builtin_ctz(_mask);
+        if (BEAST_LIKELY(*e == '"')) {
+          goto skn_found;
+        }
+        goto skn_slow; // backslash → full scanner
+      }
+      goto skn_slow;   // key ≥ 32 chars → full scanner
+    }
+    // near end of buffer: fall through to SWAR-24
+#endif
     // SWAR cascaded fast path (≤24-byte key, no backslash).
     // Phase D2: load v0 first; exit immediately for ≤8-char keys (most common
     // twitter.json keys: "id", "text", "user", "lang" etc.) before loading
@@ -5772,6 +5795,32 @@ public:
         constexpr uint64_t H = 0x8080808080808080ULL;
         const uint64_t qm = K * static_cast<uint8_t>('"');
         const uint64_t bsm = K * static_cast<uint8_t>('\\');
+#if BEAST_HAS_AVX2
+        // ── Phase 36: AVX2 32B inline string scan ─────────────────────────
+        // One 256-bit load handles strings up to 31 chars in 1 SIMD op.
+        // twitter.json: 84% of strings ≤24 chars — major hot-path speedup.
+        // mask==0 or backslash → goto str_slow directly (no SWAR-24 redundancy).
+        if (BEAST_LIKELY(s + 32 <= end_)) {
+          const __m256i _vq  = _mm256_set1_epi8('"');
+          const __m256i _vbs = _mm256_set1_epi8('\\');
+          __m256i _v = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(s));
+          uint32_t _mask = static_cast<uint32_t>(_mm256_movemask_epi8(
+              _mm256_or_si256(_mm256_cmpeq_epi8(_v, _vq),
+                              _mm256_cmpeq_epi8(_v, _vbs))));
+          if (BEAST_LIKELY(_mask != 0)) {
+            e = s + __builtin_ctz(_mask);
+            if (BEAST_LIKELY(*e == '"')) {
+              push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
+                   static_cast<uint32_t>(s - data_));
+              p_ = e + 1;
+              goto str_done;
+            }
+            goto str_slow; // backslash first → full scanner
+          }
+          goto str_slow;   // string ≥ 32 chars → full scanner
+        }
+        // near end of buffer: fall through to SWAR-24
+#endif
         // SWAR cascaded: load v0 first, early exit for ≤8-char strings
         // (Phase D2: covers 36% of twitter.json strings without loading v1/v2).
         // twitter.json coverage: ≤8 (36%), ≤16 (64%), ≤24 (84%)

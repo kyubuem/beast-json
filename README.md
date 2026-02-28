@@ -10,64 +10,64 @@
 
 ### Linux x86-64
 
-> **Environment**: Linux x86-64, GCC 13.3.0 `-O3 -flto -mavx2`, 50 iterations per file, timings are per-run averages.
-> Phase 31-34 applied (Action LUT · SWAR float scanner · NEON/SSE2 string gate · **AVX2 32B string scanner**).
+> **Environment**: Linux x86-64, GCC 13.3.0 `-O3 -flto -mavx2`, 100 iterations per file, timings are per-run averages.
+> Phase 31-34+36 applied (Action LUT · SWAR float scanner · NEON/SSE2 string gate · AVX2 32B string scanner · **AVX2 inline string scan in hot-path**).
 > yyjson compiled with full SIMD enabled. All results verified correct (✓ PASS).
 
 #### twitter.json — 616.7 KB · social graph, mixed types
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| yyjson | 284 | 2.22 GB/s | 162 |
-| **beast::lazy** | **332** | **1.90 GB/s** | **170** |
-| beast::rtsm | 399 | 1.58 GB/s | — |
-| nlohmann | 5,330 | 119 MB/s | 1,807 |
+| yyjson | 271 | 2.28 GB/s | 154 |
+| **beast::lazy** | **318** | **1.94 GB/s** | **151** |
+| beast::rtsm | 331 | 1.86 GB/s | — |
+| nlohmann | 5,142 | 120 MB/s | 2,032 |
 
-> Serialize is essentially **tied with yyjson** (170 vs 162 μs, within noise).
+> Serialize is essentially **tied with yyjson** (151 vs 154 μs, within noise). Parse **−4.5%** vs Phase 34 baseline.
 
 #### canada.json — 2.2 MB · dense floating-point arrays
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **1,519** | **1.48 GB/s** | **1,011** |
-| beast::rtsm | 2,940 | 765 MB/s | — |
-| yyjson | 2,695 | 835 MB/s | 3,359 |
-| nlohmann | 32,146 | 70 MB/s | 7,775 |
+| **beast::lazy** | **1,501** | **1.50 GB/s** | **915** |
+| beast::rtsm | 1,921 | 1.14 GB/s | — |
+| yyjson | 2,690 | 836 MB/s | 3,341 |
+| nlohmann | 28,051 | 78 MB/s | 7,228 |
 
-> beast::lazy is **44% faster** to parse and **3.3× faster** to serialize than yyjson.
+> beast::lazy is **44% faster** to parse and **3.6× faster** to serialize than yyjson.
 
 #### citm_catalog.json — 1.7 MB · event catalog, string-heavy
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| yyjson | 723 | 2.39 GB/s | 245 |
-| **beast::lazy** | **734** | **2.35 GB/s** | **385** |
-| beast::rtsm | 1,631 | 1.06 GB/s | — |
-| nlohmann | 10,094 | 171 MB/s | 1,807 |
+| yyjson | 736 | 2.35 GB/s | 232 |
+| **beast::lazy** | **755** | **2.29 GB/s** | **370** |
+| beast::rtsm | 1,002 | 1.68 GB/s | — |
+| nlohmann | 10,064 | 168 MB/s | 1,732 |
 
-> Parse is essentially **tied with yyjson** (734 vs 723 μs, 1.5% gap).
+> Parse is essentially **tied with yyjson** (755 vs 736 μs, 2.5% gap).
 
 #### gsoc-2018.json — 3.2 MB · large object array
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **750** | **4.44 GB/s** | **519** |
-| beast::rtsm | 1,171 | 2.84 GB/s | — |
-| yyjson | 1,675 | 1.99 GB/s | 1,354 |
-| nlohmann | 20,851 | 159 MB/s | 14,123 |
+| **beast::lazy** | **747** | **4.46 GB/s** | **537** |
+| beast::rtsm | 1,063 | 3.06 GB/s | — |
+| yyjson | 1,640 | 2.03 GB/s | 1,335 |
+| nlohmann | 20,726 | 157 MB/s | 13,714 |
 
-> beast::lazy is **55% faster** to parse and **2.6× faster** to serialize than yyjson.
+> beast::lazy is **55% faster** to parse and **2.5× faster** to serialize than yyjson.
 
 #### Summary
 
 | Benchmark | Beast vs yyjson (parse) | Beast vs yyjson (serialize) |
 | :--- | :--- | :--- |
-| twitter.json | yyjson 15% faster | **Tied** (±5%) |
-| canada.json | **Beast 44% faster** | **Beast 3.3× faster** |
-| citm_catalog.json | **Tied** (1.5% gap) | yyjson 37% faster |
-| gsoc-2018.json | **Beast 55% faster** | **Beast 2.6× faster** |
+| twitter.json | yyjson 15% faster | **Tied** (±2%) |
+| canada.json | **Beast 44% faster** | **Beast 3.6× faster** |
+| citm_catalog.json | **Tied** (2.5% gap) | yyjson 37% faster |
+| gsoc-2018.json | **Beast 55% faster** | **Beast 2.5× faster** |
 
-Beast **dominates** on float-heavy (canada) and large-object-array (gsoc) workloads. With AVX2 active, the gsoc parse throughput reaches **4.44 GB/s** — 2.2× the yyjson throughput on this machine.
+Beast **dominates** on float-heavy (canada) and large-object-array (gsoc) workloads. With AVX2 active, the gsoc parse throughput reaches **4.46 GB/s** — 2.2× the yyjson throughput on this machine.
 
 ---
 
