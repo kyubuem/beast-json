@@ -179,13 +179,13 @@ Used `std::array<uint8_t,256>` with `consteval` lambda (Apple Clang 17 compatibl
 aarch64 NEON is 128-bit (16B). 32B would require SVE (not available on M1).
 x86_64 with Haswell+ supports AVX2 (256-bit = 32B).
 
-**x86_64 Validation (Linux, GCC 13.3.0, -O3 -flto -mavx2, 50 iter)**: ctest 81/81 PASS.
-| File | Beast | yyjson (no-SIMD) | Beast vs yyjson |
+**x86_64 Validation (Linux, GCC 13.3.0, -O3 -flto -mavx2, 50 iter, yyjson SIMD enabled)**: ctest 81/81 PASS.
+| File | Beast | yyjson (+SIMD) | Beast vs yyjson |
 |:---|---:|---:|:---:|
-| twitter.json | 329 μs | 282 μs | yyjson 17% faster |
-| canada.json | **1,490 μs** | 2,736 μs | **Beast 46% faster** |
-| citm_catalog.json | 764 μs | 724 μs | yyjson 5% faster |
-| gsoc-2018.json | **748 μs** (4.45 GB/s) | 1,694 μs | **Beast 56% faster** |
+| twitter.json | 332 μs | 284 μs | yyjson 15% faster |
+| canada.json | **1,519 μs** | 2,695 μs | **Beast 44% faster** |
+| citm_catalog.json | 734 μs | 723 μs | **Tied** (1.5%) |
+| gsoc-2018.json | **750 μs** (4.44 GB/s) | 1,675 μs | **Beast 55% faster** |
 
 ```cpp
 // Placed ABOVE the SSE2 block: #if BEAST_HAS_AVX2

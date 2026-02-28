@@ -35,9 +35,8 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/ibireme/yyjson.git
     GIT_TAG 0.10.0
 )
-set(YYJSON_DISABLE_SIMD ON CACHE BOOL "Disable SIMD in yyjson" FORCE)
+set(YYJSON_DISABLE_SIMD OFF CACHE BOOL "Disable SIMD in yyjson" FORCE)
 FetchContent_MakeAvailable(yyjson)
-target_compile_definitions(yyjson PUBLIC YYJSON_DISABLE_SIMD=1)
 
 # Fetch fast_float removed
 

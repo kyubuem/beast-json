@@ -43,7 +43,7 @@
 - [x] Phase 31의 SSE2 16B를 `#if BEAST_HAS_AVX2` 블록으로 AVX2 32B 업그레이드
 - [x] SSE2 16B는 tail fallback으로 유지
 - [x] Linux x86-64 환경 전용 (M1에서는 inactive 확인)
-- [x] **[완료]** Linux x86_64 (GCC 13.3.0, -mavx2) 에서 AVX2 가동 테스트 및 벤치마크 검증 완료. ctest 81/81 PASS. canada **-46% vs yyjson**, gsoc **-56% vs yyjson** (gsoc 4.45 GB/s). README.md 업데이트 완료.
+- [x] **[완료]** Linux x86_64 (GCC 13.3.0, -mavx2, yyjson SIMD 활성화) 에서 AVX2 가동 테스트 및 벤치마크 검증 완료. ctest 81/81 PASS. canada **-44% vs yyjson**, gsoc **-55% vs yyjson** (gsoc 4.44 GB/s). citm 사실상 타이. README.md 업데이트 완료.
 - [x] ctest 81개 PASS 확인
 - [x] bench_all 결과: M1은 영향 없음 (정상동작). x86_64 리눅스에서 최대 -15% 기대
 - [x] git commit `c5b6b73` → merge main
