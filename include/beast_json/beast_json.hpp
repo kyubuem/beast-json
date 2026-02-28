@@ -5939,15 +5939,37 @@ public:
           ++p_;
           if (p_ < end_ && (*p_ == '+' || *p_ == '-'))
             ++p_;
-          while (p_ < end_ && static_cast<unsigned>(*p_ - '0') < 10u)
-            ++p_;
+          // ── Phase 33: SWAR-8 float digit scanner (fractional part) ──
+          // canada.json has 2.32M floats: scalar was 1 byte/iter.
+          // SWAR-8 processes 8 digits in a single 64-bit operation.
+          // Architecture-agnostic pure SWAR — fully inlined, zero call
+          // overhead.
+#define BEAST_SWAR_SKIP_DIGITS()                                               \
+  do {                                                                         \
+    while (p_ + 8 <= end_) {                                                   \
+      uint64_t _v;                                                             \
+      std::memcpy(&_v, p_, 8);                                                 \
+      uint64_t _s = _v - 0x3030303030303030ULL;                                \
+      uint64_t _nd =                                                           \
+          (_s | ((_s & 0x7F7F7F7F7F7F7F7FULL) + 0x7676767676767676ULL)) &      \
+          0x8080808080808080ULL;                                               \
+      if (_nd) {                                                               \
+        p_ += BEAST_CTZ(_nd) >> 3;                                             \
+        break;                                                                 \
+      }                                                                        \
+      p_ += 8;                                                                 \
+    }                                                                          \
+    while (p_ < end_ && static_cast<unsigned>(*p_ - '0') < 10u)                \
+      ++p_;                                                                    \
+  } while (0)
+          BEAST_SWAR_SKIP_DIGITS(); // fractional digits
           if (p_ < end_ && (*p_ == 'e' || *p_ == 'E')) {
             ++p_;
             if (p_ < end_ && (*p_ == '+' || *p_ == '-'))
               ++p_;
-            while (p_ < end_ && static_cast<unsigned>(*p_ - '0') < 10u)
-              ++p_;
+            BEAST_SWAR_SKIP_DIGITS(); // exponent digits
           }
+#undef BEAST_SWAR_SKIP_DIGITS
         }
         push(flt ? TapeNodeType::NumberRaw : TapeNodeType::Integer,
              static_cast<uint16_t>(p_ - s), static_cast<uint32_t>(s - data_));
