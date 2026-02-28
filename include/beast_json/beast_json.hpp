@@ -119,7 +119,6 @@
 #endif
 #endif
 
-
 // ============================================================================
 // Data Types (C++20 PMR Aware)
 // ============================================================================
@@ -176,8 +175,8 @@ enum class GhostType : uint8_t {
   BooleanTrue,
   BooleanFalse,
   Integer,
-  NumberRaw,     // Lazy-Float representation
-  StringRaw,     // Insitu strings
+  NumberRaw, // Lazy-Float representation
+  StringRaw, // Insitu strings
   ArrayStart,
   ArrayEnd,
   ObjectStart,
@@ -1695,7 +1694,6 @@ inline void format_shortest(double f, uint64_t &d_out, int &p_out) {
   p_out = -p;
 }
 
-
 // ============================================================================
 // Error Handling
 // ============================================================================
@@ -1813,7 +1811,6 @@ constexpr inline uint64_t has_byte(uint64_t x, uint8_t n) {
   uint64_t v = x ^ (0x0101010101010101ULL * n);
   return (v - 0x0101010101010101ULL) & ~v & 0x8080808080808080ULL;
 }
-
 
 // } // namespace detail REMOVED to keep append_uint inside detail
 // Fast integer to buffer (replacing format_base10/snprintf)
@@ -4879,7 +4876,6 @@ inline std::ostream &operator<<(std::ostream &os, const Value &v) {
 #ifndef BEAST_JSON_DOCUMENT_VIEW_HPP
 #define BEAST_JSON_DOCUMENT_VIEW_HPP
 
-
 namespace beast {
 namespace json {
 namespace lazy {
@@ -4924,11 +4920,13 @@ struct TapeNode {
         offset(o) {}
 
   // Field accessors — inline, zero overhead in optimised builds
-  BEAST_INLINE TapeNodeType type()   const noexcept {
+  BEAST_INLINE TapeNodeType type() const noexcept {
     return static_cast<TapeNodeType>((meta >> 24) & 0xFFu);
   }
-  BEAST_INLINE uint8_t  flags()  const noexcept { return (meta >> 16) & 0xFFu; }
-  BEAST_INLINE uint16_t length() const noexcept { return static_cast<uint16_t>(meta & 0xFFFFu); }
+  BEAST_INLINE uint8_t flags() const noexcept { return (meta >> 16) & 0xFFu; }
+  BEAST_INLINE uint16_t length() const noexcept {
+    return static_cast<uint16_t>(meta & 0xFFFFu);
+  }
 };
 static_assert(sizeof(TapeNode) == 8, "TapeNode must be exactly 8 bytes");
 
@@ -5063,24 +5061,33 @@ public:
     const size_t buf_cap = doc_->source.size() + 16;
     std::string out;
     out.resize(buf_cap);
-    char *w  = out.data();
+    char *w = out.data();
     char *w0 = w;
 
     for (size_t i = 0; i < ntape; ++i) {
       const TapeNode &nd = doc_->tape[i];
       const uint32_t meta = nd.meta;
       const auto type = static_cast<TapeNodeType>((meta >> 24) & 0xFF);
-      const uint8_t  sep  = (meta >> 16) & 0xFFu;
+      const uint8_t sep = (meta >> 16) & 0xFFu;
 
       // Write pre-computed separator (branch-free for common case)
-      if (sep) *w++ = (sep == 0x02u) ? ':' : ',';
+      if (sep)
+        *w++ = (sep == 0x02u) ? ':' : ',';
 
       switch (type) {
 
-      case TapeNodeType::ObjectStart: *w++ = '{'; break;
-      case TapeNodeType::ObjectEnd:   *w++ = '}'; break;
-      case TapeNodeType::ArrayStart:  *w++ = '['; break;
-      case TapeNodeType::ArrayEnd:    *w++ = ']'; break;
+      case TapeNodeType::ObjectStart:
+        *w++ = '{';
+        break;
+      case TapeNodeType::ObjectEnd:
+        *w++ = '}';
+        break;
+      case TapeNodeType::ArrayStart:
+        *w++ = '[';
+        break;
+      case TapeNodeType::ArrayEnd:
+        *w++ = ']';
+        break;
 
       case TapeNodeType::StringRaw: {
         const uint16_t slen = static_cast<uint16_t>(meta & 0xFFFFu);
@@ -5092,21 +5099,32 @@ public:
           uint16_t rem = slen;
           if (rem >= 16) {
             uint64_t a, b;
-            std::memcpy(&a, sp, 8);     std::memcpy(&b, sp + 8, 8);
-            std::memcpy(w,  &a, 8);     std::memcpy(w  + 8, &b, 8);
-            sp += 16; w += 16; rem = static_cast<uint16_t>(rem - 16);
+            std::memcpy(&a, sp, 8);
+            std::memcpy(&b, sp + 8, 8);
+            std::memcpy(w, &a, 8);
+            std::memcpy(w + 8, &b, 8);
+            sp += 16;
+            w += 16;
+            rem = static_cast<uint16_t>(rem - 16);
           }
           if (rem >= 8) {
             uint64_t a;
-            std::memcpy(&a, sp, 8); std::memcpy(w, &a, 8);
-            sp += 8; w += 8; rem = static_cast<uint16_t>(rem - 8);
+            std::memcpy(&a, sp, 8);
+            std::memcpy(w, &a, 8);
+            sp += 8;
+            w += 8;
+            rem = static_cast<uint16_t>(rem - 8);
           }
           if (rem >= 4) {
             uint32_t a;
-            std::memcpy(&a, sp, 4); std::memcpy(w, &a, 4);
-            sp += 4; w += 4; rem = static_cast<uint16_t>(rem - 4);
+            std::memcpy(&a, sp, 4);
+            std::memcpy(w, &a, 4);
+            sp += 4;
+            w += 4;
+            rem = static_cast<uint16_t>(rem - 4);
           }
-          while (rem--) *w++ = *sp++;
+          while (rem--)
+            *w++ = *sp++;
         } else {
           std::memcpy(w, sp, slen);
           w += slen;
@@ -5125,13 +5143,20 @@ public:
       }
 
       case TapeNodeType::BooleanTrue:
-        std::memcpy(w, "true", 4); w += 4; break;
+        std::memcpy(w, "true", 4);
+        w += 4;
+        break;
       case TapeNodeType::BooleanFalse:
-        std::memcpy(w, "false", 5); w += 5; break;
+        std::memcpy(w, "false", 5);
+        w += 5;
+        break;
       case TapeNodeType::Null:
-        std::memcpy(w, "null", 4); w += 4; break;
+        std::memcpy(w, "null", 4);
+        w += 4;
+        break;
 
-      default: break;
+      default:
+        break;
       }
     }
 
@@ -5212,10 +5237,11 @@ class Parser {
   //   has_elem_bits_ — bit i: depth i has ≥1 element already pushed
   //   depth_mask_   — precomputed 1ULL << (depth_-1) (0 at root)
   //                   maintained incrementally to eliminate variable shifts.
-  uint64_t kv_key_bits_   = 0;
+  uint64_t kv_key_bits_ = 0;
   uint64_t has_elem_bits_ = 0;
-  uint64_t depth_mask_    = 0; // = 1ULL << (depth_-1), updated on depth changes
-  // Overflow state for depths >= 64 (each byte: bit0=in_obj, bit1=is_key, bit2=has_elem)
+  uint64_t depth_mask_ = 0; // = 1ULL << (depth_-1), updated on depth changes
+  // Overflow state for depths >= 64 (each byte: bit0=in_obj, bit1=is_key,
+  // bit2=has_elem)
   static constexpr size_t kPresepDepth = 64;
   uint8_t presep_overflow_[1024] = {};
 
@@ -5261,10 +5287,20 @@ class Parser {
       uint64_t a2 = swar_action_mask(load64(p_ + 16));
       uint64_t a3 = swar_action_mask(load64(p_ + 24));
       if (BEAST_LIKELY(a0 | a1 | a2 | a3)) {
-        if (a0) { p_ += BEAST_CTZ(a0) >> 3; return *p_; }
-        if (a1) { p_ += 8  + (BEAST_CTZ(a1) >> 3); return *p_; }
-        if (a2) { p_ += 16 + (BEAST_CTZ(a2) >> 3); return *p_; }
-        p_ += 24 + (BEAST_CTZ(a3) >> 3); return *p_;
+        if (a0) {
+          p_ += BEAST_CTZ(a0) >> 3;
+          return *p_;
+        }
+        if (a1) {
+          p_ += 8 + (BEAST_CTZ(a1) >> 3);
+          return *p_;
+        }
+        if (a2) {
+          p_ += 16 + (BEAST_CTZ(a2) >> 3);
+          return *p_;
+        }
+        p_ += 24 + (BEAST_CTZ(a3) >> 3);
+        return *p_;
       }
       p_ += 32;
     }
@@ -5288,14 +5324,76 @@ class Parser {
     return 0;
   }
 
-
-  // ── SWAR-16 string scanner ─────────────────────────────────
+  // ── Phase 31: Contextual SIMD Gate String Scanner ─────────────
+  //
+  // Theory: Phase 30 reverted NEON because it added startup overhead on
+  // short strings. Root fix: an 8B SWAR gate runs first. Short strings
+  // (≤8 chars, ≈36% of twitter.json) exit immediately at ZERO SIMD cost.
+  // Only when the string is confirmed > 8 chars do we enter the SIMD loop.
+  //
+  // Architecture dispatch order:
+  //   aarch64 (NEON 16B)  ← PRIMARY   — M1 / ARMv8+
+  //   x86_64  (SSE2 16B)  ← SECONDARY — Nehalem+, all modern x86
+  //   generic (SWAR-16)   ← FALLBACK
   BEAST_INLINE const char *scan_string_end(const char *p) noexcept {
     constexpr uint64_t K = 0x0101010101010101ULL;
     constexpr uint64_t H = 0x8080808080808080ULL;
     const uint64_t qm = K * static_cast<uint8_t>('"');
     const uint64_t bsm = K * static_cast<uint8_t>('\\');
 
+    // ── Stage 1: 8B SWAR gate ──────────────────────────────────────
+    // Short strings (≤8 chars) exit here with zero SIMD overhead.
+    // Backslash-early strings also exit early (benefit escape-heavy JSON).
+    if (BEAST_LIKELY(p + 8 <= end_)) {
+      uint64_t v0;
+      std::memcpy(&v0, p, 8);
+      uint64_t hq0 = v0 ^ qm;
+      hq0 = (hq0 - K) & ~hq0 & H;
+      uint64_t hb0 = v0 ^ bsm;
+      hb0 = (hb0 - K) & ~hb0 & H;
+      if (BEAST_UNLIKELY(hq0 | hb0))
+        return p + (BEAST_CTZ(hq0 | hb0) >> 3);
+      p += 8; // string confirmed > 8 chars: advance to SIMD
+    }
+
+    // ── Stage 2: SIMD loop (string > 8 chars confirmed) ───────────
+
+#if BEAST_HAS_NEON
+    // aarch64 PRIMARY: NEON 16B. Pinpoint via vgetq_lane_u64 (no scalar loop).
+    {
+      const uint8x16_t vq = vdupq_n_u8('"');
+      const uint8x16_t vbs = vdupq_n_u8('\\');
+      while (BEAST_LIKELY(p + 16 <= end_)) {
+        uint8x16_t v = vld1q_u8(reinterpret_cast<const uint8_t *>(p));
+        uint8x16_t m = vorrq_u8(vceqq_u8(v, vq), vceqq_u8(v, vbs));
+        if (BEAST_UNLIKELY(vmaxvq_u32(vreinterpretq_u32_u8(m)) != 0)) {
+          // Pinpoint: extract 64-bit lanes, find first set bit without scalar
+          // loop
+          uint64_t lo = vgetq_lane_u64(vreinterpretq_u64_u8(m), 0);
+          uint64_t hi = vgetq_lane_u64(vreinterpretq_u64_u8(m), 1);
+          if (lo)
+            return p + (BEAST_CTZ(lo) >> 3);
+          return p + 8 + (BEAST_CTZ(hi) >> 3);
+        }
+        p += 16;
+      }
+    }
+#elif defined(BEAST_ARCH_X86_64)
+    // x86_64 SECONDARY: SSE2 16B. _mm_movemask_epi8 gives 1 bit per byte.
+    {
+      const __m128i vq = _mm_set1_epi8('"');
+      const __m128i vbs = _mm_set1_epi8('\\');
+      while (BEAST_LIKELY(p + 16 <= end_)) {
+        __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i *>(p));
+        int mask = _mm_movemask_epi8(
+            _mm_or_si128(_mm_cmpeq_epi8(v, vq), _mm_cmpeq_epi8(v, vbs)));
+        if (BEAST_UNLIKELY(mask))
+          return p + __builtin_ctz(mask);
+        p += 16;
+      }
+    }
+#else
+    // Generic SWAR-16 fallback (no SIMD available)
     while (p + 16 <= end_) {
       uint64_t v0, v1;
       std::memcpy(&v0, p, 8);
@@ -5316,6 +5414,9 @@ class Parser {
       }
       p += 16;
     }
+#endif
+
+    // ── Tail: 8B SWAR + scalar ─────────────────────────────────────
     if (p + 8 <= end_) {
       uint64_t v;
       std::memcpy(&v, p, 8);
@@ -5360,17 +5461,20 @@ class Parser {
     const char *e;
     constexpr uint64_t K = 0x0101010101010101ULL;
     constexpr uint64_t H = 0x8080808080808080ULL;
-    const uint64_t qm  = K * static_cast<uint8_t>('"');
+    const uint64_t qm = K * static_cast<uint8_t>('"');
     const uint64_t bsm = K * static_cast<uint8_t>('\\');
 
     // SWAR cascaded fast path (≤24-byte key, no backslash).
     // Phase D2: load v0 first; exit immediately for ≤8-char keys (most common
-    // twitter.json keys: "id", "text", "user", "lang" etc.) before loading v1/v2.
+    // twitter.json keys: "id", "text", "user", "lang" etc.) before loading
+    // v1/v2.
     if (BEAST_LIKELY(s + 24 <= end_)) {
       uint64_t v0;
       std::memcpy(&v0, s, 8);
-      uint64_t hq0 = v0 ^ qm;  hq0 = (hq0 - K) & ~hq0 & H;
-      uint64_t hb0 = v0 ^ bsm; hb0 = (hb0 - K) & ~hb0 & H;
+      uint64_t hq0 = v0 ^ qm;
+      hq0 = (hq0 - K) & ~hq0 & H;
+      uint64_t hb0 = v0 ^ bsm;
+      hb0 = (hb0 - K) & ~hb0 & H;
       if (BEAST_LIKELY(!hb0)) {
         if (hq0) { // ≤8-char key: quote in first chunk, no backslash
           e = s + (BEAST_CTZ(hq0) >> 3);
@@ -5378,16 +5482,23 @@ class Parser {
         }
         // Key is 9-24 chars: load v1 and v2
         uint64_t v1, v2;
-        std::memcpy(&v1, s + 8,  8);
+        std::memcpy(&v1, s + 8, 8);
         std::memcpy(&v2, s + 16, 8);
-        uint64_t hq1 = v1 ^ qm;  hq1 = (hq1 - K) & ~hq1 & H;
-        uint64_t hb1 = v1 ^ bsm; hb1 = (hb1 - K) & ~hb1 & H;
-        uint64_t hq2 = v2 ^ qm;  hq2 = (hq2 - K) & ~hq2 & H;
-        uint64_t hb2 = v2 ^ bsm; hb2 = (hb2 - K) & ~hb2 & H;
+        uint64_t hq1 = v1 ^ qm;
+        hq1 = (hq1 - K) & ~hq1 & H;
+        uint64_t hb1 = v1 ^ bsm;
+        hb1 = (hb1 - K) & ~hb1 & H;
+        uint64_t hq2 = v2 ^ qm;
+        hq2 = (hq2 - K) & ~hq2 & H;
+        uint64_t hb2 = v2 ^ bsm;
+        hb2 = (hb2 - K) & ~hb2 & H;
         if (BEAST_LIKELY(!(hb1 | hb2))) {
-          if      (hq1) e = s + 8  + (BEAST_CTZ(hq1) >> 3);
-          else if (hq2) e = s + 16 + (BEAST_CTZ(hq2) >> 3);
-          else goto skn_slow;
+          if (hq1)
+            e = s + 8 + (BEAST_CTZ(hq1) >> 3);
+          else if (hq2)
+            e = s + 16 + (BEAST_CTZ(hq2) >> 3);
+          else
+            goto skn_slow;
           goto skn_found;
         }
       }
@@ -5435,9 +5546,9 @@ class Parser {
   //   sep = 1  → comma         (non-first array element or object key)
   //   sep = 2  → colon         (object value, always)
   BEAST_INLINE void push(TapeNodeType t, uint16_t l, uint32_t o) noexcept {
-    const uint64_t mask = depth_mask_;             // precomputed: no variable shift
+    const uint64_t mask = depth_mask_; // precomputed: no variable shift
     uint8_t sep = 0;
-    if (mask) {                                    // depths 1..64: bit-stack path
+    if (mask) { // depths 1..64: bit-stack path
       // Use bool casts to avoid bitwise-AND/NOT surprises
       // (e.g. mask=2, !2=1: 2&1=0, not what we want for logical AND)
       const bool in_obj = !!(obj_bits_ & mask);
@@ -5449,27 +5560,32 @@ class Parser {
       // Toggle key↔value tracking (only meaningful in objects)
       kv_key_bits_ ^= (in_obj ? mask : uint64_t(0));
       has_elem_bits_ |= mask;
-    } else if (BEAST_UNLIKELY(depth_ > 0)) {       // depth > 64: overflow path
+    } else if (BEAST_UNLIKELY(depth_ > 0)) { // depth > 64: overflow path
       uint8_t &s = presep_overflow_[depth_ - kPresepDepth];
-      if (s & 1) {  // in object
-        if (s & 2) {  sep = (s & 4) ? 0x01u : 0u; s = (s & ~2u) | 4u; }  // key
-        else        {  sep = 0x02u;                 s |= (2u | 4u);     }  // val
+      if (s & 1) { // in object
+        if (s & 2) {
+          sep = (s & 4) ? 0x01u : 0u;
+          s = (s & ~2u) | 4u;
+        } // key
+        else {
+          sep = 0x02u;
+          s |= (2u | 4u);
+        } // val
       } else {
-        sep = (s & 4) ? 0x01u : 0u;  // array
+        sep = (s & 4) ? 0x01u : 0u; // array
         s |= 4;
       }
     }
     TapeNode *n = tape_head_++;
-    n->meta   = (static_cast<uint32_t>(t)   << 24)
-              | (static_cast<uint32_t>(sep)  << 16)
-              |  static_cast<uint32_t>(l);
+    n->meta = (static_cast<uint32_t>(t) << 24) |
+              (static_cast<uint32_t>(sep) << 16) | static_cast<uint32_t>(l);
     n->offset = o;
   }
 
   // push_end(): for ObjectEnd / ArrayEnd — always sep=0, no state update.
   BEAST_INLINE void push_end(TapeNodeType t, uint32_t o) noexcept {
     TapeNode *n = tape_head_++;
-    n->meta   = static_cast<uint32_t>(t) << 24; // sep=0, len=0
+    n->meta = static_cast<uint32_t>(t) << 24; // sep=0, len=0
     n->offset = o;
   }
 
@@ -5508,17 +5624,22 @@ public:
         // Depths >kPresepDepth:   use presep_overflow_[] byte array.
         if (BEAST_LIKELY(depth_ < kPresepDepth)) {
           const uint64_t nm = depth_mask_ ? depth_mask_ << 1 : uint64_t(1);
-          obj_bits_      |= nm;  kv_key_bits_ |= nm;
-          has_elem_bits_ &= ~nm; depth_mask_ = nm;
+          obj_bits_ |= nm;
+          kv_key_bits_ |= nm;
+          has_elem_bits_ &= ~nm;
+          depth_mask_ = nm;
         } else {
-          depth_mask_ = 0;  // signal: overflow active in push()
+          depth_mask_ = 0; // signal: overflow active in push()
           presep_overflow_[depth_ + 1 - kPresepDepth] = 0b011u;
         }
         ++depth_;
         ++p_;
         if (BEAST_LIKELY(p_ < end_)) {
           unsigned char fc = static_cast<unsigned char>(*p_);
-          if (BEAST_LIKELY(fc > 0x20)) { c = static_cast<char>(fc); continue; }
+          if (BEAST_LIKELY(fc > 0x20)) {
+            c = static_cast<char>(fc);
+            continue;
+          }
         }
         break;
       }
@@ -5526,7 +5647,9 @@ public:
         push(TapeNodeType::ArrayStart, 0, static_cast<uint32_t>(p_ - data_));
         if (BEAST_LIKELY(depth_ < kPresepDepth)) {
           const uint64_t nm = depth_mask_ ? depth_mask_ << 1 : uint64_t(1);
-          obj_bits_      &= ~nm; has_elem_bits_ &= ~nm; depth_mask_ = nm;
+          obj_bits_ &= ~nm;
+          has_elem_bits_ &= ~nm;
+          depth_mask_ = nm;
         } else {
           depth_mask_ = 0;
           presep_overflow_[depth_ + 1 - kPresepDepth] = 0b000u;
@@ -5535,7 +5658,10 @@ public:
         ++p_;
         if (BEAST_LIKELY(p_ < end_)) {
           unsigned char fc = static_cast<unsigned char>(*p_);
-          if (BEAST_LIKELY(fc > 0x20)) { c = static_cast<char>(fc); continue; }
+          if (BEAST_LIKELY(fc > 0x20)) {
+            c = static_cast<char>(fc);
+            continue;
+          }
         }
         break;
       }
@@ -5550,7 +5676,7 @@ public:
         if (BEAST_LIKELY(depth_mask_ != 0))
           depth_mask_ >>= 1;
         else if (depth_ > 0 && depth_ <= kPresepDepth)
-          depth_mask_ = uint64_t(1) << (depth_ - 1);  // restore, rare
+          depth_mask_ = uint64_t(1) << (depth_ - 1); // restore, rare
         push_end(c == '}' ? TapeNodeType::ObjectEnd : TapeNodeType::ArrayEnd,
                  static_cast<uint32_t>(p_ - data_));
         ++p_;
@@ -5568,8 +5694,10 @@ public:
         if (BEAST_LIKELY(s + 24 <= end_)) {
           uint64_t v0;
           std::memcpy(&v0, s, 8);
-          uint64_t hq0 = v0 ^ qm; hq0 = (hq0 - K) & ~hq0 & H;
-          uint64_t hb0 = v0 ^ bsm; hb0 = (hb0 - K) & ~hb0 & H;
+          uint64_t hq0 = v0 ^ qm;
+          hq0 = (hq0 - K) & ~hq0 & H;
+          uint64_t hb0 = v0 ^ bsm;
+          hb0 = (hb0 - K) & ~hb0 & H;
           if (BEAST_LIKELY(!hb0)) {
             if (hq0) { // ≤8-char string, no backslash
               e = s + (BEAST_CTZ(hq0) >> 3);
@@ -5582,10 +5710,14 @@ public:
             uint64_t v1, v2;
             std::memcpy(&v1, s + 8, 8);
             std::memcpy(&v2, s + 16, 8);
-            uint64_t hq1 = v1 ^ qm; hq1 = (hq1 - K) & ~hq1 & H;
-            uint64_t hb1 = v1 ^ bsm; hb1 = (hb1 - K) & ~hb1 & H;
-            uint64_t hq2 = v2 ^ qm; hq2 = (hq2 - K) & ~hq2 & H;
-            uint64_t hb2 = v2 ^ bsm; hb2 = (hb2 - K) & ~hb2 & H;
+            uint64_t hq1 = v1 ^ qm;
+            hq1 = (hq1 - K) & ~hq1 & H;
+            uint64_t hb1 = v1 ^ bsm;
+            hb1 = (hb1 - K) & ~hb1 & H;
+            uint64_t hq2 = v2 ^ qm;
+            hq2 = (hq2 - K) & ~hq2 & H;
+            uint64_t hb2 = v2 ^ bsm;
+            hb2 = (hb2 - K) & ~hb2 & H;
             if (BEAST_LIKELY(!(hb1 | hb2))) {
               if (hq1) {
                 e = s + 8 + (BEAST_CTZ(hq1) >> 3);
@@ -5686,8 +5818,10 @@ public:
             if (BEAST_UNLIKELY(depth_ == 0))
               goto fail;
             --depth_;
-            if (BEAST_LIKELY(depth_ < kPresepDepth)) depth_mask_ >>= 1;
-            push_end(nc == '}' ? TapeNodeType::ObjectEnd : TapeNodeType::ArrayEnd,
+            if (BEAST_LIKELY(depth_ < kPresepDepth))
+              depth_mask_ >>= 1;
+            push_end(nc == '}' ? TapeNodeType::ObjectEnd
+                               : TapeNodeType::ArrayEnd,
                      static_cast<uint32_t>(p_ - data_));
             ++p_;
             c = skip_to_action();
@@ -5823,8 +5957,10 @@ public:
             if (BEAST_UNLIKELY(depth_ == 0))
               goto fail;
             --depth_;
-            if (BEAST_LIKELY(depth_ < kPresepDepth)) depth_mask_ >>= 1;
-            push_end(nc == '}' ? TapeNodeType::ObjectEnd : TapeNodeType::ArrayEnd,
+            if (BEAST_LIKELY(depth_ < kPresepDepth))
+              depth_mask_ >>= 1;
+            push_end(nc == '}' ? TapeNodeType::ObjectEnd
+                               : TapeNodeType::ArrayEnd,
                      static_cast<uint32_t>(p_ - data_));
             ++p_;
             c = skip_to_action();
