@@ -172,11 +172,11 @@ Used `std::array<uint8_t,256>` with `consteval` lambda (Apple Clang 17 compatibl
 
 ---
 
-## Phase 34 — AVX2 32B String Scanner (x86_64 only)
+## Phase 34 — AVX2 32B String Scanner (x86_64 only) ✅ DONE
 
-**File**: `include/beast_json/beast_json.hpp` — upgrade Phase 31 SSE2 block
-
-aarch64 NEON is 128-bit (16B). 32B would require SVE (not available on M1).  
+**Commit**: `c5b6b73` → merged to main
+**Note**: Added `#elif BEAST_HAS_AVX2` block in `scan_string_end()` using `_mm256_loadu_si256` and `_mm256_movemask_epi8` for 32 bytes/iter.
+aarch64 NEON is 128-bit (16B). 32B would require SVE (not available on M1).
 x86_64 with Haswell+ supports AVX2 (256-bit = 32B).
 
 ```cpp
@@ -201,33 +201,21 @@ while (p + 32 <= end_) {
 
 ---
 
-## Phase 35 — Multi-Threaded Parallel Parsing (Domination Move)
+## Phase 35 — Multi-Threaded Parallel Parsing ⏸️ HOLD
 
-**Theory: Depth-Bounded Parallel Tape**
+**Commit**: Feature branch test only; rollback and aborted.
 
-```
-Input JSON:                        Processing:
-{                                  main thread  → push ObjectStart
-  "key1": { ... large subtree },   Thread 0     → TapeArena_0 (lock-free)
-  "key2": [ ... large subtree ],   Thread 1     → TapeArena_1 (lock-free)
-  "key3": { ... large subtree }    Thread 2     → TapeArena_2 (lock-free)
-}                                  main thread  → merge + push ObjectEnd
+**Attempted Implementation**:
+- Pre-scan: `scan_toplevel_value_offsets()` to find top-level value boundaries.
+- Partition: Distributed string slices to N threads (using `std::thread`).
+- Parse: Each thread parsed independently into its own lock-free `DocumentView`.
+- Merge: Main thread used zero-copy `std::memcpy` concatenation of sub-tapes.
 
-Steps:
-  1. Pre-scan:  SIMD pass collects depth=1 key offsets → O(n/16)
-  2. Partition: divide work among N threads by key count
-  3. Parse:     each thread writes to its own TapeArena, no locks
-  4. Merge:     main thread links tape pointers → O(N) negligible
-```
+**Failure Analysis (Why it was rolled back)**:
+The total parsing time for target documents (e.g. `twitter.json`, `canada.json`) in single-thread highly-optimized C++ is measured in **hundreds of microseconds** (e.g., 260~1800 μs).
+The overhead of creating, scheduling, and joining `std::thread`s on the OS level is inherently in the millisecond regime, drastically overpowering the theoretical gains of splitting the work. 
 
-> [!IMPORTANT]
-> Phase 35 starts ONLY after Phase 31-34 are complete and verified.
-> Pre-scan correctness is a hard prerequisite.
-
-**Expected gain**: 4-core → theoretical 4× → realistic **2–3×**  
-twitter < 120 μs, canada < 950 μs — **30–40% ahead of yyjson**
-
----
+**Conclusion**: Internal multi-threading at the single-document API layer is detrimental for ultra-fast JSON parsers. It is architecturally sounder for the library user to process separate documents in parallel worker threads (which Beast JSON perfectly supports due to zero global state).
 
 ## Branch Strategy
 
@@ -236,8 +224,8 @@ twitter < 120 μs, canada < 950 μs — **30–40% ahead of yyjson**
 | 31 | `feature/phase31-simd-string-gate` | ✅ merged |
 | 32 | `feature/phase32-action-lut` | ✅ merged |
 | 33 | `feature/phase33-swar-float` | ✅ merged |
-| 34 | `feature/phase34-avx2-string` | ⬜ pending |
-| 35 | `feature/phase35-parallel-parse` | ⬜ pending |
+| 34 | `feature/phase34-avx2-string` | ✅ merged |
+| 35 | `feature/phase35-parallel-parse` | ⏸️ Hold (aborted) |
 
 ---
 
