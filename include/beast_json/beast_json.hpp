@@ -5433,10 +5433,25 @@ class Parser {
       }
     }
 #elif BEAST_HAS_AVX2
-    // x86_64 AVX2: 32B per iteration — doubles SSE2 throughput for citm/gsoc.
-    // Phase 34: added above SSE2 path. SSE2 runs as 16B tail below.
-    // aarch64 agents: this block is inactive on M1 builds (BEAST_HAS_AVX2
-    // unset). x86_64 agents: build with -mavx2 or -march=native to activate.
+    // x86_64 AVX2/AVX-512: SIMD string scanner.
+    // Phase 34: AVX2 32B. Phase 42: AVX-512 64B outer loop (when available).
+    // aarch64 agents: inactive on M1 builds. x86_64: build with -march=native.
+#if BEAST_HAS_AVX512
+    // Phase 42: AVX-512 64B per iteration — halves loop count vs AVX2.
+    // _mm512_cmpeq_epi8_mask → uint64_t mask directly (no vpor needed).
+    {
+      const __m512i vq512  = _mm512_set1_epi8('"');
+      const __m512i vbs512 = _mm512_set1_epi8('\\');
+      while (BEAST_LIKELY(p + 64 <= end_)) {
+        __m512i v = _mm512_loadu_si512(reinterpret_cast<const __m512i *>(p));
+        uint64_t mask = _mm512_cmpeq_epi8_mask(v, vq512)
+                      | _mm512_cmpeq_epi8_mask(v, vbs512);
+        if (BEAST_UNLIKELY(mask)) { p += __builtin_ctzll(mask); return p; }
+        p += 64;
+      }
+    }
+    // Fall through: AVX2 32B handles remaining <64B
+#endif
     {
       const __m256i vq = _mm256_set1_epi8('"');
       const __m256i vbs = _mm256_set1_epi8('\\');
@@ -5583,6 +5598,74 @@ class Parser {
     return p;
   }
 
+  // ── Phase 43: skip_string_from64 ─────────────────────────────────────────
+  // Like skip_string_from32 but starts 64B further (s+64).
+  // Called when bytes [s, s+64) are confirmed clean by an AVX-512 inline scan.
+  // For strings 64-127 chars: 1 AVX-512 op total vs full scan_string_end().
+#if BEAST_HAS_AVX512
+  BEAST_INLINE const char *skip_string_from64(const char *s) noexcept {
+    const char *p = s + 64;
+    {
+      const __m512i vq512  = _mm512_set1_epi8('"');
+      const __m512i vbs512 = _mm512_set1_epi8('\\');
+      while (BEAST_LIKELY(p + 64 <= end_)) {
+        __m512i v = _mm512_loadu_si512(reinterpret_cast<const __m512i *>(p));
+        uint64_t mask = _mm512_cmpeq_epi8_mask(v, vq512)
+                      | _mm512_cmpeq_epi8_mask(v, vbs512);
+        if (BEAST_LIKELY(mask != 0)) {
+          p += __builtin_ctzll(mask);
+          if (BEAST_LIKELY(*p == '"')) return p;
+          p += 2; // skip escape sequence
+          continue;
+        }
+        p += 64;
+      }
+    }
+    // AVX2 32B tail (handles remaining <64B)
+    {
+      const __m256i vq  = _mm256_set1_epi8('"');
+      const __m256i vbs = _mm256_set1_epi8('\\');
+      while (BEAST_LIKELY(p + 32 <= end_)) {
+        __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p));
+        uint32_t mask = static_cast<uint32_t>(_mm256_movemask_epi8(
+            _mm256_or_si256(_mm256_cmpeq_epi8(v, vq), _mm256_cmpeq_epi8(v, vbs))));
+        if (BEAST_LIKELY(mask != 0)) {
+          p += __builtin_ctz(mask);
+          if (BEAST_LIKELY(*p == '"')) return p;
+          p += 2;
+          continue;
+        }
+        p += 32;
+      }
+    }
+    // SSE2 16B tail
+    {
+      const __m128i vq128  = _mm_set1_epi8('"');
+      const __m128i vbs128 = _mm_set1_epi8('\\');
+      while (p + 16 <= end_) {
+        __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i *>(p));
+        int mask = _mm_movemask_epi8(
+            _mm_or_si128(_mm_cmpeq_epi8(v, vq128), _mm_cmpeq_epi8(v, vbs128)));
+        if (mask) {
+          p += __builtin_ctz(mask);
+          if (*p == '"') return p;
+          p += 2;
+          break;
+        }
+        p += 16;
+      }
+    }
+    // Scalar tail (platform-agnostic, handles last <16B)
+    while (p < end_) {
+      p = scan_string_end(p);
+      if (p >= end_) return end_;
+      if (*p == '"') return p;
+      p += 2;
+    }
+    return p;
+  }
+#endif  // BEAST_HAS_AVX512
+
   // Fused key scanner: scan string end, then consume ':' immediately.
   // For object keys: after closing '"', the next structural char is always ':'.
   // If the char after '"' is already ':', consume it and return the next char.
@@ -5602,6 +5685,30 @@ class Parser {
     const uint64_t bsm = K * static_cast<uint8_t>('\\');
 
 #if BEAST_HAS_AVX2
+#if BEAST_HAS_AVX512
+    // ── Phase 43: AVX-512 64B one-shot key scan ─────────────────────────────
+    // Handles keys ≤63 chars in one 512-bit operation.
+    if (BEAST_LIKELY(s + 64 <= end_)) {
+      const __m512i _vq512  = _mm512_set1_epi8('"');
+      const __m512i _vbs512 = _mm512_set1_epi8('\\');
+      __m512i _v512 = _mm512_loadu_si512(reinterpret_cast<const __m512i *>(s));
+      uint64_t _mask512 = _mm512_cmpeq_epi8_mask(_v512, _vq512)
+                        | _mm512_cmpeq_epi8_mask(_v512, _vbs512);
+      if (BEAST_LIKELY(_mask512 != 0)) {
+        e = s + __builtin_ctzll(_mask512);
+        if (BEAST_LIKELY(*e == '"')) {
+          goto skn_found;
+        }
+        goto skn_slow; // backslash → full scanner
+      }
+      // mask==0: bytes [s, s+64) clean → skip_string_from64
+      e = skip_string_from64(s);
+      if (BEAST_UNLIKELY(e >= end_ || *e != '"'))
+        return 0;
+      goto skn_found;
+    }
+    // s+64 > end_: fall through to AVX2 32B
+#endif
     // ── Phase 36: AVX2 32B key scan ─────────────────────────────────────────
     // Handles keys ≤31 chars in one 256-bit operation.
     // mask==0 or backslash → goto skn_slow directly (no SWAR-24 redundancy).
@@ -5855,6 +5962,37 @@ public:
         const uint64_t qm = K * static_cast<uint8_t>('"');
         const uint64_t bsm = K * static_cast<uint8_t>('\\');
 #if BEAST_HAS_AVX2
+#if BEAST_HAS_AVX512
+        // ── Phase 43: AVX-512 64B one-shot string scan ──────────────────────
+        // One 512-bit load handles ≤63-char strings in a single zmm op.
+        // Expected gain: citm (long keys) −5~10%, twitter moderate.
+        if (BEAST_LIKELY(s + 64 <= end_)) {
+          const __m512i _vq512  = _mm512_set1_epi8('"');
+          const __m512i _vbs512 = _mm512_set1_epi8('\\');
+          __m512i _v512 = _mm512_loadu_si512(reinterpret_cast<const __m512i *>(s));
+          uint64_t _mask512 = _mm512_cmpeq_epi8_mask(_v512, _vq512)
+                            | _mm512_cmpeq_epi8_mask(_v512, _vbs512);
+          if (BEAST_LIKELY(_mask512 != 0)) {
+            e = s + __builtin_ctzll(_mask512);
+            if (BEAST_LIKELY(*e == '"')) {
+              push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
+                   static_cast<uint32_t>(s - data_));
+              p_ = e + 1;
+              goto str_done;
+            }
+            goto str_slow; // backslash first → full scanner
+          }
+          // mask==0: bytes [s, s+64) clean → skip_string_from64
+          e = skip_string_from64(s);
+          if (BEAST_UNLIKELY(e >= end_ || *e != '"'))
+            goto fail;
+          push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
+               static_cast<uint32_t>(s - data_));
+          p_ = e + 1;
+          goto str_done;
+        }
+        // s+64 > end_: fall through to AVX2 32B
+#endif
         // ── Phase 36: AVX2 32B inline string scan ─────────────────────────
         // One 256-bit load handles strings up to 31 chars in 1 SIMD op.
         // twitter.json: 84% of strings ≤24 chars — major hot-path speedup.
