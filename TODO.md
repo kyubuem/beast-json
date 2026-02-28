@@ -1,12 +1,13 @@
 # Beast JSON Optimization — TODO
 
-> **최종 업데이트**: 2026-02-28 (Phase 33 완료)
-> **현재 최고 기록 (Phase 33, M1 Pro)**: twitter.json 264μs · canada 1,891μs · gsoc 632μs
+> **최종 업데이트**: 2026-02-28 (Phase 36 완료 — x86_64 AVX2 inline string scan)
+> **현재 최고 기록 (Phase 34, M1 Pro)**: twitter.json 264μs · canada 1,891μs · gsoc 632μs
+> **현재 최고 기록 (Phase 36, Linux x86_64 AVX2)**: twitter 318μs · canada 1,501μs · gsoc 747μs (4.46 GB/s)
 > **목표**: yyjson 압도 (30% 이상 우세)
 
 ---
 
-## 압도 플랜 Phase 31-35
+## 압도 플랜 Phase 31-36+
 
 📄 **Full Plan**: [OPTIMIZATION_PLAN.md](./OPTIMIZATION_PLAN.md)
 
@@ -42,10 +43,21 @@
 - [x] Phase 31의 SSE2 16B를 `#if BEAST_HAS_AVX2` 블록으로 AVX2 32B 업그레이드
 - [x] SSE2 16B는 tail fallback으로 유지
 - [x] Linux x86-64 환경 전용 (M1에서는 inactive 확인)
-- [ ] **[TODO]** 향후 다른 에이전트가 x86_64 리눅스 머신에서 실제 AVX2 가동 테스트 및 벤치마크를 수행하여 속도 향상을 검증해야 함.
+- [x] **[완료]** Linux x86_64 (GCC 13.3.0, -mavx2, yyjson SIMD 활성화) 에서 AVX2 가동 테스트 및 벤치마크 검증 완료. ctest 81/81 PASS. canada **-44% vs yyjson**, gsoc **-55% vs yyjson** (gsoc 4.44 GB/s). citm 사실상 타이. README.md 업데이트 완료.
 - [x] ctest 81개 PASS 확인
 - [x] bench_all 결과: M1은 영향 없음 (정상동작). x86_64 리눅스에서 최대 -15% 기대
 - [x] git commit `c5b6b73` → merge main
+
+### Phase 36 — AVX2 Inline String Scan (parse() hot path) ⭐⭐⭐⭐ ✅
+- [x] `kActString` case: `do { break }` 패턴 → `if (s+32<=end_)` + `goto str_slow` 로 교체
+- [x] `scan_key_colon_next()`: 동일 패턴 적용 (`goto skn_slow`)
+- [x] 분기 redundancy 제거: mask==0 및 backslash 케이스가 SWAR-24를 bypass하고 바로 str_slow/skn_slow로 이동
+- [x] Phase 37 (AVX2 whitespace skip) 시도 → citm +13% regression 확인 → **revert** (SWAR-32 복원)
+- [x] **Phase 37 분석**: skip_to_action은 평균 0-8B 공백 처리 → SWAR-32 4개 병렬 스칼라 연산이 AVX2 XOR+CMPGT+MOVEMASK보다 실제 더 빠름 (포트 경쟁 없음). 보류.
+- [x] ctest 81개 PASS
+- [x] bench_all 결과: twitter **-4.5%** (332→318μs), canada -1.3% (1519→1501μs), gsoc -0.5%, citm ±2% (noise)
+- [x] README.md, TODO.md, OPTIMIZATION_PLAN.md 업데이트
+- [x] git commit → push
 
 ### Phase 35 — 멀티스레드 병렬 파싱 ⭐⭐⭐⭐⭐ ⏸️ **HOLD**
 - [x] Pre-scan: `scan_toplevel_value_offsets()` 구현 완료
@@ -80,6 +92,7 @@
 | **Phase 32** | **256-entry constexpr Action LUT dispatch** | BTB 개선 (flat on M1 thermals) |
 | **Phase 33** | **SWAR-8 inline float digit scanner** | **canada -6.4%** |
 | **Phase 34** | **AVX2 32B String Scanner (x86_64 only)** | x86_64 처리량 2배 (M1 inactive) |
+| **Phase 36** | **AVX2 Inline String Scan (kActString hot path)** | **twitter -4.5% (332→318μs)** |
 
 ---
 
