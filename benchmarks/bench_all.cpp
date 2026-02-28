@@ -130,15 +130,28 @@ static void run_file(const std::string &filename, size_t N) {
 // ── main ──────────────────────────────────────────────────────────────────
 
 int main(int argc, char **argv) {
-  const size_t N = 300;
+  size_t N = 300;
 
-  if (argc >= 2 && std::strcmp(argv[1], "--all") == 0) {
+  // Parse arguments: [--iter <N>] [--all | file.json]
+  int file_arg = -1;
+  bool run_all = false;
+  for (int i = 1; i < argc; ++i) {
+    if (std::strcmp(argv[i], "--iter") == 0 && i + 1 < argc) {
+      N = static_cast<size_t>(std::atoi(argv[++i]));
+    } else if (std::strcmp(argv[i], "--all") == 0) {
+      run_all = true;
+    } else {
+      file_arg = i;
+    }
+  }
+
+  if (run_all) {
     const std::vector<std::string> files = {
         "twitter.json", "canada.json", "citm_catalog.json", "gsoc-2018.json"};
     for (const auto &f : files)
       run_file(f, N);
   } else {
-    const std::string filename = (argc >= 2) ? argv[1] : "twitter.json";
+    const std::string filename = (file_arg >= 0) ? argv[file_arg] : "twitter.json";
     run_file(filename, N);
   }
   return 0;
