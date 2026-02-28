@@ -5530,6 +5530,58 @@ class Parser {
     return p;
   }
 
+  // ── Phase 41: skip_string_from32 ─────────────────────────────────────────
+  // Like skip_string(s+32) but skips the SWAR-8 gate in scan_string_end.
+  // Called when bytes [s, s+32) are already confirmed clean by kActString's
+  // Phase 36 AVX2 inline scan. Saves ~11 scalar instructions per call by
+  // using AVX2 directly at p = s+32 (no 8-byte prologue).
+  // For strings 32-63 chars: 1 AVX2 op total vs SWAR-8+AVX2 (17 instructions).
+  BEAST_INLINE const char *skip_string_from32(const char *s) noexcept {
+    const char *p = s + 32;
+#if BEAST_HAS_AVX2
+    const __m256i vq  = _mm256_set1_epi8('"');
+    const __m256i vbs = _mm256_set1_epi8('\\');
+    while (BEAST_LIKELY(p + 32 <= end_)) {
+      __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p));
+      uint32_t mask = static_cast<uint32_t>(_mm256_movemask_epi8(
+          _mm256_or_si256(_mm256_cmpeq_epi8(v, vq), _mm256_cmpeq_epi8(v, vbs))));
+      if (BEAST_LIKELY(mask != 0)) {
+        p += __builtin_ctz(mask);
+        if (BEAST_LIKELY(*p == '"'))
+          return p;
+        p += 2; // skip escape sequence (backslash + next byte)
+        continue;
+      }
+      p += 32;
+    }
+    // ── Tail: SSE2 16B (handles remaining <32B) ──────────────────────────
+    {
+      const __m128i vq128  = _mm_set1_epi8('"');
+      const __m128i vbs128 = _mm_set1_epi8('\\');
+      while (p + 16 <= end_) {
+        __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i *>(p));
+        int mask = _mm_movemask_epi8(
+            _mm_or_si128(_mm_cmpeq_epi8(v, vq128), _mm_cmpeq_epi8(v, vbs128)));
+        if (mask) {
+          p += __builtin_ctz(mask);
+          if (*p == '"') return p;
+          p += 2;
+          break;
+        }
+        p += 16;
+      }
+    }
+#endif
+    // SWAR-8 + scalar tail (platform-agnostic, handles last <16B)
+    while (p < end_) {
+      p = scan_string_end(p);
+      if (p >= end_) return end_;
+      if (*p == '"') return p;
+      p += 2;
+    }
+    return p;
+  }
+
   // Fused key scanner: scan string end, then consume ':' immediately.
   // For object keys: after closing '"', the next structural char is always ':'.
   // If the char after '"' is already ':', consume it and return the next char.
@@ -5566,7 +5618,13 @@ class Parser {
         }
         goto skn_slow; // backslash → full scanner
       }
-      goto skn_slow;   // key ≥ 32 chars → full scanner
+      // ── Phase 41: mask==0 — bytes [s, s+32) are clean ────────────────
+      // skip_string_from32 starts AVX2 at s+32 directly, skipping
+      // scan_string_end's SWAR-8 gate (~11 instructions saved per call).
+      e = skip_string_from32(s);
+      if (BEAST_UNLIKELY(e >= end_ || *e != '"'))
+        return 0;
+      goto skn_found;
     }
     // near end of buffer: fall through to SWAR-24
 #endif
@@ -5720,6 +5778,16 @@ public:
       return false;
     }
 
+#if BEAST_HAS_AVX2
+    // ── Phase 40: Hoist AVX2 string-scan constants outside the hot loop ─────
+    // kActString and scan_key_colon_next (inlined via [[gnu::flatten]]) both
+    // broadcast '"' and '\\'. Declaring them here once guarantees a single
+    // vpbroadcastb per constant, kept in YMM registers throughout the loop
+    // instead of re-broadcast on every string token (~50K times for twitter).
+    const __m256i h_vq  = _mm256_set1_epi8('"');
+    const __m256i h_vbs = _mm256_set1_epi8('\\');
+#endif
+
     while (p_ < end_) {
       // Phase 32: LUT dispatch — 11 ActionId cases vs 17 raw char cases.
       // kActionLut[c] maps every byte to an ActionId in one L1 cache access.
@@ -5801,12 +5869,11 @@ public:
         // twitter.json: 84% of strings ≤24 chars — major hot-path speedup.
         // mask==0 or backslash → goto str_slow directly (no SWAR-24 redundancy).
         if (BEAST_LIKELY(s + 32 <= end_)) {
-          const __m256i _vq  = _mm256_set1_epi8('"');
-          const __m256i _vbs = _mm256_set1_epi8('\\');
+          // Phase 40: use loop-hoisted h_vq / h_vbs (no per-token vpbroadcastb)
           __m256i _v = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(s));
           uint32_t _mask = static_cast<uint32_t>(_mm256_movemask_epi8(
-              _mm256_or_si256(_mm256_cmpeq_epi8(_v, _vq),
-                              _mm256_cmpeq_epi8(_v, _vbs))));
+              _mm256_or_si256(_mm256_cmpeq_epi8(_v, h_vq),
+                              _mm256_cmpeq_epi8(_v, h_vbs))));
           if (BEAST_LIKELY(_mask != 0)) {
             e = s + __builtin_ctz(_mask);
             if (BEAST_LIKELY(*e == '"')) {
@@ -5817,7 +5884,16 @@ public:
             }
             goto str_slow; // backslash first → full scanner
           }
-          goto str_slow;   // string ≥ 32 chars → full scanner
+          // ── Phase 41: mask==0 — bytes [s, s+32) are clean ──────────────
+          // skip_string_from32 starts AVX2 at s+32 directly, skipping
+          // scan_string_end's SWAR-8 gate (~11 instructions saved per call).
+          e = skip_string_from32(s);
+          if (BEAST_UNLIKELY(e >= end_ || *e != '"'))
+            goto fail;
+          push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
+               static_cast<uint32_t>(s - data_));
+          p_ = e + 1;
+          goto str_done;
         }
         // near end of buffer: fall through to SWAR-24
 #endif
