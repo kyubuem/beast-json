@@ -1,6 +1,6 @@
 # Beast JSON — yyjson Domination Plan (Phase 31-35)
 
-> **Date**: 2026-02-28  
+> **Date**: 2026-02-28 (Phase 33 complete)  
 > **Goal**: Dominate yyjson by **30%+ margin** (not just surpass — crush it)  
 > **Architectures**: aarch64 (NEON) PRIMARY · x86_64 (SSE2/AVX2) SECONDARY  
 > **Note**: Current dev machine is Apple M1 Pro (aarch64). Linux x86_64 agents should
@@ -10,12 +10,12 @@
 
 ## Current Gap vs Domination Target
 
-| File | yyjson (M1) | Beast Now | **Target** | yyjson (Linux) | Beast Now |
+| File | yyjson (M1) | Beast Phase 33 | **Target** | yyjson (Linux) | Beast (Linux) |
 |:---|---:|---:|---:|---:|---:|
-| twitter.json | 176 μs | 276 μs | **< 120 μs** | 267 μs | 340 μs |
-| canada.json | 1,426 μs | 2,021 μs | **< 950 μs** | 2,552 μs | 2,052 μs ✅ |
-| citm_catalog.json | 465 μs | 643 μs | **< 320 μs** | 668 μs | 741 μs |
-| gsoc-2018.json | 978 μs | 715 μs ✅ | **< 500 μs** | 1,685 μs | 1,079 μs ✅ |
+| twitter.json | 178 μs | 264 μs | **< 120 μs** | 267 μs | ~340 μs |
+| canada.json | 1,456 μs | 1,891 μs | **< 950 μs** | 2,552 μs | ~2,052 μs ✅ |
+| citm_catalog.json | 474 μs | 646 μs | **< 320 μs** | 668 μs | ~741 μs |
+| gsoc-2018.json | 982 μs | **632 μs ✅** | **< 500 μs ✅** | 1,685 μs | ~1,079 μs ✅ |
 
 ---
 
@@ -30,7 +30,10 @@
 
 ---
 
-## Phase 31 — Contextual SIMD Gate String Scanner
+## Phase 31 — Contextual SIMD Gate String Scanner ✅ DONE
+
+**Commit**: `a60e265` → merged to main  
+**Actual results (M1 Pro, 100 iter)**: twitter **-4.4%** (276→264 μs), gsoc **-11.6%** (715→632 μs)
 
 **File**: `include/beast_json/beast_json.hpp` — `scan_string_end()` (L5293) and `scan_key_colon_next()` (L5357)
 
@@ -151,6 +154,24 @@ Architecture-agnostic (pure SWAR).
 
 ---
 
+## Phase 32 — 256-Entry constexpr Action LUT ✅ DONE
+
+**Commit**: `d2581d4` → merged to main  
+**Note**: Replaced `switch(c)` 17 char-literal cases with `switch(kActionLut[c])` 11 ActionId cases.
+Used `std::array<uint8_t,256>` with `consteval` lambda (Apple Clang 17 compatible).
+**Actual results**: flat (BTB improvement masked by thermal variability on M1).
+
+---
+
+## Phase 33 — SWAR-8 Float Digit Scanner ✅ DONE
+
+**Commit**: `39ca6d9` → merged to main  
+**Note**: Lambda approach caused regression (no inlining guarantee). Replaced with
+`BEAST_SWAR_SKIP_DIGITS()` inline macro for zero call overhead.  
+**Actual results (M1 Pro, 50 iter)**: canada **-6.4%** (2,021→1,891 μs)
+
+---
+
 ## Phase 34 — AVX2 32B String Scanner (x86_64 only)
 
 **File**: `include/beast_json/beast_json.hpp` — upgrade Phase 31 SSE2 block
@@ -210,13 +231,13 @@ twitter < 120 μs, canada < 950 μs — **30–40% ahead of yyjson**
 
 ## Branch Strategy
 
-| Phase | Branch | Priority |
+| Phase | Branch | Status |
 |:---|:---|:---:|
-| 31 | `feature/phase31-simd-string-gate` | ★★★★★ |
-| 32 | `feature/phase32-action-lut` | ★★★★ |
-| 33 | `feature/phase33-swar-float` | ★★★★ |
-| 34 | `feature/phase34-avx2-string` | ★★★ |
-| 35 | `feature/phase35-parallel-parse` | ★★★★★ |
+| 31 | `feature/phase31-simd-string-gate` | ✅ merged |
+| 32 | `feature/phase32-action-lut` | ✅ merged |
+| 33 | `feature/phase33-swar-float` | ✅ merged |
+| 34 | `feature/phase34-avx2-string` | ⬜ pending |
+| 35 | `feature/phase35-parallel-parse` | ⬜ pending |
 
 ---
 

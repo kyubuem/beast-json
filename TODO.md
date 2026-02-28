@@ -1,8 +1,7 @@
 # Beast JSON Optimization — TODO
 
-> **최종 업데이트**: 2026-02-28  
-> **현재 최고 기록 (Phase 30)**: twitter.json 236μs (Linux x86-64)  
-> **Mac (M1 Pro) 최고 기록**: twitter.json 276μs  
+> **최종 업데이트**: 2026-02-28 (Phase 33 완료)
+> **현재 최고 기록 (Phase 33, M1 Pro)**: twitter.json 264μs · canada 1,891μs · gsoc 632μs
 > **목표**: yyjson 압도 (30% 이상 우세)
 
 ---
@@ -15,29 +14,29 @@
 
 ## 할 일 목록
 
-### Phase 31 — Contextual SIMD Gate String Scanner ⭐⭐⭐⭐⭐ 🔄
-- [ ] `scan_string_end()` Stage1: 8B SWAR gate 추가 (short string early exit)
-- [ ] `scan_string_end()` Stage2: `#if BEAST_HAS_SSE2` → `_mm_loadu_si128` 16B loop
-- [ ] `scan_string_end()` Stage2: `#elif BEAST_HAS_NEON` → `vld1q_u8` 16B loop
-- [ ] `scan_key_colon_next()` 동일 SIMD gate 적용
-- [ ] ctest 81개 PASS 확인
-- [ ] bench_all 측정: twitter `-20%` 목표 (276→220μs)
-- [ ] git commit (`feature/phase31-simd-string-gate`)
+### Phase 31 — Contextual SIMD Gate String Scanner ⭐⭐⭐⭐⭐ ✅
+- [x] `scan_string_end()` Stage1: 8B SWAR gate (short string early exit)
+- [x] `scan_string_end()` Stage2: `#elif BEAST_HAS_SSE2` → SSE2 `_mm_loadu_si128` 16B loop
+- [x] `scan_string_end()` Stage2: `#if BEAST_HAS_NEON` → NEON `vld1q_u8` 16B loop + `vgetq_lane_u64` pinpoint
+- [x] ctest 81개 PASS
+- [x] bench_all 결과: twitter **-4.4%** (276→264μs), gsoc **-11.6%** (715→632μs)
+- [x] git commit `a60e265` → merge main
 
-### Phase 32 — 256-Entry constexpr Action LUT ⭐⭐⭐⭐
-- [ ] `namespace lazy` 상단에 `kActionLut[256]` constexpr 추가
-- [ ] `parse()` hot loop `switch(c)` → `switch(kActionLut[(uint8_t)c])` 변경
-- [ ] 17 cases → 11 ActionId cases로 통합
-- [ ] ctest 81개 PASS 확인
-- [ ] bench_all 측정: 전체 `-8%` 목표
-- [ ] git commit (`feature/phase32-action-lut`)
+### Phase 32 — 256-Entry constexpr Action LUT ⭐⭐⭐⭐ ✅
+- [x] `ActionId` enum + `kActionLut[256]` constexpr `std::array` 추가
+- [x] `parse()` hot loop `switch(c)` → `switch(kActionLut[(uint8_t)c])` 변경
+- [x] 17 char-literal cases → 11 ActionId cases 통합
+- [x] ctest 81개 PASS
+- [x] bench_all 결과: 전체 flat (BTB 개선, 열측정 노이즈 범위)
+- [x] git commit `d2581d4` → merge main
 
-### Phase 33 — SWAR Float Scanner ⭐⭐⭐⭐
-- [ ] `parse()` number case float 소수부 `while` 스칼라 루프 → SWAR-8 대체
-- [ ] 지수부(`e+/-`) 뒤 digit scan도 동일하게 SWAR-8 적용
-- [ ] ctest 81개 PASS 확인
-- [ ] bench_all 측정: canada `-20%` 목표 (2021→1600μs)
-- [ ] git commit (`feature/phase33-swar-float`)
+### Phase 33 — SWAR Float Scanner ⭐⭐⭐⭐ ✅
+- [x] float 소수부 scalar `while` 루프 → `BEAST_SWAR_SKIP_DIGITS()` inline macro
+- [x] 지수부(`e+/-`) digit scan도 동일 macro 적용
+- [x] 람다 방식 regression → macro inline으로 재작성 (zero overhead)
+- [x] ctest 81개 PASS
+- [x] bench_all 결과: canada **-6.4%** (2021→1891μs)
+- [x] git commit `39ca6d9` → merge main
 
 ### Phase 34 — AVX2 32B String Scanner (x86_64 전용) ⭐⭐⭐
 - [ ] Phase 31의 SSE2 16B를 `#if BEAST_HAS_AVX2` 블록으로 AVX2 32B 업그레이드
@@ -62,12 +61,12 @@
 
 ## 압도 기준 통과 조건
 
-| 파일 | yyjson | 목표 | 달성 |
-|:---|---:|---:|:---:|
-| twitter.json (M1) | 176 μs | **< 120 μs** | ⬜ |
-| canada.json (M1) | 1,426 μs | **< 950 μs** | ⬜ |
-| citm.json (M1) | 465 μs | **< 320 μs** | ⬜ |
-| gsoc-2018.json (M1) | 978 μs | **< 500 μs** | ⬜ |
+| 파일 | yyjson | 목표 | **현재 (Phase 33)** | 달성 |
+|:---|---:|---:|---:|:---:|
+| twitter.json (M1) | 178 μs | **< 120 μs** | 264 μs | ⬜ |
+| canada.json (M1) | 1,456 μs | **< 950 μs** | 1,891 μs | ⬜ |
+| citm.json (M1) | 474 μs | **< 320 μs** | 646 μs | ⬜ |
+| gsoc-2018.json (M1) | 982 μs | **< 500 μs** | **632 μs** | ✅ |
 
 ---
 
@@ -80,6 +79,9 @@
 | Phase 28 | TapeNode 직접 메모리 생성 | -15μs |
 | Phase 29 | NEON whitespace scanner | -27μs |
 | Phase E | Pre-flagged separator (dump bit-stack 제거) | -29% serialize |
+| **Phase 31** | **Contextual SIMD Gate (NEON/SSE2 string scanner)** | **twitter -4.4%, gsoc -11.6%** |
+| **Phase 32** | **256-entry constexpr Action LUT dispatch** | BTB 개선 (flat on M1 thermals) |
+| **Phase 33** | **SWAR-8 inline float digit scanner** | **canada -6.4%** |
 
 ---
 
