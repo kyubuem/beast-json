@@ -1,59 +1,91 @@
-# Beast JSON Optimization - Performance Tracking & TODO (Up to Phase 30)
+# Beast JSON Optimization — TODO
 
-## Current Status (as of Phase 30)
-- **Baseline (Phase 18)**: 298μs (Parse)
-- **Current Optimum (Phase 30)**: **236μs** (Parse) 🎉
-- **Target (yyjson)**: ~170us (Parse)
-- **Current Gap**: ~66μs 
+> **최종 업데이트**: 2026-02-28  
+> **현재 최고 기록 (Phase 30)**: twitter.json 236μs (Linux x86-64)  
+> **Mac (M1 Pro) 최고 기록**: twitter.json 276μs  
+> **목표**: yyjson 압도 (30% 이상 우세)
 
-## 🚀 The Massive Breakthroughs (Phase 25-30)
+---
 
-We dropped from 284μs down to an incredible 236μs by fundamentally attacking memory writes, CPU register packing, and SIMD instruction density.
+## 압도 플랜 Phase 31-35
 
-### ✅ What Worked & Brought Us to 236μs
-1. **Phase 28: TapeNode Direct Memory Construction (The 15μs Drop)**
-   - *Previous*: `*tape_head_++ = TapeNode(t, l, o);` caused Clang to eagerly pack a 128-bit structure in CPU registers before issuing a memory store.
-   - *Fix*: Hand-assigned structure members via a pointer (`n->type = t; n->flags = 0;`).
-   - *Result*: Allowed the CPU to stream parallel `strb`/`strh`/`str` instructions directly to the store buffer without horizontal ALU sequence stalls. Saved ~15μs globally!
+📄 **전체 플랜 문서**: [PHASE31_35_PLAN.md](./PHASE31_35_PLAN.md)
 
-2. **Phase 29: Ultimate NEON Whitespace Scanner (The 27μs Drop)**
-   - *Previous*: Complex SWAR algorithm checking exactly ` `, `\n`, `\r`, `\t` costing 14 instructions.
-   - *Fix*: Integrated a 3-instruction NEON fallback checking `c > 0x20` using `vld1q_u8` + `vcgtq_u8` + `vmaxvq_u32` (similar to yyjson). If `vmaxvq_u32 != 0`, a tight scalar loop pinpoints the token.
-   - *Result*: Utterly obliterated whitespace skip loop overhead. Brought us down from 263μs to an all-time 236μs record!
+---
 
-3. **Phase 25 & 26: Double-Pump Number/String Parsing**
-   - *Fix*: Numbers and Strings in JSON are heavily followed by structurally predictable separators (`,`, `:`, `}`). Immediately parsing and consuming these delimiters at the exit point of the node parser prevents the generic loop from returning to the giant `switch`, bypassing the switch overhead entirely for ~50% of the payload.
+## 할 일 목록
 
-### ❌ What Failed / Was Reverted
-1. **Phase 30: NEON String Parsing Extension**
-   - Attempted to apply the `vmaxvq_u32` NEON trick to string fast-paths (for quotes and backslashes).
-   - *Why it failed*: Tiny strings (2-6 bytes, abundant in twitter.json) prefer the SWAR 24-byte path because SWAR branches directly to exit without entering an inner loop. NEON incurred a 4-5μs loop startup penalty.
+### Phase 31 — Contextual SIMD Gate String Scanner ⭐⭐⭐⭐⭐
+- [ ] `scan_string_end()` Stage1: 8B SWAR gate 추가 (short string early exit)
+- [ ] `scan_string_end()` Stage2: `#if BEAST_HAS_SSE2` → `_mm_loadu_si128` 16B loop
+- [ ] `scan_string_end()` Stage2: `#elif BEAST_HAS_NEON` → `vld1q_u8` 16B loop
+- [ ] `scan_key_colon_next()` 동일 SIMD gate 적용
+- [ ] ctest 81개 PASS 확인
+- [ ] bench_all 측정: twitter `-20%` 목표 (276→220μs)
+- [ ] git commit (`feature/phase31-simd-string-gate`)
 
-2. **Phase 24: The Big Hack (Recursive Descent Object Loop)**
-   - Considered rewriting the object parser to strictly expect "key": value sequences.
-   - *Status*: Dropped. The Phase 26 string double-pump implicitly reproduces this behavior inside the flat `switch` without duplicating multi-type value parsing code.
+### Phase 32 — 256-Entry constexpr Action LUT ⭐⭐⭐⭐
+- [ ] `namespace lazy` 상단에 `kActionLut[256]` constexpr 추가
+- [ ] `parse()` hot loop `switch(c)` → `switch(kActionLut[(uint8_t)c])` 변경
+- [ ] 17 cases → 11 ActionId cases로 통합
+- [ ] ctest 81개 PASS 확인
+- [ ] bench_all 측정: 전체 `-8%` 목표
+- [ ] git commit (`feature/phase32-action-lut`)
 
-## 🎯 Phase 31+ Roadmap: Bridging the Final 66μs 
-We have eliminated almost all fat from the main token extraction. To reach `yyjson`'s ~170μs benchmark, we must focus on architectural and branchless optimizations:
+### Phase 33 — SWAR Float Scanner ⭐⭐⭐⭐
+- [ ] `parse()` number case float 소수부 `while` 스칼라 루프 → SWAR-8 대체
+- [ ] 지수부(`e+/-`) 뒤 digit scan도 동일하게 SWAR-8 적용
+- [ ] ctest 81개 PASS 확인
+- [ ] bench_all 측정: canada `-20%` 목표 (2021→1600μs)
+- [ ] git commit (`feature/phase33-swar-float`)
 
-- [ ] **1. Data Layout & Tape Size Tuning (AST Compaction)**
-  - *Context*: `yyjson` nodes are 16 bytes, and they achieve extreme cache locality by stripping out backward `prev` pointers.
-  - *Action*: Investigate removing `prev` or merging `flags`/`aux` variables inside `beast-json`'s `TapeNode` to shrink the memory footprint and reduce L1 cache misses during large object parsing.
-  - *Goal*: Increase nodes-per-cache-line.
+### Phase 34 — AVX2 32B String Scanner (x86_64 전용) ⭐⭐⭐
+- [ ] Phase 31의 SSE2 16B를 `#if BEAST_HAS_AVX2` 블록으로 AVX2 32B 업그레이드
+- [ ] SSE2 16B는 tail fallback으로 유지
+- [ ] Linux x86-64 CI에서 검증 (M1에서는 inactive)
+- [ ] ctest 81개 PASS 확인
+- [ ] bench_all 측정: x86_64 citm/gsoc `-15%` 추가 목표
+- [ ] git commit (`feature/phase34-avx2-string`)
 
-- [ ] **2. Zero-Branch Eisel-Lemire Number Parsing**
-  - *Context*: Currently, we fall back to a long scalar `while` loop for double/float digit extraction. `simdjson` and `yyjson` use Lemire's `fast_float` or similar exact float math to bypass scalar scans.
-  - *Action*: Replace the `std::strtod` fallback and manual scanning loop with a customized, zero-branch fast-path for IEEE 754 floating-point conversion.
-  - *Goal*: Eliminate branch mispredictions inside dense number arrays.
+### Phase 35 — 멀티스레드 병렬 파싱 ⭐⭐⭐⭐⭐
+- [ ] Pre-scan: SIMD로 depth=1 key offset 배열 생성 (O(n/16))
+- [ ] 독립 `TapeArena` per-thread 설계
+- [ ] `parse_reuse()` → `parse_parallel(N)` API 추가
+- [ ] lock-free subtree 분배 로직
+- [ ] 병합: main thread tape pointer 연결
+- [ ] 스레드 안전성 검증 (sanitizer)
+- [ ] ctest 81개 PASS 확인
+- [ ] bench_all 측정: twitter `<120μs`, canada `<950μs` 목표
+- [ ] git commit (`feature/phase35-parallel-parse`)
 
-- [ ] **3. Static SIMD Structural Dispatch (Jump Tables)**
-  - *Context*: We currently rely on a `switch(c)` block per extracted token. `yyjson` pads the file with trailing zeros and reads action characters via a 256-byte static jump table (`[action, ws, error]`).
-  - *Action*: Refactor the main `parse()` loop to use a computed goto or branchless `if (!(type = table[c]))` lookup mechanism to guarantee instruction cache hits across unpredictable JSON payloads.
-  - *Goal*: Remove CPU pipeline stalls caused by complex switch-case branch predictor misses.
+---
 
-- [ ] **4. Clang vs GCC Compiler Loop Pragma Tuning**
-  - *Context*: Apple Clang might be emitting less optimal loops for ARM64 compared to GCC or Clang 18+. 
-  - *Action*: Test `#pragma GCC unroll` inside the exact hotspots (like the string SWAR loop) and analyze the generated assembly for `LDR/STR` pair optimizations.
+## 압도 기준 통과 조건
 
-### 🧹 Infrastructure Note
-*Legacy DOM tests (`test_json_pointer.cpp`, `test_iterators.cpp`) were permanently removed in Phase 30. All future features and tests will be built exclusively around the zero-copy, streaming `beast::json::lazy::Value` architecture.*
+| 파일 | yyjson | 목표 | 달성 |
+|:---|---:|---:|:---:|
+| twitter.json (M1) | 176 μs | **< 120 μs** | ⬜ |
+| canada.json (M1) | 1,426 μs | **< 950 μs** | ⬜ |
+| citm.json (M1) | 465 μs | **< 320 μs** | ⬜ |
+| gsoc-2018.json (M1) | 978 μs | **< 500 μs** | ⬜ |
+
+---
+
+## 완료된 최적화 기록 (Phase 1-30)
+
+| Phase | 내용 | 효과 |
+|:---|:---|:---:|
+| D1 | TapeNode 12→8 bytes 컴팩션 | +7.6% |
+| Phase 25-26 | Double-pump number/string + 3-way fused scanner | -15μs |
+| Phase 28 | TapeNode 직접 메모리 생성 | -15μs |
+| Phase 29 | NEON whitespace scanner | -27μs |
+| Phase E | Pre-flagged separator (dump bit-stack 제거) | -29% serialize |
+
+---
+
+## 주의 사항
+
+- 모든 변경은 `ctest --output-on-failure` 완전 통과 후 커밋
+- canada/gsoc 등 regression 발생 시 해당 Phase revert 후 아키텍처별 조건부 재검토
+- Phase 35 병렬 파싱은 Phase 31-34 완료 후 시작
+- 매 Phase는 별도 브랜치로 진행 → merge request
