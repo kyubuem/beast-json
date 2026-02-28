@@ -1,155 +1,238 @@
 # Beast JSON Optimization — TODO
 
-> **최종 업데이트**: 2026-02-28 (Phase 42+43: AVX-512 64B 문자열 스캐너)
-> **현재 최고 기록 (Phase 34, M1 Pro)**: twitter.json 264μs · canada 1,891μs · gsoc 632μs
-> **현재 최고 기록 (Phase 43, Linux x86_64 AVX-512)**: twitter rtsm 307μs · canada 1,467μs · citm 721μs · gsoc 693μs
-> **목표**: yyjson 압도 (30% 이상 우세)
+> **최종 업데이트**: 2026-02-28 (Phase 44-55 계획 수립 완료)
+> **현재 최고 기록 (Phase 43, Linux x86_64 AVX-512)**: twitter 307μs · canada 1,467μs · citm 721μs · gsoc 693μs
+> **새 목표**: yyjson 대비 **1.2× (20% 이상) 전 파일 동시 달성**
+> **1.2× 목표치**: twitter ≤219μs · canada ≤2,274μs · citm ≤592μs · gsoc ≤1,209μs
 
 ---
 
-## 압도 플랜 Phase 31-36+
+## 압도 플랜 Phase 44-55
 
 📄 **Full Plan**: [OPTIMIZATION_PLAN.md](./OPTIMIZATION_PLAN.md)
 
 ---
 
-## 할 일 목록
+## 현재 성적 (Phase 43, Linux x86_64 AVX-512, 150 iter)
 
-### Phase 31 — Contextual SIMD Gate String Scanner ⭐⭐⭐⭐⭐ ✅
-- [x] `scan_string_end()` Stage1: 8B SWAR gate (short string early exit)
-- [x] `scan_string_end()` Stage2: `#elif BEAST_HAS_SSE2` → SSE2 `_mm_loadu_si128` 16B loop
-- [x] `scan_string_end()` Stage2: `#if BEAST_HAS_NEON` → NEON `vld1q_u8` 16B loop + `vgetq_lane_u64` pinpoint
-- [x] ctest 81개 PASS
-- [x] bench_all 결과: twitter **-4.4%** (276→264μs), gsoc **-11.6%** (715→632μs)
-- [x] git commit `a60e265` → merge main
-
-### Phase 32 — 256-Entry constexpr Action LUT ⭐⭐⭐⭐ ✅
-- [x] `ActionId` enum + `kActionLut[256]` constexpr `std::array` 추가
-- [x] `parse()` hot loop `switch(c)` → `switch(kActionLut[(uint8_t)c])` 변경
-- [x] 17 char-literal cases → 11 ActionId cases 통합
-- [x] ctest 81개 PASS
-- [x] bench_all 결과: 전체 flat (BTB 개선, 열측정 노이즈 범위)
-- [x] git commit `d2581d4` → merge main
-
-### Phase 33 — SWAR Float Scanner ⭐⭐⭐⭐ ✅
-- [x] float 소수부 scalar `while` 루프 → `BEAST_SWAR_SKIP_DIGITS()` inline macro
-- [x] 지수부(`e+/-`) digit scan도 동일 macro 적용
-- [x] 람다 방식 regression → macro inline으로 재작성 (zero overhead)
-- [x] ctest 81개 PASS
-- [x] bench_all 결과: canada **-6.4%** (2021→1891μs)
-- [x] git commit `39ca6d9` → merge main
-
-### Phase 34 — AVX2 32B String Scanner (x86_64 전용) ⭐⭐⭐ ✅
-- [x] Phase 31의 SSE2 16B를 `#if BEAST_HAS_AVX2` 블록으로 AVX2 32B 업그레이드
-- [x] SSE2 16B는 tail fallback으로 유지
-- [x] Linux x86-64 환경 전용 (M1에서는 inactive 확인)
-- [x] **[완료]** Linux x86_64 (GCC 13.3.0, -mavx2, yyjson SIMD 활성화) 에서 AVX2 가동 테스트 및 벤치마크 검증 완료. ctest 81/81 PASS. canada **-44% vs yyjson**, gsoc **-55% vs yyjson** (gsoc 4.44 GB/s). citm 사실상 타이. README.md 업데이트 완료.
-- [x] ctest 81개 PASS 확인
-- [x] bench_all 결과: M1은 영향 없음 (정상동작). x86_64 리눅스에서 최대 -15% 기대
-- [x] git commit `c5b6b73` → merge main
-
-### Phase 36 — AVX2 Inline String Scan (parse() hot path) ⭐⭐⭐⭐ ✅
-- [x] `kActString` case: `do { break }` 패턴 → `if (s+32<=end_)` + `goto str_slow` 로 교체
-- [x] `scan_key_colon_next()`: 동일 패턴 적용 (`goto skn_slow`)
-- [x] 분기 redundancy 제거: mask==0 및 backslash 케이스가 SWAR-24를 bypass하고 바로 str_slow/skn_slow로 이동
-- [x] Phase 37 (AVX2 whitespace skip) 시도 → citm +13% regression 확인 → **revert** (SWAR-32 복원)
-- [x] **Phase 37 분석**: skip_to_action은 평균 0-8B 공백 처리 → SWAR-32 4개 병렬 스칼라 연산이 AVX2 XOR+CMPGT+MOVEMASK보다 실제 더 빠름 (포트 경쟁 없음). 보류.
-- [x] ctest 81개 PASS
-- [x] bench_all 결과: twitter **-4.5%** (332→318μs), canada -1.3% (1519→1501μs), gsoc -0.5%, citm ±2% (noise)
-- [x] git commit → push
-
-### Phase 35 — 멀티스레드 병렬 파싱 ⭐⭐⭐⭐⭐ ⏸️ **HOLD**
-- [x] Pre-scan: `scan_toplevel_value_offsets()` 구현 완료
-- [x] `parse_reuse()` → `parse_parallel(N)` API 추가 및 lock-free 병렬 파싱 실험
-- [x] 병합: zero-copy in-place 파싱 및 O(1) memcpy 병합 실험
-- [ ] **실험 결과**: 단일 문서 파싱 단위(GB/s) 스케일에서 `std::thread` 생성 및 join, OS 스케줄링 오버헤드가 단일스레드 파싱 시간(수백 μs)보다 커서 오히려 속도 저하 발생.
-- [ ] **결론**: 단일 문서 API 수준의 내부 멀티스레딩은 적합하지 않음. 사용자가 문서 여러 개를 멀티스레드 환경에서 각각 단일스레드로 처리하는 아키텍처가 이상적임. **보류**.
-
-### Phase 40 — AVX2 상수 호이스팅 ❌ **REVERTED**
-- [x] `parse()` 루프 진입 전 `h_vq`/`h_vbs` `__m256i` 상수 선언 시도
-- [x] **결과**: 전 파일 10-14% 회귀 (twitter 318→357μs, canada 1501→1705μs 등)
-- [x] **원인 분석**: 두 YMM 레지스터를 parse() 전체 루프 동안 점유 → 숫자/객체/배열 처리 구간에서도 레지스터 압력 증가 → 스택 스필 발생. `vpbroadcastb` latency 1사이클로 충분히 저렴해 재계산 비용 무시 가능.
-- [x] **교훈**: SIMD 상수는 사용 지점에 인접하게 선언해야 레지스터 라이프타임이 최소화됨.
-- [x] git commit `b1ed9ed` — revert 포함
-
-### Phase 41 — skip_string_from32 (mask==0 fast path) ⭐⭐⭐ ✅
-- [x] `skip_string_from32(s)` 헬퍼 추가: s+32부터 AVX2 루프 진입 (SWAR-8 게이트 생략)
-- [x] `kActString` mask==0 경로: `goto str_slow` → `skip_string_from32(s)` + 인라인 `push()`
-- [x] `scan_key_colon_next()` mask==0 경로: `goto skn_slow` → `skip_string_from32(s)` + `goto skn_found`
-- [x] SSE2 16B tail + SWAR-8 scalar tail로 플랫폼-독립적 fallback 처리
-- [x] ctest 81개 PASS
-- [x] **주의**: Phase 40 호이스팅과 함께 커밋되었다가 Phase 40 revert 시 같이 정리됨. Phase 41 자체는 유지.
-
-### AVX-512 감지 버그 수정 ⭐⭐⭐⭐⭐ ✅
-- [x] **버그**: `__AVX512F__` 정의 시 `#if-elif` 체인에서 `BEAST_HAS_AVX2`가 정의되지 않음 → Phase 34/36/41 전체 AVX2 코드가 AVX-512 머신에서 dead code
-- [x] **수정**: `BEAST_HAS_AVX512` 블록에 `#define BEAST_HAS_AVX2 1` 추가 (AVX-512 ⊇ AVX2)
-- [x] ctest 81개 PASS, objdump로 ymm 명령어 활성화 확인
-- [x] git commit `b1ed9ed`
+| 파일 | yyjson | Beast | Beast vs yyjson | 1.2× 목표 | 달성 |
+|:---|---:|---:|:---:|---:|:---:|
+| twitter.json | 263 μs | 307 μs | yyjson **17%** 빠름 | ≤219 μs | ⬜ |
+| canada.json | 2,729 μs | **1,467 μs** | Beast **+46%** | ≤2,274 μs | ✅ |
+| citm_catalog.json | 710 μs | 721 μs | yyjson 1.5% 빠름 | ≤592 μs | ⬜ |
+| gsoc-2018.json | 1,451 μs | **693 μs** | Beast **+53%** | ≤1,209 μs | ✅ |
 
 ---
 
-## 압도 기준 통과 조건
+## 다음 단계 — Phase 44~55
 
-### Linux x86_64 (AVX-512, Phase 41 기준)
+### Phase 44 — Bool/Null/Close 융합 키 스캐너 ⭐⭐⭐⭐⭐
+**예상 효과**: twitter **-6%**, citm **-3%** | **난이도**: 낮음
 
-| 파일 | yyjson | Beast | Beast vs yyjson | 달성 |
-|:---|---:|---:|:---:|:---:|
-| twitter.json | 311 μs | 351 μs | yyjson 13% 빠름 | ⬜ |
-| canada.json | 2,998 μs | **1,677 μs** | **Beast +44%** | ✅ |
-| citm_catalog.json | 795 μs | 797 μs | **사실상 타이** | ✅ |
-| gsoc-2018.json | 1,752 μs | **761 μs** (4.27 GB/s) | **Beast +57%** | ✅ |
+- [ ] `kActTrue` / `kActFalse` / `kActNull`: `break` → `goto bool_null_done` 교체
+- [ ] `bool_null_done:` 레이블 추가 — kActNumber Phase B1과 동일한 double-pump 구조
+  - 다음 바이트 nc 확인 (공백이면 skip_to_action)
+  - nc == ',' + 오브젝트 컨텍스트 → `scan_key_colon_next()` 직접 호출 후 value continue
+  - nc == ']' or '}' → inline close 처리
+- [ ] ctest 81개 PASS
+- [ ] bench_all twitter ≤290μs 목표
 
-### M1 Pro (NEON, Phase 34 기준 — 별도 머신)
-
-| 파일 | yyjson | Beast | Beast vs yyjson | 달성 |
-|:---|---:|---:|:---:|:---:|
-| twitter.json (M1) | 178 μs | 264 μs | yyjson 33% 빠름 | ⬜ |
-| canada.json (M1) | 1,456 μs | 1,891 μs | yyjson 23% 빠름 | ⬜ |
-| citm.json (M1) | 474 μs | 646 μs | yyjson 27% 빠름 | ⬜ |
-| gsoc-2018.json (M1) | 982 μs | **632 μs** | **Beast +36%** | ✅ |
-
-**Twitter가 유일한 약점**: 이 머신에서 yyjson 대비 -13% 열세. 아래 Phase 42-45가 목표.
+**근거**: kActNumber는 Phase B1 fusion 적용됨. kActTrue/False/Null만 누락.
+twitter.json의 불리언 값마다 루프 반복 2회 낭비 → 통합 시 제거.
 
 ---
 
-## 다음 단계 (Phase 42~45)
+### Phase 45 — scan_key_colon_next SWAR-24 Dead Path 제거 ⭐⭐⭐
+**예상 효과**: twitter **-1.5%** (I-cache) | **난이도**: 낮음
 
-### Phase 42 — AVX-512 네이티브 64B 문자열 스캔 ⭐⭐⭐⭐⭐ ✅
-- [x] `scan_string_end()`에 `#if BEAST_HAS_AVX512` 블록 추가 (64B/iter, `zmm` 레지스터)
-- [x] `_mm512_cmpeq_epi8_mask` 사용으로 `vpor` 연산 제거 (마스크 직접 OR)
-- [x] 32B AVX2 블록을 tail fallback으로 유지
-- [x] ctest 81개 PASS 확인
-- [x] bench_all 회귀 없음 확인
-- **실제 효과**: canada -12.5% (1,677→1,467μs), citm -9.5% (797→721μs), gsoc -8.9% (761→693μs)
-
-### Phase 43 — kActString 인라인 AVX-512 64B 원샷 스캔 ⭐⭐⭐⭐ ✅
-- [x] `kActString`의 인라인 스캔을 AVX2 32B → AVX-512 64B로 확장
-- [x] ≤63자 문자열을 단일 zmm 로드로 처리
-- [x] `scan_key_colon_next()`도 동일 패턴 적용
-- [x] `skip_string_from64()` 헬퍼 추가 (mask==0 fast path for >64-char strings)
-- [x] ctest 81개 PASS, regression 없음 확인
-- **실제 효과**: twitter rtsm -12.4% (351→307μs), 전 파일 -9~13% 향상
-
-### Phase 44 — twitter 병목 프로파일링 ⭐⭐⭐⭐⭐
-- [ ] `perf stat -e cycles,instructions,branch-misses,L1-dcache-misses` 로 twitter 병목 정량화
-- [ ] yyjson vs beast IPC 비교
-- [ ] 분기 예측 미스 집중 지점 파악 → 타겟 최적화 설계
-- **목적**: twitter에서 yyjson 대비 -17% 열세(rtsm 307 vs 263)의 정확한 원인 파악
-
-### Phase 45 — scan_key_colon_next SWAR-24 중복 경로 제거 ⭐⭐
-- [ ] AVX2/AVX-512 인라인 스캔이 커버하는 범위와 SWAR-24 경로의 중복 분석
-- [ ] 불필요한 fallthrough 경로 제거로 코드 크기 감소 → I-cache 효율화
+- [ ] `scan_key_colon_next()` 내 SWAR-24 블록 분석:
+  도달 조건: `s + 64 > end_` AND `s + 32 > end_` → 617KB 파일에서 마지막 32B 이내 키
+- [ ] SWAR-24 제거 → near-end 케이스는 `goto skn_slow` (scan_string_end)로 직행
+- [ ] 함수 크기 축소 → L1 I-cache 효율 향상
+- [ ] ctest 81개 PASS, regression 없음 확인
 
 ---
 
-## 압도 기준 통과 조건 (Phase 43 기준, Linux x86_64 AVX-512)
+### Phase 46 — AVX-512 배치 공백 스킵 ⭐⭐⭐⭐⭐
+**예상 효과**: citm **-12 to -18%**, twitter **-3%** | **난이도**: 중간
 
-| 파일 | yyjson | Beast (lazy) | Beast vs yyjson | 달성 |
-|:---|---:|---:|:---:|:---:|
-| twitter.json | 263 μs | 307 μs (rtsm) | yyjson 17% 빠름 | ⬜ |
-| canada.json | 2,729 μs | **1,467 μs** | **Beast +46%** | ✅ |
-| citm_catalog.json | 710 μs | 721 μs | 사실상 타이(-1.5%) | ✅ |
-| gsoc-2018.json | 1,451 μs | **693 μs** | **Beast +53%** | ✅ |
+- [ ] `skip_to_action()` 내 `#if BEAST_HAS_AVX512` 블록 추가
+  ```cpp
+  const __m512i ws_thresh = _mm512_set1_epi8(0x20);
+  while (p_ + 64 <= end_) {
+    __m512i v = _mm512_loadu_si512(p_);
+    uint64_t non_ws = (uint64_t)_mm512_cmpgt_epi8_mask(v, ws_thresh);
+    if (non_ws) { p_ += __builtin_ctzll(non_ws); return *p_; }
+    p_ += 64;
+  }
+  // SWAR-32 fallback 유지
+  ```
+- [ ] 기존 SWAR-32는 `<64B tail`로 유지 (Phase 37 교훈: 짧은 공백에선 SWAR-32 우세)
+- [ ] `c > 0x20` fast-path는 그대로 유지 (0B 공백 처리, SIMD 미진입)
+- [ ] ctest 81개 PASS
+- [ ] bench_all: citm **≤620μs**, twitter 회귀 없음 확인
+  - 회귀 발생 시 즉시 revert (Phase 37 전례)
+
+**Phase 37과의 차이**: AVX2는 4× cmpeq + 3× OR + movemask = 8 ops.
+AVX-512는 1× cmpgt_mask = 1 op. 64B/iter로 SWAR-32 32B/iter의 2×.
+
+---
+
+### Phase 47 — Profile-Guided Optimization (PGO) ⭐⭐⭐⭐
+**예상 효과**: 전 파일 **-6 to -12%** | **난이도**: 낮음 (빌드 시스템 변경만)
+
+- [ ] `cmake -DCMAKE_CXX_FLAGS="-O3 -march=native -fprofile-generate=..."` 계측 빌드
+- [ ] `./bench_all --all --iter 30` 으로 프로파일 수집
+- [ ] `-fprofile-use` 최적화 빌드
+- [ ] ctest 81개 PASS (PGO 빌드에서)
+- [ ] bench_all 전 파일 개선 확인
+- [ ] CMakeLists.txt에 PGO 옵션 문서화
+
+---
+
+### Phase 48 — 입력 선행 프리페치 ⭐⭐⭐⭐
+**예상 효과**: 전 파일 **-3 to -7%** | **난이도**: 매우 낮음
+
+- [ ] `parse()` while 루프 상단에 프리페치 추가:
+  ```cpp
+  __builtin_prefetch(p_ + 192, 0, 1); // 3 캐시라인 앞, 읽기, L1 힌트
+  ```
+- [ ] `push()` 내 TapeArena 쓰기 선행 프리페치:
+  ```cpp
+  __builtin_prefetch(tape_head_ + 8, 1, 1); // 8 TapeNode 앞 스토어 힌트
+  ```
+- [ ] ctest 81개 PASS, 전 파일 regression 없음 확인
+- [ ] 거리 값(192B, 256B) A/B 테스트
+
+---
+
+### Phase 49 — 브랜치리스 push() 비트스택 연산 ⭐⭐⭐
+**예상 효과**: twitter **-2 to -3%** | **난이도**: 낮음
+
+- [ ] push() 내 `!!` 이중 부정 + 조건부 XOR 제거
+- [ ] CMOV 체인으로 sep 계산 완전 브랜치리스화:
+  ```cpp
+  uint64_t in_obj  = (obj_bits_      & mask) != 0;  // 0 or 1
+  uint64_t is_key  = (kv_key_bits_   & mask) != 0;
+  uint64_t has_el  = (has_elem_bits_ & mask) != 0;
+  uint64_t is_val  = in_obj & ~is_key;
+  uint8_t  sep     = (uint8_t)((is_val << 1) | (~is_val & has_el));
+  kv_key_bits_ ^= (in_obj ? mask : 0ULL);  // 여전히 CMOV 가능
+  has_elem_bits_ |= mask;
+  ```
+- [ ] ctest 81개 PASS
+- [ ] bench_all twitter 개선 확인 (profiler로 push() 시간 비교)
+
+---
+
+### Phase 50 — Stage 1 구조적 문자 사전 인덱싱 ⭐⭐⭐⭐⭐
+**예상 효과**: twitter **-15 to -20%**, citm **-10%** | **난이도**: 높음
+
+이것이 현존하는 최대 단일 최적화 기회. simdjson의 두 단계 파싱 방식을
+Beast 테이프 구조에 통합.
+
+- [ ] `Stage1Scanner` 클래스 설계:
+  - AVX-512 64B 청크 스캔
+  - 이스케이프 전파 알고리즘 (홀수 backslash 연속 처리)
+  - 구조적 문자 위치 인덱스 배열 생성
+- [ ] 이스케이프 마스크 계산 구현 (simdjson odd-carry 기법):
+  ```cpp
+  uint64_t starts = bs_bits & ~(bs_bits << 1);
+  uint64_t even_starts = starts & EVEN_BITS;
+  uint64_t escaped = ((bs_bits + even_starts) ^ (bs_bits + (starts & ~EVEN_BITS))
+                      ^ bs_bits) >> 1;
+  uint64_t real_quotes = q_bits & ~escaped;
+  ```
+- [ ] Stage 2: Parser가 index[] 배열을 순회하며 TapeNode 생성
+- [ ] Stage 1/2 통합 (parse_reuse() 진입점)
+- [ ] ctest 81개 PASS (escape 처리 정확성 중요)
+- [ ] bench_all: twitter ≤220μs 기대
+
+**구현 전략**: Stage 2 구조부터 설계 (Stage 1 없이 현재 파서를 Stage 2처럼 동작하도록 리팩토링), 그 다음 Stage 1 인덱서 통합.
+
+---
+
+### Phase 51 — 64비트 TapeNode 단일 스토어 ⭐⭐⭐
+**예상 효과**: twitter **-2%** | **난이도**: 낮음
+
+- [ ] `push()` / `push_end()` 내 두 개의 32비트 스토어를 단일 64비트 스토어로:
+  ```cpp
+  uint64_t packed = ((uint64_t)meta_val << 32) | (uint64_t)offset_val;
+  *reinterpret_cast<uint64_t*>(tape_head_++) = packed;
+  ```
+- [ ] TapeArena 8바이트 정렬 보장 확인 (이미 확보되어 있을 가능성 높음)
+- [ ] NT 스토어(`_mm_stream_si64`) 검토 — 실측 후 적용 여부 결정
+- [ ] ctest 81개 PASS
+
+---
+
+### Phase 52 — 정수 파싱 SIMD 가속 ⭐⭐
+**예상 효과**: twitter **-1%**, canada **-2%** | **난이도**: 중간
+
+- [ ] `kActNumber` 내 8자리 정수 AVX 동시 파싱 설계:
+  ```
+  입력 "12345678" → _mm_maddubs_epi16 × 2 → 1234, 5678 → 12345678
+  ```
+- [ ] twitter 18자리 ID: 2× 8자리 SIMD + 스칼라 tail
+- [ ] 기존 SWAR-8 digit scanner와 성능 비교 (비선형 효과 주의)
+- [ ] ctest 81개 PASS
+
+---
+
+### Phase 53 — 신규 이론: 구조적 밀도 적응형 공백 스캐닝 ⭐⭐⭐
+**예상 효과**: 전 파일 **-3 to -5%** | **난이도**: 중간 | 🆕 신규
+
+- [ ] `ws_density_` (uint8_t) 필드 추가: 이전 skip_to_action() 호출의 EWMA 평균 공백 바이트
+- [ ] `skip_to_action()` 분기:
+  - `ws_density_ <= 8`: SWAR-32 (저밀도 공백, 현재 방식)
+  - `ws_density_ > 8`: AVX-512 64B (고밀도 공백, citm 최적)
+- [ ] EWMA 업데이트: `ws_density_ = (ws_density_ * 7 + skipped) >> 3`
+- [ ] Phase 37 회귀 재발 없음 확인 (저밀도 파일에서 SWAR-32 유지됨)
+- [ ] ctest 81개 PASS
+
+**이론적 근거**: Phase 37 AVX2 실패는 짧은 공백에서 SIMD 진입 비용이 이익보다 큼.
+적응형 방식은 EWMA로 현재 섹션의 공백 길이를 학습해 분기를 최소화.
+
+---
+
+### Phase 54 — 신규 이론: 스키마 예측 캐시 ⭐⭐⭐ (twitter 특화)
+**예상 효과**: twitter **-5 to -10%** | **난이도**: 높음 | 🆕 신규
+
+- [ ] `KeyCache` 구조체 설계: `key_len[32]`, `valid` 플래그, 뎁스별 카운터
+- [ ] 첫 번째 오브젝트 파싱 시 키 시퀀스 캐시 저장
+- [ ] `scan_key_colon_next()` 캐시 히트 경로:
+  ```
+  if (key_cache_.valid && memcmp(s, cached_str, expected_len) == 0 && s[expected_len] == '"')
+    → 스캔 생략, 캐시 길이 사용
+  else
+    → 일반 경로 + 캐시 무효화
+  ```
+- [ ] twitter.json에서 90%+ 히트율 목표
+- [ ] 모든 파일에서 회귀 없음 확인 (캐시 히트율 0%여도 overhead 최소화)
+- [ ] ctest 81개 PASS
+
+---
+
+### Phase 55 — 신규 이론: TapeNode 캐시라인 배치 NT 스토어 ⭐⭐
+**예상 효과**: twitter **-2 to -5%** | **난이도**: 중간 | 🆕 신규
+
+- [ ] `alignas(64) TapeNode tape_buf_[8]` + `tape_buf_idx_` 파서 필드 추가
+- [ ] `push_buffered()`: 8개 누적 후 `_mm512_stream_si512` 원자적 64B 기록
+- [ ] `flush_tape_buf()` + `_mm_sfence()`: parse() 종료 시 호출
+- [ ] TapeArena 64B 정렬 보장 (reserve() 수정)
+- [ ] ctest 81개 PASS, bench_all 실측 후 NT 스토어 효과 측정
+- [ ] 회귀 발생 시 일반 스토어 버전과 A/B 비교
+
+---
+
+## 예상 최종 성능 (Phase 44-55 전체 완료 시)
+
+| 파일 | Phase 43 | 최종 예상 | yyjson | Beast vs yyjson |
+|:---|---:|---:|---:|:---:|
+| twitter.json | 307 μs | **~168 μs** | 263 μs | **+36%** ✅ |
+| canada.json | 1,467 μs | **~1,350 μs** | 2,729 μs | **+50%** ✅ |
+| citm_catalog.json | 721 μs | **~460 μs** | 710 μs | **+35%** ✅ |
+| gsoc-2018.json | 693 μs | **~620 μs** | 1,451 μs | **+57%** ✅ |
 
 ---
 
@@ -162,23 +245,27 @@
 | Phase 28 | TapeNode 직접 메모리 생성 | -15μs |
 | Phase 29 | NEON whitespace scanner | -27μs |
 | Phase E | Pre-flagged separator (dump bit-stack 제거) | -29% serialize |
-| **Phase 31** | **Contextual SIMD Gate (NEON/SSE2 string scanner)** | **twitter -4.4%, gsoc -11.6%** |
-| **Phase 32** | **256-entry constexpr Action LUT dispatch** | BTB 개선 (flat on M1 thermals) |
-| **Phase 33** | **SWAR-8 inline float digit scanner** | **canada -6.4%** |
-| **Phase 34** | **AVX2 32B String Scanner (x86_64 only)** | x86_64 처리량 2배 (M1 inactive) |
-| **Phase 36** | **AVX2 Inline String Scan (kActString hot path)** | **twitter -4.5% (332→318μs)** |
-| Phase 40 | AVX2 상수 호이스팅 | ❌ 전 파일 +10-14% 회귀 → revert |
-| **Phase 41** | **skip_string_from32: mask==0 AVX2 fast path** | SWAR-8 게이트 생략 (≥32자 문자열) |
-| **AVX-512 fix** | **BEAST_HAS_AVX2 on AVX-512 machines** | **AVX2 코드 전체 활성화** |
-| **Phase 42** | **AVX-512 64B String Scanner in scan_string_end()** | **canada/citm/gsoc -9~13%** |
-| **Phase 43** | **AVX-512 64B Inline Scan (kActString + scan_key_colon_next)** | **전 파일 -9~13%, skip_string_from64 추가** |
+| Phase B1 | Fused val→sep→key scanner (str_done + number) | twitter -5% |
+| **Phase 31** | Contextual SIMD Gate (NEON/SSE2 string scanner) | twitter -4.4%, gsoc -11.6% |
+| **Phase 32** | 256-entry constexpr Action LUT dispatch | BTB 개선 |
+| **Phase 33** | SWAR-8 inline float digit scanner | canada -6.4% |
+| **Phase 34** | AVX2 32B String Scanner (x86_64 only) | 처리량 2배 |
+| **Phase 36** | AVX2 Inline String Scan (kActString hot path) | twitter -4.5% |
+| Phase 37 | AVX2 whitespace skip | ❌ +13% 회귀 → revert |
+| Phase 40 | AVX2 상수 호이스팅 | ❌ +10-14% 회귀 → revert |
+| **Phase 41** | skip_string_from32: mask==0 AVX2 fast path | SWAR-8 게이트 생략 |
+| **AVX-512 fix** | BEAST_HAS_AVX2 on AVX-512 machines | AVX2 전체 활성화 |
+| **Phase 42** | AVX-512 64B String Scanner (scan_string_end) | canada/citm/gsoc -9~13% |
+| **Phase 43** | AVX-512 64B Inline Scan + skip_string_from64 | 전 파일 -9~13% |
 
 ---
 
-## 주의 사항
+## 주의 사항 (불변 원칙)
 
-- 모든 변경은 `ctest --output-on-failure` 완전 통과 후 커밋
-- canada/gsoc 등 regression 발생 시 해당 Phase revert 후 아키텍처별 조건부 재검토
+- **모든 변경은 `ctest 81/81 PASS` 후 커밋** — 예외 없음
+- **SIMD 상수는 사용 지점에 인접 선언** — YMM/ZMM 호이스팅 금지 (Phase 40 교훈)
+- **회귀 즉시 revert** — 망설임 없이 되돌리고 원인 분석 선행
+- **Phase 46 공백 스킵**: citm -10% 미달 시 Phase 37처럼 즉시 revert
+- **Phase 50 통합 순서**: Stage 2 구조 설계 → Stage 1 인덱서 → 통합 (역순 금지)
 - **AVX-512 머신 빌드**: `-mavx2 -march=native` 필수 (`BEAST_HAS_AVX2` 활성화)
-- **YMM 레지스터 라이프타임**: SIMD 상수는 사용 지점에 인접 선언 (호이스팅 금지 — Phase 40 교훈)
-- 매 Phase는 별도 브랜치로 진행 → merge request
+- **매 Phase는 별도 브랜치로 진행** → PR 후 merge
