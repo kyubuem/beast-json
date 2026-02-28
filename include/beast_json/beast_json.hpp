@@ -104,6 +104,7 @@
 #include <emmintrin.h>
 #if defined(__AVX512F__)
 #define BEAST_HAS_AVX512 1
+#define BEAST_HAS_AVX2 1  // AVX-512 is a superset of AVX2; all ymm code active
 #include <immintrin.h>
 #elif defined(__AVX2__)
 #define BEAST_HAS_AVX2 1
@@ -5778,16 +5779,6 @@ public:
       return false;
     }
 
-#if BEAST_HAS_AVX2
-    // ── Phase 40: Hoist AVX2 string-scan constants outside the hot loop ─────
-    // kActString and scan_key_colon_next (inlined via [[gnu::flatten]]) both
-    // broadcast '"' and '\\'. Declaring them here once guarantees a single
-    // vpbroadcastb per constant, kept in YMM registers throughout the loop
-    // instead of re-broadcast on every string token (~50K times for twitter).
-    const __m256i h_vq  = _mm256_set1_epi8('"');
-    const __m256i h_vbs = _mm256_set1_epi8('\\');
-#endif
-
     while (p_ < end_) {
       // Phase 32: LUT dispatch — 11 ActionId cases vs 17 raw char cases.
       // kActionLut[c] maps every byte to an ActionId in one L1 cache access.
@@ -5869,11 +5860,12 @@ public:
         // twitter.json: 84% of strings ≤24 chars — major hot-path speedup.
         // mask==0 or backslash → goto str_slow directly (no SWAR-24 redundancy).
         if (BEAST_LIKELY(s + 32 <= end_)) {
-          // Phase 40: use loop-hoisted h_vq / h_vbs (no per-token vpbroadcastb)
+          const __m256i _vq  = _mm256_set1_epi8('"');
+          const __m256i _vbs = _mm256_set1_epi8('\\');
           __m256i _v = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(s));
           uint32_t _mask = static_cast<uint32_t>(_mm256_movemask_epi8(
-              _mm256_or_si256(_mm256_cmpeq_epi8(_v, h_vq),
-                              _mm256_cmpeq_epi8(_v, h_vbs))));
+              _mm256_or_si256(_mm256_cmpeq_epi8(_v, _vq),
+                              _mm256_cmpeq_epi8(_v, _vbs))));
           if (BEAST_LIKELY(_mask != 0)) {
             e = s + __builtin_ctz(_mask);
             if (BEAST_LIKELY(*e == '"')) {
