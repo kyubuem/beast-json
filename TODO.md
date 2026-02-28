@@ -42,6 +42,7 @@
 - [x] Phase 31의 SSE2 16B를 `#if BEAST_HAS_AVX2` 블록으로 AVX2 32B 업그레이드
 - [x] SSE2 16B는 tail fallback으로 유지
 - [x] Linux x86-64 환경 전용 (M1에서는 inactive 확인)
+- [ ] **[TODO]** 향후 다른 에이전트가 x86_64 리눅스 머신에서 실제 AVX2 가동 테스트 및 벤치마크를 수행하여 속도 향상을 검증해야 함.
 - [x] ctest 81개 PASS 확인
 - [x] bench_all 결과: M1은 영향 없음 (정상동작). x86_64 리눅스에서 최대 -15% 기대
 - [x] git commit `c5b6b73` → merge main
