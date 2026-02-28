@@ -5430,8 +5430,39 @@ class Parser {
         p += 16;
       }
     }
+#elif BEAST_HAS_AVX2
+    // x86_64 AVX2: 32B per iteration — doubles SSE2 throughput for citm/gsoc.
+    // Phase 34: added above SSE2 path. SSE2 runs as 16B tail below.
+    // aarch64 agents: this block is inactive on M1 builds (BEAST_HAS_AVX2
+    // unset). x86_64 agents: build with -mavx2 or -march=native to activate.
+    {
+      const __m256i vq = _mm256_set1_epi8('"');
+      const __m256i vbs = _mm256_set1_epi8('\\');
+      while (BEAST_LIKELY(p + 32 <= end_)) {
+        __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p));
+        uint32_t mask =
+            static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_or_si256(
+                _mm256_cmpeq_epi8(v, vq), _mm256_cmpeq_epi8(v, vbs))));
+        if (BEAST_UNLIKELY(mask))
+          return p + __builtin_ctz(mask);
+        p += 32;
+      }
+    }
+    // SSE2 16B tail (handles remaining <32B after AVX2 loop)
+    {
+      const __m128i vq = _mm_set1_epi8('"');
+      const __m128i vbs = _mm_set1_epi8('\\');
+      while (BEAST_LIKELY(p + 16 <= end_)) {
+        __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i *>(p));
+        int mask = _mm_movemask_epi8(
+            _mm_or_si128(_mm_cmpeq_epi8(v, vq), _mm_cmpeq_epi8(v, vbs)));
+        if (BEAST_UNLIKELY(mask))
+          return p + __builtin_ctz(mask);
+        p += 16;
+      }
+    }
 #elif defined(BEAST_ARCH_X86_64)
-    // x86_64 SECONDARY: SSE2 16B. _mm_movemask_epi8 gives 1 bit per byte.
+    // x86_64 SECONDARY (SSE2 only, no AVX2): 16B per iteration.
     {
       const __m128i vq = _mm_set1_epi8('"');
       const __m128i vbs = _mm_set1_epi8('\\');
