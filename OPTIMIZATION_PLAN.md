@@ -1,331 +1,244 @@
-# Beast JSON — twitter.json Performance Overtake Development Plan
+# Beast JSON — yyjson Domination Plan (Phase 31-35)
 
-> **Date**: 2026-02-27
-> **Current State**: beast::lazy 314μs vs yyjson 250μs (twitter.json benchmark)
-> **Goal**: Match or surpass yyjson on twitter.json
-
----
-
-## 1. Root Cause Diagnosis
-
-Precise bottleneck analysis based on measured data:
-
-| Characteristic | twitter.json | gsoc-2018.json | canada.json |
-|:---|:---:|:---:|:---:|
-| Whitespace ratio | **29.6%** (pretty-print) | 18.7% | 0% |
-| Median string length | 15 bytes | 19 bytes | 7 bytes |
-| Strings ≤16 bytes | **50.9%** | 29.9% | 75% |
-| Avg keys per object | **10.6** | 5.0 | 2.0 |
-| Avg nesting depth | 4.4 | 2.5 | 6.7 |
-| Token type diversity | strings+numbers+bool+null+`{[` | strings only | numbers only |
-
-**Key conclusion**: beast-json losing to yyjson is not due to a weak parser algorithm.
-twitter.json's pretty-print format and high token diversity cause **extremely frequent `skip_to_action()` calls — a structural problem**.
-
-- On gsoc-2018, canada, citm_catalog, beast::lazy dominates yyjson (3/4 wins)
-- twitter.json's 167KB of whitespace (29.6% of total) causes explosive repeated `skip_to_action()` calls
-- beast-json already has Stage1 bitmap infrastructure, but **it is not wired into the parse_reuse path** — the sole structural weakness
+> **Date**: 2026-02-28  
+> **Goal**: Dominate yyjson by **30%+ margin** (not just surpass — crush it)  
+> **Architectures**: aarch64 (NEON) PRIMARY · x86_64 (SSE2/AVX2) SECONDARY  
+> **Note**: Current dev machine is Apple M1 Pro (aarch64). Linux x86_64 agents should
+> validate Phase 34 (AVX2) and confirm no regressions on the Linux benchmark baseline.
 
 ---
 
-## 2. Overall Roadmap Summary
+## Current Gap vs Domination Target
 
-| Priority | Phase | Work | Expected Gain | Difficulty | Status |
-|:---:|:---:|:---|:---:|:---:|:---:|
-| 1 | A1 | Stage1 bitmap → parse_reuse integration | ~15-20% | High | ❌ Reverted — fill_bitmap() O(n) pre-scan costs more than it saves on 616KB file (regression observed) |
-| 2 | A2 | 32-byte SWAR quad-pump whitespace skip | ~5-8% | Low | ✅ Done (x86-64 `#else` branch) |
-| 3 | B1 | Value→Separator→Key 3-way fused scanner | ~5-7% | Medium | Pending |
-| 4 | B2 | ≤8-byte inline string embedded in tape | ~10% (lookup/serialize) | Medium | Pending |
-| 5 | C1 | next_sib-based multi-threaded split parsing | ~40%+ (multi-core) | Very High | Pending |
-| Aux | C2 | TLAB direct parsing (eliminate tape pre-allocation) | ~2-3% | Medium | Pending |
+| File | yyjson (M1) | Beast Now | **Target** | yyjson (Linux) | Beast Now |
+|:---|---:|---:|---:|---:|---:|
+| twitter.json | 176 μs | 276 μs | **< 120 μs** | 267 μs | 340 μs |
+| canada.json | 1,426 μs | 2,021 μs | **< 950 μs** | 2,552 μs | 2,052 μs ✅ |
+| citm_catalog.json | 465 μs | 643 μs | **< 320 μs** | 668 μs | 741 μs |
+| gsoc-2018.json | 978 μs | 715 μs ✅ | **< 500 μs** | 1,685 μs | 1,079 μs ✅ |
 
 ---
 
-## 3. Phase A — Immediate Impact (Bitmap-Based Redesign)
+## Root Cause Analysis
 
-### A1. Integrate Stage1 Bitmap into parse_reuse Hot Path
-
-**Goal**: Reduce `skip_to_action()` calls to zero when processing twitter.json's 167KB of whitespace.
-
-**Current structural problem**:
-
-```
-Current beast-json has two completely separate paths:
-
-beast::lazy (parse_reuse → Phase 19 Parser)
-  → byte-by-byte scanning
-  → repeated skip_to_action() calls
-  → loop overhead for every 29.6% whitespace byte
-
-Stage1 fill_bitmap (separate path)
-  → indexes all structural positions in 64-byte blocks at once
-  → tracks string interiors with SWAR prefix-XOR
-  → collects structural character positions into a bitmap
-  → currently NOT used by parse_reuse
-```
-
-**Target structure**:
-
-```
-Current: token → skip_ws → switch → token → skip_ws → switch (repeated)
-
-Target:  [pre-scan: fill_bitmap → generate positions array]
-          → [walk positions array: switch only, no skip_ws]
-```
-
-**Implementation steps**:
-
-1. From `fill_bitmap()` output, generate compressed position array `uint32_t positions[]`
-2. Modify Phase 19 Parser to iterate over positions array instead of raw bytes
-3. Remove `skip_to_action()` call path (positions array already skips whitespace)
-4. Allocate positions array from stack or TLAB (no heap allocation)
-
-**Expected effect**: Eliminate `skip_to_action()` calls for twitter.json → **~15-20% speedup**
+| Cause | Affected Files | Estimated Loss |
+|:---|:---|:---:|
+| `scan_string_end()`: SWAR only, SSE2/NEON unused | twitter, citm | ~40 μs |
+| `switch(c)` 17-case dispatch: BTB misses | all | ~15 μs |
+| Float fractional-part scalar loop | canada | ~400 μs |
+| Single-threaded only | all | theoretical ceiling |
 
 ---
 
-### A2. 32-byte SWAR Quad-Pump Whitespace Skip (No SIMD)
+## Phase 31 — Contextual SIMD Gate String Scanner
 
-**Goal**: 4x throughput improvement in whitespace processing on fallback paths, before and after A1.
+**File**: `include/beast_json/beast_json.hpp` — `scan_string_end()` (L5293) and `scan_key_colon_next()` (L5357)
 
-**Current code (8 bytes at a time)**:
+### Theory: Contextual SIMD Gate
+
+Phase 30 was reverted because NEON had startup overhead on short strings.
+**Fix**: Run an 8B SWAR gate first — short strings exit immediately (zero SIMD cost).
+Only when the string is confirmed > 8 chars do we enter the SIMD loop.
+
+```
+[Stage 1: 8B SWAR]  →  quote/backslash found → return immediately  (≤8B: 36% of twitter strings)
+         │ not found (string confirmed > 8 chars)
+         ↓
+  #if BEAST_HAS_NEON (aarch64, PRIMARY)  → vld1q_u8        16B loop
+  #elif BEAST_HAS_SSE2 (x86_64)         → _mm_loadu_si128  16B loop
+  #else                                  → SWAR-8 loop (existing)
+```
+
+### aarch64 — NEON 16B (PRIMARY)
 
 ```cpp
-// Current (8 bytes at a time)
-while (p_ + 8 <= end_) {
-    uint64_t am = swar_action_mask(load64(p_));
-    if (am) { p_ += CTZ(am) >> 3; return *p_; }
+// #if BEAST_HAS_NEON block, placed after Stage 1 SWAR gate
+const uint8x16_t vq  = vdupq_n_u8('"');
+const uint8x16_t vbs = vdupq_n_u8('\\');
+while (p + 16 <= end_) {
+  uint8x16_t v = vld1q_u8(reinterpret_cast<const uint8_t*>(p));
+  uint8x16_t m = vorrq_u8(vceqq_u8(v, vq), vceqq_u8(v, vbs));
+  if (vmaxvq_u32(vreinterpretq_u32_u8(m)) != 0) {
+    while (*p != '"' && *p != '\\') ++p;
+    return p;
+  }
+  p += 16;
+}
+```
+
+### x86_64 — SSE2 16B
+
+```cpp
+// #elif BEAST_HAS_SSE2 block
+const __m128i vq  = _mm_set1_epi8('"');
+const __m128i vbs = _mm_set1_epi8('\\');
+while (p + 16 <= end_) {
+  __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
+  int mask  = _mm_movemask_epi8(
+                _mm_or_si128(_mm_cmpeq_epi8(v, vq), _mm_cmpeq_epi8(v, vbs)));
+  if (mask) return p + __builtin_ctz(mask);
+  p += 16;
+}
+```
+
+**Expected gain**: twitter **−20%** (276→220 μs), citm **−15%** — both architectures
+
+---
+
+## Phase 32 — 256-Entry constexpr Action LUT
+
+**File**: `include/beast_json/beast_json.hpp` — `parse()` hot loop (L5492)
+
+Current `switch(c)` has 17 cases → strains Branch Target Buffer on both M1 and x86_64.
+
+```cpp
+// Add in namespace lazy, before the Parser class
+enum ActionId : uint8_t {
+  kActNone=0, kActString, kActNumber, kActObjOpen, kActArrOpen,
+  kActClose, kActColon, kActComma, kActTrue, kActFalse, kActNull
+};
+static constexpr uint8_t kActionLut[256] = []() consteval {
+  uint8_t t[256] = {};
+  t[static_cast<uint8_t>('"')] = kActString;
+  for (uint8_t c : {'-','0','1','2','3','4','5','6','7','8','9'})
+    t[c] = kActNumber;
+  t[static_cast<uint8_t>('{')] = kActObjOpen;
+  t[static_cast<uint8_t>('[')] = kActArrOpen;
+  t[static_cast<uint8_t>('}')] = kActClose;
+  t[static_cast<uint8_t>(']')] = kActClose;
+  t[static_cast<uint8_t>(':')] = kActColon;
+  t[static_cast<uint8_t>(',')] = kActComma;
+  t[static_cast<uint8_t>('t')] = kActTrue;
+  t[static_cast<uint8_t>('f')] = kActFalse;
+  t[static_cast<uint8_t>('n')] = kActNull;
+  return t;
+}();
+
+// In parse(): switch(kActionLut[static_cast<uint8_t>(c)])  // 11 cases instead of 17
+```
+
+256 bytes = 4 L1 cache lines. Architecture-agnostic pure C++.  
+**Expected gain**: all files **−8%**
+
+---
+
+## Phase 33 — SWAR Float Scanner
+
+**File**: `include/beast_json/beast_json.hpp` — number case in `parse()` (L5760)
+
+canada.json has 2.32M floats; the fractional-part digit loop is a pure scalar bottleneck.
+
+```cpp
+// Replace: while (*p_ >= '0' && *p_ <= '9') ++p_;
+// With: same SWAR-8 digit scanner already used for the integer part
+
+auto swar_skip_digits = [&]() BEAST_INLINE {
+  while (p_ + 8 <= end_) {
+    uint64_t v; std::memcpy(&v, p_, 8);
+    uint64_t s  = v - 0x3030303030303030ULL;
+    uint64_t nd = (s | ((s & 0x7F7F7F7F7F7F7F7FULL) + 0x7676767676767676ULL))
+                  & 0x8080808080808080ULL;
+    if (nd) { p_ += BEAST_CTZ(nd) >> 3; return; }
     p_ += 8;
-}
+  }
+  while (p_ < end_ && static_cast<unsigned>(*p_ - '0') < 10u) ++p_;
+};
+// Apply to fractional part (after '.') AND exponent part (after 'e'/'E' sign)
 ```
 
-**Target code (32 bytes, SWAR 4-pump)**:
+Architecture-agnostic (pure SWAR).  
+**Expected gain**: canada **−20%** (2,021→1,600 μs)
+
+---
+
+## Phase 34 — AVX2 32B String Scanner (x86_64 only)
+
+**File**: `include/beast_json/beast_json.hpp` — upgrade Phase 31 SSE2 block
+
+aarch64 NEON is 128-bit (16B). 32B would require SVE (not available on M1).  
+x86_64 with Haswell+ supports AVX2 (256-bit = 32B).
 
 ```cpp
-// Target (32 bytes at a time, SWAR 4-pump)
-while (p_ + 32 <= end_) {
-    uint64_t a0 = swar_action_mask(load64(p_));
-    uint64_t a1 = swar_action_mask(load64(p_ + 8));
-    uint64_t a2 = swar_action_mask(load64(p_ + 16));
-    uint64_t a3 = swar_action_mask(load64(p_ + 24));
-    if (a0 | a1 | a2 | a3) {
-        // Find exact position of first hit
-        if (a0) { p_ += CTZ(a0) >> 3; return *p_; }
-        if (a1) { p_ += 8 + (CTZ(a1) >> 3); return *p_; }
-        if (a2) { p_ += 16 + (CTZ(a2) >> 3); return *p_; }
-        p_ += 24 + (CTZ(a3) >> 3); return *p_;
-    }
-    p_ += 32;
+// Placed ABOVE the SSE2 block: #if BEAST_HAS_AVX2
+const __m256i vq  = _mm256_set1_epi8('"');
+const __m256i vbs = _mm256_set1_epi8('\\');
+while (p + 32 <= end_) {
+  __m256i v     = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p));
+  uint32_t mask = static_cast<uint32_t>(_mm256_movemask_epi8(
+                    _mm256_or_si256(_mm256_cmpeq_epi8(v, vq),
+                                    _mm256_cmpeq_epi8(v, vbs))));
+  if (mask) return p + __builtin_ctz(mask);
+  p += 32;
 }
-// Existing 8-byte fallback...
+// then SSE2 16B tail
 ```
 
-**Implementation notes**:
-- OR-merge with `a0|a1|a2|a3` → check 32 bytes with a single branch
-- Modern CPU out-of-order execution pipelines four `load64` calls in parallel
-- Works on both x86-64 and ARM64 without SIMD
+> **aarch64 agents**: this block is `#if BEAST_HAS_AVX2` — no impact on M1 builds.  
+> **x86_64 agents**: validate with `cmake -DCMAKE_CXX_FLAGS="-mavx2"` on Linux.
 
-**Expected effect**: 4x throughput for pretty-print JSON whitespace → **~5-8% speedup** on twitter.json
+**Expected gain (x86_64 only)**: citm/gsoc **additional −15%**
 
 ---
 
-## 4. Phase B — Medium Impact (Fused Scanner Extensions)
+## Phase 35 — Multi-Threaded Parallel Parsing (Domination Move)
 
-### B1. Value→Separator→Key 3-Way Fused Scanner
-
-**Goal**: Eliminate repeated function call overhead for twitter.json objects with 10.6 key-value pairs each.
-
-**Current path**:
+**Theory: Depth-Bounded Parallel Tape**
 
 ```
-[parse string]
-  → [double-pump: consume ,]
-  → [skip_to_action]
-  → [check for "]
-  → [scan_key_colon_next]
-  (→ repeat for next pair)
+Input JSON:                        Processing:
+{                                  main thread  → push ObjectStart
+  "key1": { ... large subtree },   Thread 0     → TapeArena_0 (lock-free)
+  "key2": [ ... large subtree ],   Thread 1     → TapeArena_1 (lock-free)
+  "key3": { ... large subtree }    Thread 2     → TapeArena_2 (lock-free)
+}                                  main thread  → merge + push ObjectEnd
+
+Steps:
+  1. Pre-scan:  SIMD pass collects depth=1 key offsets → O(n/16)
+  2. Partition: divide work among N threads by key count
+  3. Parse:     each thread writes to its own TapeArena, no locks
+  4. Merge:     main thread links tape pointers → O(N) negligible
 ```
 
-**Target path**:
+> [!IMPORTANT]
+> Phase 35 starts ONLY after Phase 31-34 are complete and verified.
+> Pre-scan correctness is a hard prerequisite.
 
-```
-[parse string]
-  → [fused_val_sep_key: detect , immediately → scan key → consume :]
-  → complete in a single function
-```
-
-**Implementation key**:
-- Extend `scan_key_colon_next()` to also handle the preceding value's closing delimiter (`,` or `}`)
-- twitter.json: 10.6 pairs/object × reduced function calls = significant reduction in iteration overhead
-- Consolidate and eliminate duplicate `skip_to_action()` call paths
-
-**Expected effect**: Eliminate intra-object traversal function calls on twitter.json → **~5-7% speedup**
+**Expected gain**: 4-core → theoretical 4× → realistic **2–3×**  
+twitter < 120 μs, canada < 950 μs — **30–40% ahead of yyjson**
 
 ---
 
-### B2. ≤8-byte Inline String Embedded Directly in Tape
+## Branch Strategy
 
-**Goal**: Eliminate cache misses for the 38.7% of twitter.json strings that are ≤8 bytes.
-
-**Current TapeNode structure**:
-
-```cpp
-struct TapeNode {
-    TapeNodeType type;   // 1 byte
-    uint8_t flags;       // 1 byte
-    uint16_t length;     // 2 bytes
-    uint32_t offset;     // 4 bytes  ← pointer into original JSON (cache miss source)
-    uint32_t next_sib;   // 4 bytes
-    uint32_t aux;        // 4 bytes  ← currently unused
-};  // 16 bytes total
-```
-
-**Target structure (add inline-string mode)**:
-
-```cpp
-// Flag bit definition
-constexpr uint8_t INLINE_STR = 0x01;
-
-// For strings ≤8 bytes: copy content directly into next_sib(4) + aux(4) = 8 bytes
-// At parse time:
-if (node.length <= 8) {
-    node.flags |= INLINE_STR;
-    memcpy(&node.next_sib, src_ptr, node.length);
-    // offset is 0 (unused)
-}
-
-// At lookup time:
-inline std::string_view get_string_sv() const {
-    if (flags & INLINE_STR) {
-        return std::string_view(
-            reinterpret_cast<const char*>(&next_sib), length);
-    }
-    return std::string_view(base_ptr + offset, length);
-}
-```
-
-**Implementation notes**:
-- `memcpy` of 8 bytes at parse time → compiler optimizes to a single `STR` instruction
-- `find()` and `get_string()` calls resolve entirely from tape without accessing original JSON memory (no cache miss)
-- Serialization (dump) path benefits from the same cache miss reduction
-
-**Expected effect**: Fewer cache misses on simple key-value lookups and serialization → **~10% improvement**
+| Phase | Branch | Priority |
+|:---|:---|:---:|
+| 31 | `feature/phase31-simd-string-gate` | ★★★★★ |
+| 32 | `feature/phase32-action-lut` | ★★★★ |
+| 33 | `feature/phase33-swar-float` | ★★★★ |
+| 34 | `feature/phase34-avx2-string` | ★★★ |
+| 35 | `feature/phase35-parallel-parse` | ★★★★★ |
 
 ---
 
-## 5. Phase C — Unique Innovations (Industry-Novel Techniques)
+## Verification Checklist (run after every Phase)
 
-### C1. Speculative Parallel Parsing via next_sib Links
+```bash
+# Build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DBEAST_JSON_BUILD_TESTS=ON -DBEAST_JSON_BUILD_BENCHMARKS=ON
+cmake --build build -j$(sysctl -n hw.ncpu)        # or nproc on Linux
 
-**Goal**: Leverage beast-json's unique next_sib link structure for multi-threaded split parsing.
+# 1. All 81 tests must PASS
+ctest --test-dir build --output-on-failure
 
-**Principle**:
+# 2. No regression vs previous Phase
+cd build/benchmarks && ./bench_all --all --iter 50
 
-```
-{                    ← next_sib links allow instant access to parsed positions
-  "key1": <subtree1> ← Thread 1 handles
-  "key2": <subtree2> ← Thread 2 handles
-  "key3": <subtree3> ← Thread 3 handles
-}
-```
-
-**Prerequisites**:
-- Phase A1 Stage1 bitmap pre-scan completed → top-level object key positions known in advance
-- TLAB supports independent per-thread allocation → minimal merge overhead
-
-**Implementation steps**:
-1. Extract depth=1 key position list from Stage1 bitmap (O(n) pre-scan)
-2. Partition work among threads based on key count
-3. Each thread parses its subtree in an independent TLAB
-4. Main thread merges results via next_sib links
-
-**Expected effect**: Multi-core utilization → **~40%+ speedup** (4-core baseline)
-
----
-
-### C2. TLAB Direct Parsing (Fully Eliminate Tape Pre-allocation)
-
-**Goal**: Remove malloc/realloc decision logic and bounds checking in `parse_reuse`.
-
-**Current**:
-```
-parse_reuse → check tape.base size → realloc if insufficient
-             → set tape_head_ → check arena->head bounds
+# 3. Commit
+git add include/beast_json/beast_json.hpp
+git commit -m "phase3X: ..."
 ```
 
-**Target**:
-```
-Direct TLAB write → tape_head_++ → operates entirely within arena
-                  → no bounds check (TLAB pre-sized larger than JSON)
-```
-
-**Implementation notes**:
-- Pre-reserve TLAB based on `json.size() * 2` (twitter.json: ~1.2MB)
-- `tape_head_` operates directly as a pointer within TLAB
-- Remove realloc path code → fewer branches
-
-**Expected effect**: Eliminate parse initialization overhead → **~2-3% speedup**
-
----
-
-## 6. Implementation Order and Milestones
-
-```
-Week 1: Phase A2 (32-byte SWAR quad-pump)
-  → Low difficulty, immediate 5-8% improvement on twitter.json
-  → Compatible with existing NEON fallback
-
-Week 2-3: Phase A1 (Stage1 bitmap → parse_reuse integration)
-  → Core structural change, requires thorough testing
-  → Upon completion: 15-20% additional improvement on twitter.json
-  → Must maintain all 81 existing tests passing
-
-Week 4: Phase B1 (3-way fused scanner)
-  → Maximize synergy after A1 completion
-  → Extend scan_key_colon_next()
-
-Week 5-6: Phase B2 (inline string tape embedding)
-  → TapeNode layout change → review backward compatibility
-  → Update find() / get_string() / dump() throughout
-
-Week 7+: Phase C1 (multi-threaded split parsing)
-  → Requires A1 completion as prerequisite
-  → Design → prototype → thread safety verification
-```
-
----
-
-## 7. Testing and Verification Criteria
-
-### Regression Prevention
-- All changes must pass `ctest --output-on-failure` (81 tests)
-- No performance regression on canada.json, citm_catalog.json, gsoc-2018.json
-
-### Performance Targets
-
-| Milestone | twitter.json Target | Baseline |
-|:---|:---:|:---|
-| A2 complete | ≤300μs | Current 314μs |
-| A1 complete | ≤265μs | Approaching yyjson 250μs |
-| A1+B1 complete | ≤250μs | Equal to yyjson |
-| A1+B1+B2 complete | ≤230μs | Surpasses yyjson |
-| C1 complete (4-core) | ≤150μs | Dominates yyjson |
-
-### Benchmark Environment
-- Current: Linux x86-64, GCC 13.3.0 `-O3`, 300 iterations
-- After A1: ARM64 NEON path measured separately
-- After C1: Per-core scaling measurements added
-
----
-
-## 8. Key Message
-
-> **Implementing A1 alone is likely sufficient to match or surpass yyjson on twitter.json.**
-
-beast-json already has three unique strengths: bitmap infrastructure, TLAB, and next_sib links.
-The sole structural weakness is that these strengths are not yet wired into the parse_reuse hot path.
-
-Once connected:
-- **Short-term (A complete)**: Surpass yyjson on twitter.json
-- **Mid-term (B complete)**: Dominate yyjson across all benchmarks
-- **Long-term (C complete)**: Achieve world's fastest JSON parser on multi-core
+> [!CAUTION]
+> If canada/gsoc/citm show regression, revert the Phase and re-examine
+> arch-specific conditional compilation before re-attempting.

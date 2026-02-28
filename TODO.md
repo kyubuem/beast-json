@@ -9,7 +9,7 @@
 
 ## 압도 플랜 Phase 31-35
 
-📄 **전체 플랜 문서**: [PHASE31_35_PLAN.md](./PHASE31_35_PLAN.md)
+📄 **Full Plan**: [OPTIMIZATION_PLAN.md](./OPTIMIZATION_PLAN.md)
 
 ---
 
