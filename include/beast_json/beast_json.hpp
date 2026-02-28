@@ -5216,6 +5216,58 @@ static BEAST_INLINE uint16_t neon_movemask(uint8x16_t mask) noexcept {
 #endif // BEAST_HAS_NEON
 
 // ─────────────────────────────────────────────────────────────
+// Phase 32: 256-Entry constexpr Action LUT
+//
+// Replaces the 17-case switch(c) in parse() with an 11-entry
+// switch(kActionLut[c]). Fewer cases → better Branch Target Buffer
+// utilisation on both M1 (aarch64) and x86_64 out-of-order cores.
+// The 256-byte table fits in 4 L1 cache lines and is hoisted to a
+// register by the compiler after the first access.
+// Architecture-agnostic pure C++ — no SIMD required.
+// ─────────────────────────────────────────────────────────────
+
+enum ActionId : uint8_t {
+  kActNone = 0, // whitespace or unknown — should not reach switch
+  kActString = 1,
+  kActNumber = 2,
+  kActObjOpen = 3,
+  kActArrOpen = 4,
+  kActClose = 5, // '}' or ']'
+  kActColon = 6,
+  kActComma = 7,
+  kActTrue = 8,
+  kActFalse = 9,
+  kActNull = 10,
+};
+
+static constexpr auto kActionLut = []() consteval {
+  std::array<uint8_t, 256> t{}; // zero-initialised: kActNone (0)
+  t[static_cast<uint8_t>('"')] = kActString;
+  t[static_cast<uint8_t>('-')] = kActNumber;
+  // digits '0'..'9'
+  t[static_cast<uint8_t>('0')] = kActNumber;
+  t[static_cast<uint8_t>('1')] = kActNumber;
+  t[static_cast<uint8_t>('2')] = kActNumber;
+  t[static_cast<uint8_t>('3')] = kActNumber;
+  t[static_cast<uint8_t>('4')] = kActNumber;
+  t[static_cast<uint8_t>('5')] = kActNumber;
+  t[static_cast<uint8_t>('6')] = kActNumber;
+  t[static_cast<uint8_t>('7')] = kActNumber;
+  t[static_cast<uint8_t>('8')] = kActNumber;
+  t[static_cast<uint8_t>('9')] = kActNumber;
+  t[static_cast<uint8_t>('{')] = kActObjOpen;
+  t[static_cast<uint8_t>('[')] = kActArrOpen;
+  t[static_cast<uint8_t>('}')] = kActClose;
+  t[static_cast<uint8_t>(']')] = kActClose;
+  t[static_cast<uint8_t>(':')] = kActColon;
+  t[static_cast<uint8_t>(',')] = kActComma;
+  t[static_cast<uint8_t>('t')] = kActTrue;
+  t[static_cast<uint8_t>('f')] = kActFalse;
+  t[static_cast<uint8_t>('n')] = kActNull;
+  return t;
+}();
+
+// ─────────────────────────────────────────────────────────────
 // Parser — Phase 19 hot loop
 // ─────────────────────────────────────────────────────────────
 
@@ -5615,9 +5667,11 @@ public:
     }
 
     while (p_ < end_) {
-      switch (static_cast<unsigned char>(c)) {
+      // Phase 32: LUT dispatch — 11 ActionId cases vs 17 raw char cases.
+      // kActionLut[c] maps every byte to an ActionId in one L1 cache access.
+      switch (static_cast<ActionId>(kActionLut[static_cast<uint8_t>(c)])) {
 
-      case '{': {
+      case kActObjOpen: {
         push(TapeNodeType::ObjectStart, 0, static_cast<uint32_t>(p_ - data_));
         // Phase E: setup new depth's presep state.
         // Depths 1..kPresepDepth: use 64-bit bit-stacks (depth_mask_).
@@ -5643,7 +5697,7 @@ public:
         }
         break;
       }
-      case '[': {
+      case kActArrOpen: {
         push(TapeNodeType::ArrayStart, 0, static_cast<uint32_t>(p_ - data_));
         if (BEAST_LIKELY(depth_ < kPresepDepth)) {
           const uint64_t nm = depth_mask_ ? depth_mask_ << 1 : uint64_t(1);
@@ -5665,8 +5719,7 @@ public:
         }
         break;
       }
-      case '}':
-      case ']': {
+      case kActClose: {
         if (BEAST_UNLIKELY(depth_ == 0))
           goto fail;
         --depth_;
@@ -5682,7 +5735,7 @@ public:
         ++p_;
         break;
       }
-      case '"': {
+      case kActString: {
         const char *s = p_ + 1, *e;
         constexpr uint64_t K = 0x0101010101010101ULL;
         constexpr uint64_t H = 0x8080808080808080ULL;
@@ -5832,14 +5885,14 @@ public:
         }
         break;
       }
-      case 't':
+      case kActTrue:
         if (BEAST_LIKELY(p_ + 4 <= end_ && !std::memcmp(p_, "true", 4))) {
           push(TapeNodeType::BooleanTrue, 4, static_cast<uint32_t>(p_ - data_));
           p_ += 4;
         } else
           goto fail;
         break;
-      case 'f':
+      case kActFalse:
         if (BEAST_LIKELY(p_ + 5 <= end_ && !std::memcmp(p_, "false", 5))) {
           push(TapeNodeType::BooleanFalse, 5,
                static_cast<uint32_t>(p_ - data_));
@@ -5847,29 +5900,19 @@ public:
         } else
           goto fail;
         break;
-      case 'n':
+      case kActNull:
         if (BEAST_LIKELY(p_ + 4 <= end_ && !std::memcmp(p_, "null", 4))) {
           push(TapeNodeType::Null, 4, static_cast<uint32_t>(p_ - data_));
           p_ += 4;
         } else
           goto fail;
         break;
-      case ':':
-      case ',':
+      case kActColon:
+      case kActComma:
         ++p_;
         break;
       // Numbers: SWAR-8 digit scanner
-      case '-':
-      case '0':
-      case '1':
-      case '2':
-      case '3':
-      case '4':
-      case '5':
-      case '6':
-      case '7':
-      case '8':
-      case '9': {
+      case kActNumber: {
         const char *s = p_;
         if (*p_ == '-')
           ++p_;
