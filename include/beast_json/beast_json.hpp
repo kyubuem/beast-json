@@ -6177,7 +6177,7 @@ public:
           p_ += 4;
         } else
           goto fail;
-        break;
+        goto bool_null_done;
       case kActFalse:
         if (BEAST_LIKELY(p_ + 5 <= end_ && !std::memcmp(p_, "false", 5))) {
           push(TapeNodeType::BooleanFalse, 5,
@@ -6185,13 +6185,72 @@ public:
           p_ += 5;
         } else
           goto fail;
-        break;
+        goto bool_null_done;
       case kActNull:
         if (BEAST_LIKELY(p_ + 4 <= end_ && !std::memcmp(p_, "null", 4))) {
           push(TapeNodeType::Null, 4, static_cast<uint32_t>(p_ - data_));
           p_ += 4;
         } else
           goto fail;
+      bool_null_done:
+        // ── Phase 44: Double-pump bool/null with fused key scanner ──────
+        // true/false/null are values; always followed by ',', ']', or '}'.
+        // Mirrors the Phase B1 number fusion: avoid re-entering switch top,
+        // and in object context fuse the next key scan after ','.
+        if (BEAST_LIKELY(p_ < end_)) {
+          unsigned char nc = static_cast<unsigned char>(*p_);
+          if (nc <= 0x20) {
+            c = skip_to_action();
+            if (BEAST_UNLIKELY(p_ >= end_))
+              goto done;
+            nc = static_cast<unsigned char>(c);
+          }
+          if (BEAST_LIKELY(nc == ',')) {
+            ++p_;
+            if (BEAST_LIKELY(depth_ > 0 && depth_ <= 64 &&
+                             (obj_bits_ >> (depth_ - 1)) & 1)) {
+              if (BEAST_LIKELY(p_ < end_)) {
+                unsigned char fc = static_cast<unsigned char>(*p_);
+                if (fc <= 0x20) {
+                  fc = static_cast<unsigned char>(skip_to_action());
+                  if (BEAST_UNLIKELY(p_ >= end_))
+                    goto done;
+                }
+                if (BEAST_LIKELY(fc == '"')) {
+                  char vc = scan_key_colon_next(p_ + 1, nullptr);
+                  if (BEAST_UNLIKELY(vc == 0))
+                    goto fail;
+                  if (BEAST_UNLIKELY(p_ >= end_))
+                    goto done;
+                  c = vc;
+                  continue;
+                }
+                c = static_cast<char>(fc);
+                continue;
+              }
+              goto done;
+            }
+            c = skip_to_action();
+            if (BEAST_UNLIKELY(p_ >= end_))
+              goto done;
+            continue;
+          }
+          if (BEAST_LIKELY(nc == ']' || nc == '}')) {
+            if (BEAST_UNLIKELY(depth_ == 0))
+              goto fail;
+            --depth_;
+            if (BEAST_LIKELY(depth_ < kPresepDepth))
+              depth_mask_ >>= 1;
+            push_end(nc == '}' ? TapeNodeType::ObjectEnd
+                               : TapeNodeType::ArrayEnd,
+                     static_cast<uint32_t>(p_ - data_));
+            ++p_;
+            c = skip_to_action();
+            if (BEAST_UNLIKELY(p_ >= end_))
+              goto done;
+            continue;
+          }
+        }
         break;
       case kActColon:
       case kActComma:

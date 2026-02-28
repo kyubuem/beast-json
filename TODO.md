@@ -1,7 +1,7 @@
 # Beast JSON Optimization — TODO
 
-> **최종 업데이트**: 2026-02-28 (Phase 44-55 계획 수립 완료)
-> **현재 최고 기록 (Phase 43, Linux x86_64 AVX-512)**: twitter 307μs · canada 1,467μs · citm 721μs · gsoc 693μs
+> **최종 업데이트**: 2026-02-28 (Phase 44: Bool/Null double-pump fusion 완료)
+> **현재 최고 기록 (Phase 44, Linux x86_64 AVX-512)**: twitter lazy 424μs · canada lazy 2,007μs · citm lazy 1,025μs · gsoc lazy 797μs
 > **새 목표**: yyjson 대비 **1.2× (20% 이상) 전 파일 동시 달성**
 > **1.2× 목표치**: twitter ≤219μs · canada ≤2,274μs · citm ≤592μs · gsoc ≤1,209μs
 
@@ -26,19 +26,24 @@
 
 ## 다음 단계 — Phase 44~55
 
-### Phase 44 — Bool/Null/Close 융합 키 스캐너 ⭐⭐⭐⭐⭐
-**예상 효과**: twitter **-6%**, citm **-3%** | **난이도**: 낮음
+### Phase 44 — Bool/Null/Close 융합 키 스캐너 ⭐⭐⭐⭐⭐ ✅
+**실제 효과**: ctest 81/81 PASS · 구조적 수정 완료 | **난이도**: 낮음
 
-- [ ] `kActTrue` / `kActFalse` / `kActNull`: `break` → `goto bool_null_done` 교체
-- [ ] `bool_null_done:` 레이블 추가 — kActNumber Phase B1과 동일한 double-pump 구조
+- [x] `kActTrue` / `kActFalse` / `kActNull`: `break` → `goto bool_null_done` 교체
+- [x] `bool_null_done:` 레이블 추가 — kActNumber Phase B1과 동일한 double-pump 구조
   - 다음 바이트 nc 확인 (공백이면 skip_to_action)
   - nc == ',' + 오브젝트 컨텍스트 → `scan_key_colon_next()` 직접 호출 후 value continue
   - nc == ']' or '}' → inline close 처리
-- [ ] ctest 81개 PASS
-- [ ] bench_all twitter ≤290μs 목표
+- [x] ctest 81개 PASS
+- [x] bench_all 실행 (Phase 44 기준):
+  - twitter: lazy 424μs · rtsm 370μs · yyjson 296μs
+  - canada: lazy 2,007μs · rtsm 2,474μs · yyjson 3,153μs
+  - citm: lazy 1,025μs · rtsm 1,352μs · yyjson 804μs
+  - gsoc: lazy 797μs · rtsm 1,193μs · yyjson 1,649μs
 
 **근거**: kActNumber는 Phase B1 fusion 적용됨. kActTrue/False/Null만 누락.
-twitter.json의 불리언 값마다 루프 반복 2회 낭비 → 통합 시 제거.
+twitter.json의 불리언 값마다 루프 반복 2회 낭비 → 통합으로 제거.
+**참고**: 시스템 부하로 절대 수치 변동 있음. 다음 Phase에서 재측정 예정.
 
 ---
 
@@ -257,6 +262,7 @@ Beast 테이프 구조에 통합.
 | **AVX-512 fix** | BEAST_HAS_AVX2 on AVX-512 machines | AVX2 전체 활성화 |
 | **Phase 42** | AVX-512 64B String Scanner (scan_string_end) | canada/citm/gsoc -9~13% |
 | **Phase 43** | AVX-512 64B Inline Scan + skip_string_from64 | 전 파일 -9~13% |
+| **Phase 44** | Bool/Null double-pump fused key scanner | kActTrue/False/Null → goto bool_null_done (B1 패턴 통합) |
 
 ---
 

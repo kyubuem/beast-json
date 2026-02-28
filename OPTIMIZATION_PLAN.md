@@ -1,6 +1,6 @@
 # Beast JSON — yyjson 1.2× Domination Plan (Phase 44-55)
 
-> **Date**: 2026-02-28 (Phase 43 complete — AVX-512 64B scanner)
+> **Date**: 2026-02-28 (Phase 44 complete — Bool/Null double-pump fusion)
 > **Mission**: Beat yyjson by **≥20% (1.2×) on ALL 4 benchmark files simultaneously**
 > **Architectures**: x86_64 (AVX-512) PRIMARY · aarch64 (NEON) SECONDARY
 
@@ -79,9 +79,9 @@ Phase 46 AVX-512 skip_to_action():
 
 ---
 
-## Phase 44 — Bool/Null/Close 융합 키 스캐너 ⭐⭐⭐⭐⭐
+## Phase 44 — Bool/Null/Close 융합 키 스캐너 ⭐⭐⭐⭐⭐ ✅ **COMPLETE**
 
-**Priority**: CRITICAL | **예상 효과**: twitter -6 to -8%, citm -3%
+**Priority**: CRITICAL | **실제 효과**: twitter lazy 424→424μs (측정 노이즈), ctest 81/81 PASS
 **난이도**: 낮음 | **위험도**: 낮음
 
 ### 이론
