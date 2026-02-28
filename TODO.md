@@ -15,7 +15,7 @@
 
 ## 할 일 목록
 
-### Phase 31 — Contextual SIMD Gate String Scanner ⭐⭐⭐⭐⭐
+### Phase 31 — Contextual SIMD Gate String Scanner ⭐⭐⭐⭐⭐ 🔄
 - [ ] `scan_string_end()` Stage1: 8B SWAR gate 추가 (short string early exit)
 - [ ] `scan_string_end()` Stage2: `#if BEAST_HAS_SSE2` → `_mm_loadu_si128` 16B loop
 - [ ] `scan_string_end()` Stage2: `#elif BEAST_HAS_NEON` → `vld1q_u8` 16B loop
