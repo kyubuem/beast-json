@@ -1,7 +1,7 @@
 # Beast JSON Optimization — TODO
 
-> **최종 업데이트**: 2026-02-28 (Phase 44: Bool/Null double-pump fusion 완료)
-> **현재 최고 기록 (Phase 44, Linux x86_64 AVX-512)**: twitter lazy 424μs · canada lazy 2,007μs · citm lazy 1,025μs · gsoc lazy 797μs
+> **최종 업데이트**: 2026-02-28 (Phase 45: scan_key_colon_next SWAR-24 dead path 제거)
+> **현재 최고 기록 (Phase 45, Linux x86_64 AVX-512)**: twitter lazy 400μs · canada lazy 2,008μs · citm lazy 950μs · gsoc lazy 814μs
 > **새 목표**: yyjson 대비 **1.2× (20% 이상) 전 파일 동시 달성**
 > **1.2× 목표치**: twitter ≤219μs · canada ≤2,274μs · citm ≤592μs · gsoc ≤1,209μs
 
@@ -47,14 +47,19 @@ twitter.json의 불리언 값마다 루프 반복 2회 낭비 → 통합으로 �
 
 ---
 
-### Phase 45 — scan_key_colon_next SWAR-24 Dead Path 제거 ⭐⭐⭐
-**예상 효과**: twitter **-1.5%** (I-cache) | **난이도**: 낮음
+### Phase 45 — scan_key_colon_next SWAR-24 Dead Path 제거 ⭐⭐⭐ ✅
+**실제 효과**: twitter lazy **-5.9%** (424→400μs), citm lazy **-7.3%** (1,025→950μs) | **난이도**: 낮음
 
-- [ ] `scan_key_colon_next()` 내 SWAR-24 블록 분석:
-  도달 조건: `s + 64 > end_` AND `s + 32 > end_` → 617KB 파일에서 마지막 32B 이내 키
-- [ ] SWAR-24 제거 → near-end 케이스는 `goto skn_slow` (scan_string_end)로 직행
-- [ ] 함수 크기 축소 → L1 I-cache 효율 향상
-- [ ] ctest 81개 PASS, regression 없음 확인
+- [x] `scan_key_colon_next()` 내 SWAR-24 블록 분석:
+  도달 조건: `s + 64 > end_` AND `s + 32 > end_` → AVX-512 머신에서 마지막 31B 이내 키만 해당 (실질 dead code)
+- [x] AVX2+ 경로 끝에 `goto skn_slow;` 추가, SWAR-24는 `#else` 블록으로 이동 (비-AVX2 전용)
+- [x] 함수 크기 축소 → L1 I-cache 효율 향상 (예상 -1.5% → 실제 -5.9%/-7.3% 훨씬 초과)
+- [x] ctest 81개 PASS
+- [x] bench_all 실행 (Phase 45 기준):
+  - twitter: lazy 400μs · rtsm 361μs · yyjson 282μs
+  - canada: lazy 2,008μs · rtsm 2,531μs · yyjson 3,284μs
+  - citm: lazy 950μs · rtsm 1,220μs · yyjson 900μs
+  - gsoc: lazy 814μs · rtsm 1,115μs · yyjson 1,675μs
 
 ---
 
@@ -263,6 +268,7 @@ Beast 테이프 구조에 통합.
 | **Phase 42** | AVX-512 64B String Scanner (scan_string_end) | canada/citm/gsoc -9~13% |
 | **Phase 43** | AVX-512 64B Inline Scan + skip_string_from64 | 전 파일 -9~13% |
 | **Phase 44** | Bool/Null double-pump fused key scanner | kActTrue/False/Null → goto bool_null_done (B1 패턴 통합) |
+| **Phase 45** | scan_key_colon_next SWAR-24 dead path 제거 | AVX2+ → goto skn_slow, SWAR-24는 #else 블록 격리 · twitter -5.9%, citm -7.3% |
 
 ---
 

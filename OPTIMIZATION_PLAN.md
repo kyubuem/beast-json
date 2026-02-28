@@ -163,9 +163,9 @@ ctest --test-dir build --output-on-failure  # 81/81 PASS
 
 ---
 
-## Phase 45 — scan_key_colon_next SWAR-24 Dead Path 제거 ⭐⭐⭐
+## Phase 45 — scan_key_colon_next SWAR-24 Dead Path 제거 ⭐⭐⭐ ✅ **COMPLETE**
 
-**Priority**: MEDIUM | **예상 효과**: twitter -1.5% (I-cache), 코드 크기 감소
+**Priority**: MEDIUM | **실제 효과**: twitter lazy **-5.9%** (424→400μs), citm lazy **-7.3%** (1,025→950μs)
 **난이도**: 낮음 | **위험도**: 낮음
 
 ### 이론
@@ -735,7 +735,7 @@ class Parser {
 
 ```
 Phase 44: bool/null double-pump fusion   → twitter -6%, citm -3%
-Phase 45: SWAR-24 dead code 제거         → twitter -1.5%
+Phase 45: SWAR-24 dead code 제거         → twitter -5.9%, citm -7.3% ✅
 Phase 48: PGO 빌드                       → 전 파일 -7%
 Phase 50: 입력 프리페치                  → 전 파일 -4%
 ```

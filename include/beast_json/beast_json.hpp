@@ -5734,9 +5734,13 @@ class Parser {
         return 0;
       goto skn_found;
     }
-    // near end of buffer: fall through to SWAR-24
-#endif
-    // SWAR cascaded fast path (≤24-byte key, no backslash).
+    // ── Phase 45: near end of buffer on AVX2+ → skn_slow directly ──────────
+    // SWAR-24 is dead code on AVX2/AVX-512 machines (only reached for keys
+    // within the last 31B of input, i.e. essentially never on real files).
+    // Removing it shrinks the function → better L1 I-cache utilization.
+    goto skn_slow;
+#else
+    // ── SWAR-24 (non-AVX2 machines only) ────────────────────────────────────
     // Phase D2: load v0 first; exit immediately for ≤8-char keys (most common
     // twitter.json keys: "id", "text", "user", "lang" etc.) before loading
     // v1/v2.
@@ -5776,6 +5780,7 @@ class Parser {
       }
       // Backslash found → fall through to full scan
     }
+#endif // BEAST_HAS_AVX2
   skn_slow:
     e = skip_string(s);
     if (BEAST_UNLIKELY(e >= end_ || *e != '"'))
