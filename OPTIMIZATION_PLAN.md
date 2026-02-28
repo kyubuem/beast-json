@@ -1,41 +1,53 @@
-# Beast JSON — yyjson Domination Plan (Phase 31-35)
+# Beast JSON — yyjson Domination Plan (Phase 31-45)
 
-> **Date**: 2026-02-28 (Phase 36 complete)
-> **Goal**: Dominate yyjson by **30%+ margin** (not just surpass — crush it)  
-> **Architectures**: aarch64 (NEON) PRIMARY · x86_64 (SSE2/AVX2) SECONDARY  
-> **Note**: Current dev machine is Apple M1 Pro (aarch64). Linux x86_64 agents should
-> validate Phase 34 (AVX2) and confirm no regressions on the Linux benchmark baseline.
+> **Date**: 2026-02-28 (Phase 41 + AVX-512 fix complete)
+> **Goal**: Dominate yyjson by **30%+ margin** (not just surpass — crush it)
+> **Architectures**: aarch64 (NEON) PRIMARY · x86_64 (SSE2/AVX2/AVX-512) SECONDARY
+> **Current dev env**: Linux x86_64 with AVX-512 (GCC 13.3.0, -O3 -mavx2 -march=native)
 
 ---
 
 ## Current Gap vs Domination Target
 
-| File | yyjson (M1) | Beast Phase 33 | **Target** | yyjson (Linux) | Beast (Linux) |
-|:---|---:|---:|---:|---:|---:|
-| twitter.json | 178 μs | 264 μs | **< 120 μs** | 267 μs | ~340 μs |
-| canada.json | 1,456 μs | 1,891 μs | **< 950 μs** | 2,552 μs | ~2,052 μs ✅ |
-| citm_catalog.json | 474 μs | 646 μs | **< 320 μs** | 668 μs | ~741 μs |
-| gsoc-2018.json | 982 μs | **632 μs ✅** | **< 500 μs ✅** | 1,685 μs | ~1,079 μs ✅ |
+### Linux x86_64 (AVX-512, Phase 41, 150 iter)
+
+| File | Beast | yyjson | Beast vs yyjson | Target |
+|:---|---:|---:|:---:|:---:|
+| twitter.json | 351 μs | 311 μs | yyjson 13% faster | **Beat yyjson** |
+| canada.json | **1,677 μs** | 2,998 μs | **Beast +44%** | ✅ Dominating |
+| citm_catalog.json | **797 μs** | 795 μs | **Tied** | ✅ |
+| gsoc-2018.json | **761 μs** (4.27 GB/s) | 1,752 μs | **Beast +57%** | ✅ Dominating |
+
+### M1 Pro (NEON, Phase 34, separate machine)
+
+| File | Beast | yyjson | Gap |
+|:---|---:|---:|:---:|
+| twitter.json | 264 μs | 178 μs | yyjson 33% faster |
+| canada.json | 1,891 μs | 1,456 μs | yyjson 23% faster |
+| citm_catalog.json | 646 μs | 474 μs | yyjson 27% faster |
+| gsoc-2018.json | **632 μs** | 982 μs | **Beast +36%** ✅ |
+
+**twitter.json is the sole remaining target** on x86_64.
 
 ---
 
-## Root Cause Analysis
+## Root Cause Analysis (Remaining)
 
 | Cause | Affected Files | Estimated Loss |
 |:---|:---|:---:|
-| `scan_string_end()`: SWAR only, SSE2/NEON unused | twitter, citm | ~40 μs |
-| `switch(c)` 17-case dispatch: BTB misses | all | ~15 μs |
-| Float fractional-part scalar loop | canada | ~400 μs |
-| Single-threaded only | all | theoretical ceiling |
+| twitter: many short strings — scan overhead per token | twitter | ~40 μs |
+| AVX2 only covers 32B one-shot; 33-63 char strings hit str_slow | twitter, citm | ~15 μs |
+| No AVX-512 native path (64B/iter in scan_string_end) | all long-string files | ~10% |
+| Branch mispredictions in parse() dispatch (unknown) | twitter | TBD via perf |
 
 ---
 
 ## Phase 31 — Contextual SIMD Gate String Scanner ✅ DONE
 
-**Commit**: `a60e265` → merged to main  
+**Commit**: `a60e265` → merged to main
 **Actual results (M1 Pro, 100 iter)**: twitter **-4.4%** (276→264 μs), gsoc **-11.6%** (715→632 μs)
 
-**File**: `include/beast_json/beast_json.hpp` — `scan_string_end()` (L5293) and `scan_key_colon_next()` (L5357)
+**File**: `include/beast_json/beast_json.hpp` — `scan_string_end()` and `scan_key_colon_next()`
 
 ### Theory: Contextual SIMD Gate
 
@@ -48,115 +60,16 @@ Only when the string is confirmed > 8 chars do we enter the SIMD loop.
          │ not found (string confirmed > 8 chars)
          ↓
   #if BEAST_HAS_NEON (aarch64, PRIMARY)  → vld1q_u8        16B loop
+  #elif BEAST_HAS_AVX2 (x86_64)         → _mm256_loadu_si256  32B loop  (Phase 34)
   #elif BEAST_HAS_SSE2 (x86_64)         → _mm_loadu_si128  16B loop
   #else                                  → SWAR-8 loop (existing)
 ```
-
-### aarch64 — NEON 16B (PRIMARY)
-
-```cpp
-// #if BEAST_HAS_NEON block, placed after Stage 1 SWAR gate
-const uint8x16_t vq  = vdupq_n_u8('"');
-const uint8x16_t vbs = vdupq_n_u8('\\');
-while (p + 16 <= end_) {
-  uint8x16_t v = vld1q_u8(reinterpret_cast<const uint8_t*>(p));
-  uint8x16_t m = vorrq_u8(vceqq_u8(v, vq), vceqq_u8(v, vbs));
-  if (vmaxvq_u32(vreinterpretq_u32_u8(m)) != 0) {
-    while (*p != '"' && *p != '\\') ++p;
-    return p;
-  }
-  p += 16;
-}
-```
-
-### x86_64 — SSE2 16B
-
-```cpp
-// #elif BEAST_HAS_SSE2 block
-const __m128i vq  = _mm_set1_epi8('"');
-const __m128i vbs = _mm_set1_epi8('\\');
-while (p + 16 <= end_) {
-  __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
-  int mask  = _mm_movemask_epi8(
-                _mm_or_si128(_mm_cmpeq_epi8(v, vq), _mm_cmpeq_epi8(v, vbs)));
-  if (mask) return p + __builtin_ctz(mask);
-  p += 16;
-}
-```
-
-**Expected gain**: twitter **−20%** (276→220 μs), citm **−15%** — both architectures
-
----
-
-## Phase 32 — 256-Entry constexpr Action LUT
-
-**File**: `include/beast_json/beast_json.hpp` — `parse()` hot loop (L5492)
-
-Current `switch(c)` has 17 cases → strains Branch Target Buffer on both M1 and x86_64.
-
-```cpp
-// Add in namespace lazy, before the Parser class
-enum ActionId : uint8_t {
-  kActNone=0, kActString, kActNumber, kActObjOpen, kActArrOpen,
-  kActClose, kActColon, kActComma, kActTrue, kActFalse, kActNull
-};
-static constexpr uint8_t kActionLut[256] = []() consteval {
-  uint8_t t[256] = {};
-  t[static_cast<uint8_t>('"')] = kActString;
-  for (uint8_t c : {'-','0','1','2','3','4','5','6','7','8','9'})
-    t[c] = kActNumber;
-  t[static_cast<uint8_t>('{')] = kActObjOpen;
-  t[static_cast<uint8_t>('[')] = kActArrOpen;
-  t[static_cast<uint8_t>('}')] = kActClose;
-  t[static_cast<uint8_t>(']')] = kActClose;
-  t[static_cast<uint8_t>(':')] = kActColon;
-  t[static_cast<uint8_t>(',')] = kActComma;
-  t[static_cast<uint8_t>('t')] = kActTrue;
-  t[static_cast<uint8_t>('f')] = kActFalse;
-  t[static_cast<uint8_t>('n')] = kActNull;
-  return t;
-}();
-
-// In parse(): switch(kActionLut[static_cast<uint8_t>(c)])  // 11 cases instead of 17
-```
-
-256 bytes = 4 L1 cache lines. Architecture-agnostic pure C++.  
-**Expected gain**: all files **−8%**
-
----
-
-## Phase 33 — SWAR Float Scanner
-
-**File**: `include/beast_json/beast_json.hpp` — number case in `parse()` (L5760)
-
-canada.json has 2.32M floats; the fractional-part digit loop is a pure scalar bottleneck.
-
-```cpp
-// Replace: while (*p_ >= '0' && *p_ <= '9') ++p_;
-// With: same SWAR-8 digit scanner already used for the integer part
-
-auto swar_skip_digits = [&]() BEAST_INLINE {
-  while (p_ + 8 <= end_) {
-    uint64_t v; std::memcpy(&v, p_, 8);
-    uint64_t s  = v - 0x3030303030303030ULL;
-    uint64_t nd = (s | ((s & 0x7F7F7F7F7F7F7F7FULL) + 0x7676767676767676ULL))
-                  & 0x8080808080808080ULL;
-    if (nd) { p_ += BEAST_CTZ(nd) >> 3; return; }
-    p_ += 8;
-  }
-  while (p_ < end_ && static_cast<unsigned>(*p_ - '0') < 10u) ++p_;
-};
-// Apply to fractional part (after '.') AND exponent part (after 'e'/'E' sign)
-```
-
-Architecture-agnostic (pure SWAR).  
-**Expected gain**: canada **−20%** (2,021→1,600 μs)
 
 ---
 
 ## Phase 32 — 256-Entry constexpr Action LUT ✅ DONE
 
-**Commit**: `d2581d4` → merged to main  
+**Commit**: `d2581d4` → merged to main
 **Note**: Replaced `switch(c)` 17 char-literal cases with `switch(kActionLut[c])` 11 ActionId cases.
 Used `std::array<uint8_t,256>` with `consteval` lambda (Apple Clang 17 compatible).
 **Actual results**: flat (BTB improvement masked by thermal variability on M1).
@@ -165,9 +78,9 @@ Used `std::array<uint8_t,256>` with `consteval` lambda (Apple Clang 17 compatibl
 
 ## Phase 33 — SWAR-8 Float Digit Scanner ✅ DONE
 
-**Commit**: `39ca6d9` → merged to main  
+**Commit**: `39ca6d9` → merged to main
 **Note**: Lambda approach caused regression (no inlining guarantee). Replaced with
-`BEAST_SWAR_SKIP_DIGITS()` inline macro for zero call overhead.  
+`BEAST_SWAR_SKIP_DIGITS()` inline macro for zero call overhead.
 **Actual results (M1 Pro, 50 iter)**: canada **-6.4%** (2,021→1,891 μs)
 
 ---
@@ -176,16 +89,6 @@ Used `std::array<uint8_t,256>` with `consteval` lambda (Apple Clang 17 compatibl
 
 **Commit**: `c5b6b73` → merged to main
 **Note**: Added `#elif BEAST_HAS_AVX2` block in `scan_string_end()` using `_mm256_loadu_si256` and `_mm256_movemask_epi8` for 32 bytes/iter.
-aarch64 NEON is 128-bit (16B). 32B would require SVE (not available on M1).
-x86_64 with Haswell+ supports AVX2 (256-bit = 32B).
-
-**x86_64 Validation (Linux, GCC 13.3.0, -O3 -flto -mavx2, 50 iter, yyjson SIMD enabled)**: ctest 81/81 PASS.
-| File | Beast | yyjson (+SIMD) | Beast vs yyjson |
-|:---|---:|---:|:---:|
-| twitter.json | 332 μs | 284 μs | yyjson 15% faster |
-| canada.json | **1,519 μs** | 2,695 μs | **Beast 44% faster** |
-| citm_catalog.json | 734 μs | 723 μs | **Tied** (1.5%) |
-| gsoc-2018.json | **750 μs** (4.44 GB/s) | 1,675 μs | **Beast 55% faster** |
 
 ```cpp
 // Placed ABOVE the SSE2 block: #if BEAST_HAS_AVX2
@@ -202,72 +105,228 @@ while (p + 32 <= end_) {
 // then SSE2 16B tail
 ```
 
-> **aarch64 agents**: this block is `#if BEAST_HAS_AVX2` — no impact on M1 builds.  
-> **x86_64 agents**: validate with `cmake -DCMAKE_CXX_FLAGS="-mavx2"` on Linux.
+**x86_64 Validation (Linux, GCC 13.3.0, -O3 -flto -mavx2, 50 iter, yyjson SIMD enabled)**:
 
-**Expected gain (x86_64 only)**: citm/gsoc **additional −15%**
+| File | Beast | yyjson (+SIMD) | Beast vs yyjson |
+|:---|---:|---:|:---:|
+| twitter.json | 332 μs | 284 μs | yyjson 15% faster |
+| canada.json | **1,519 μs** | 2,695 μs | **Beast 44% faster** |
+| citm_catalog.json | 734 μs | 723 μs | **Tied** (1.5%) |
+| gsoc-2018.json | **750 μs** (4.44 GB/s) | 1,675 μs | **Beast 55% faster** |
 
 ---
 
 ## Phase 36 — AVX2 Inline String Scan (parse() hot path) ✅ DONE
 
-**Note**: Applied AVX2 32B one-shot string scan directly in the `kActString` case of `parse()` and in `scan_key_colon_next()`.
-The key fix vs the initial attempt: replaced `do { break }` escape pattern with `if (s+32<=end_) { ... goto str_slow; }` so that mask==0 (string ≥32 chars) and backslash cases jump directly to `str_slow`/`skn_slow`, bypassing the redundant SWAR-24 check entirely.
+**Note**: Applied AVX2 32B one-shot string scan directly in the `kActString` case of `parse()` and in `scan_key_colon_next()`. The key fix vs the initial attempt: replaced `do { break }` escape pattern with `if (s+32<=end_) { ... goto str_slow; }` so that mask==0 and backslash cases jump directly to `str_slow`/`skn_slow`, bypassing the redundant SWAR-24 check entirely.
 
 **Phase 37 attempt (AVX2 whitespace skip in skip_to_action) — REVERTED**:
-Replacing SWAR-32 with AVX2 XOR-flip trick caused +13% regression on citm, +4% on gsoc.
-Root cause: for typical JSON whitespace (0–8 bytes between tokens), SWAR-32's 4 parallel scalar operations are faster than the AVX2 XOR+CMPGT+MOVEMASK chain (higher latency, no port parallelism advantage for such short runs). Reverted to SWAR-32 for skip_to_action.
+Root cause: for typical JSON whitespace (0–8 bytes between tokens), SWAR-32's 4 parallel scalar operations are faster than the AVX2 XOR+CMPGT+MOVEMASK chain. Reverted.
 
-**x86_64 Results (Linux, GCC 13.3.0, -O3 -flto -mavx2, 100 iter, yyjson SIMD enabled)**: ctest 81/81 PASS.
-| File | Phase 34 | Phase 36 | Delta | yyjson (+SIMD) | Beast vs yyjson |
+**x86_64 Results (Linux, GCC 13.3.0, -O3 -flto -mavx2, 100 iter)**:
+
+| File | Phase 34 | Phase 36 | Delta | yyjson | Beast vs yyjson |
 |:---|---:|---:|:---:|---:|:---:|
 | twitter.json | 332 μs | **318 μs** | **−4.5%** | 271 μs | yyjson 15% faster |
 | canada.json | 1,519 μs | **1,501 μs** | −1.3% | 2,690 μs | **Beast 44% faster** |
-| citm_catalog.json | 734 μs | 755 μs | ±2% noise | 736 μs | **Tied** (2.5%) |
-| gsoc-2018.json | 750 μs | **747 μs** (4.46 GB/s) | −0.5% | 1,640 μs | **Beast 55% faster** |
-
-```cpp
-// In kActString (and scan_key_colon_next), before SWAR-24:
-#if BEAST_HAS_AVX2
-if (BEAST_LIKELY(s + 32 <= end_)) {
-  const __m256i _vq  = _mm256_set1_epi8('"');
-  const __m256i _vbs = _mm256_set1_epi8('\\');
-  __m256i _v = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(s));
-  uint32_t _mask = static_cast<uint32_t>(_mm256_movemask_epi8(
-      _mm256_or_si256(_mm256_cmpeq_epi8(_v, _vq),
-                      _mm256_cmpeq_epi8(_v, _vbs))));
-  if (BEAST_LIKELY(_mask != 0)) {
-    e = s + __builtin_ctz(_mask);
-    if (BEAST_LIKELY(*e == '"')) {
-      push(...); p_ = e + 1; goto str_done;
-    }
-    goto str_slow; // backslash first
-  }
-  goto str_slow;   // string >= 32 chars
-}
-// near end of buffer: fall through to SWAR-24
-#endif
-```
-
-> **aarch64 agents**: `#if BEAST_HAS_AVX2` — no impact on M1 builds.
+| citm_catalog.json | 734 μs | 755 μs | ±2% noise | 736 μs | **Tied** |
+| gsoc-2018.json | 750 μs | **747 μs** | −0.5% | 1,640 μs | **Beast 55% faster** |
 
 ---
 
 ## Phase 35 — Multi-Threaded Parallel Parsing ⏸️ HOLD
 
-**Commit**: Feature branch test only; rollback and aborted.
+**Conclusion**: Internal multi-threading at the single-document API layer is detrimental for ultra-fast JSON parsers (thread creation overhead >> parse time). Users should run multiple documents in separate threads. **Permanently on hold.**
 
-**Attempted Implementation**:
-- Pre-scan: `scan_toplevel_value_offsets()` to find top-level value boundaries.
-- Partition: Distributed string slices to N threads (using `std::thread`).
-- Parse: Each thread parsed independently into its own lock-free `DocumentView`.
-- Merge: Main thread used zero-copy `std::memcpy` concatenation of sub-tapes.
+---
 
-**Failure Analysis (Why it was rolled back)**:
-The total parsing time for target documents (e.g. `twitter.json`, `canada.json`) in single-thread highly-optimized C++ is measured in **hundreds of microseconds** (e.g., 260~1800 μs).
-The overhead of creating, scheduling, and joining `std::thread`s on the OS level is inherently in the millisecond regime, drastically overpowering the theoretical gains of splitting the work. 
+## Phase 40 — AVX2 Constant Hoisting ❌ REVERTED
 
-**Conclusion**: Internal multi-threading at the single-document API layer is detrimental for ultra-fast JSON parsers. It is architecturally sounder for the library user to process separate documents in parallel worker threads (which Beast JSON perfectly supports due to zero global state).
+**Commit**: `6ea3a41` (introduced) → `b1ed9ed` (reverted)
+
+### What Was Attempted
+Declare `h_vq`/`h_vbs` (`__m256i`) outside the `parse()` hot loop so the compiler emits a single `vpbroadcastb` per constant instead of re-broadcasting on every string token.
+
+### Why It Failed
+Keeping two `__m256i` values live throughout the entire `parse()` loop **permanently occupies 2 YMM registers** regardless of which `ActionId` case is executing. On x86_64 (16 YMM registers total), this caused register spills during number processing (canada), object/array handling (citm), and other non-string paths.
+
+| File | Phase 36 | Phase 40 | Regression |
+|:---|---:|---:|:---:|
+| twitter.json | 318 μs | 357 μs | **+12%** |
+| canada.json | 1,501 μs | 1,705 μs | **+14%** |
+| citm_catalog.json | 755 μs | 812 μs | **+8%** |
+| gsoc-2018.json | 747 μs | 824 μs | **+10%** |
+
+### Lesson Learned
+> **SIMD constants must be declared adjacent to their use site** to minimize register lifetime. `vpbroadcastb` costs only 1 cycle latency — re-broadcasting per call is essentially free compared to spill overhead.
+
+---
+
+## Phase 41 — skip_string_from32: mask==0 AVX2 Fast Path ✅ DONE
+
+**Commit**: `6ea3a41` (alongside Phase 40), cleaned up in `b1ed9ed`
+
+### What It Does
+When the AVX2 inline scan in `kActString` / `scan_key_colon_next` returns `mask==0` (meaning the first 32 bytes are confirmed quote/backslash-free), instead of falling through to `str_slow`/`skn_slow` (which would re-scan from `s` via `scan_string_end`'s SWAR-8 gate), call `skip_string_from32(s)` which starts the AVX2 loop directly at `s+32`.
+
+```cpp
+// skip_string_from32: starts AVX2 at s+32, skipping SWAR-8 gate
+BEAST_INLINE const char *skip_string_from32(const char *s) noexcept {
+  const char *p = s + 32;
+#if BEAST_HAS_AVX2
+  const __m256i vq  = _mm256_set1_epi8('"');
+  const __m256i vbs = _mm256_set1_epi8('\\');
+  while (BEAST_LIKELY(p + 32 <= end_)) {
+    __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p));
+    uint32_t mask = static_cast<uint32_t>(_mm256_movemask_epi8(
+        _mm256_or_si256(_mm256_cmpeq_epi8(v, vq), _mm256_cmpeq_epi8(v, vbs))));
+    if (BEAST_LIKELY(mask != 0)) {
+      p += __builtin_ctz(mask);
+      if (BEAST_LIKELY(*p == '"')) return p;
+      p += 2; // skip escape sequence
+      continue;
+    }
+    p += 32;
+  }
+  // SSE2 16B tail, then SWAR-8 scalar tail
+#endif
+  while (p < end_) { p = scan_string_end(p); ... }
+}
+```
+
+**Benefit**: Saves ~4 SWAR-8 iterations (32 bytes / 8 bytes per iteration) for strings ≥32 chars whose first 32 bytes are clean.
+
+---
+
+## AVX-512 Detection Bug Fix ✅ DONE
+
+**Commit**: `b1ed9ed`
+
+### Bug
+The SIMD detection chain used `#if ... #elif`:
+```cpp
+#if defined(__AVX512F__)
+#define BEAST_HAS_AVX512 1      // only this gets set
+#include <immintrin.h>
+#elif defined(__AVX2__)
+#define BEAST_HAS_AVX2 1        // NEVER reached on AVX-512 machines
+```
+
+On AVX-512 machines, `BEAST_HAS_AVX2` was never defined, so **all Phase 34/36/41 AVX2 code was dead**. The parser fell back to SSE2-only, which is ~2x slower for long strings.
+
+### Fix
+```cpp
+#if defined(__AVX512F__)
+#define BEAST_HAS_AVX512 1
+#define BEAST_HAS_AVX2 1  // AVX-512 ⊇ AVX2; all ymm code is valid
+#include <immintrin.h>
+#elif defined(__AVX2__)
+#define BEAST_HAS_AVX2 1
+```
+
+### Impact
+After the fix, objdump confirms `vpcmpeqb %ymm`, `vpor %ymm`, `vpmovmskb %ymm` instructions are emitted. Results on this AVX-512 machine (150 iter):
+
+| File | Before fix (SSE2 only) | After fix (AVX2 active) | yyjson | Beast vs yyjson |
+|:---|---:|---:|---:|:---:|
+| twitter.json | ~360 μs | **351 μs** | 311 μs | yyjson 13% faster |
+| canada.json | ~1,700 μs | **1,677 μs** | 2,998 μs | **Beast +44%** |
+| citm_catalog.json | ~810 μs | **797 μs** | 795 μs | **Tied** |
+| gsoc-2018.json | ~820 μs | **761 μs** | 1,752 μs | **Beast +57%** |
+
+---
+
+## Phase 42 — AVX-512 Native 64B String Scanner 🔜
+
+**File**: `include/beast_json/beast_json.hpp` — `scan_string_end()`
+
+### Theory
+AVX-512 `zmm` registers hold 512 bits = 64 bytes. `_mm512_cmpeq_epi8_mask` directly produces a `uint64_t` bitmask, eliminating the `vpor` step needed with AVX2. Place this block above the AVX2 32B block:
+
+```cpp
+#if BEAST_HAS_AVX512
+{
+  const __m512i vq512  = _mm512_set1_epi8('"');
+  const __m512i vbs512 = _mm512_set1_epi8('\\');
+  while (p + 64 <= end_) {
+    __m512i v = _mm512_loadu_si512(reinterpret_cast<const __m512i *>(p));
+    uint64_t mask = _mm512_cmpeq_epi8_mask(v, vq512)
+                  | _mm512_cmpeq_epi8_mask(v, vbs512);
+    if (mask) { p += __builtin_ctzll(mask); return p; }
+    p += 64;
+  }
+  // fall through to AVX2 32B for remaining <64B
+}
+#endif
+```
+
+**Expected gain**: gsoc/citm (long strings) **−10~15%** · twitter marginal (short strings already hit in 32B)
+
+---
+
+## Phase 43 — kActString Inline AVX-512 64B One-Shot Scan 🔜
+
+**File**: `include/beast_json/beast_json.hpp` — `kActString` case in `parse()`
+
+Extends Phase 36's inline 32B scan to 64B. Strings ≤63 chars handled in a single zmm load without calling any helper.
+
+```cpp
+#if BEAST_HAS_AVX512
+if (BEAST_LIKELY(s + 64 <= end_)) {
+  const __m512i _vq512  = _mm512_set1_epi8('"');
+  const __m512i _vbs512 = _mm512_set1_epi8('\\');
+  __m512i _v512 = _mm512_loadu_si512(reinterpret_cast<const __m512i *>(s));
+  uint64_t _mask512 = _mm512_cmpeq_epi8_mask(_v512, _vq512)
+                    | _mm512_cmpeq_epi8_mask(_v512, _vbs512);
+  if (BEAST_LIKELY(_mask512 != 0)) {
+    e = s + __builtin_ctzll(_mask512);
+    if (BEAST_LIKELY(*e == '"')) {
+      push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
+           static_cast<uint32_t>(s - data_));
+      p_ = e + 1;
+      goto str_done;
+    }
+    goto str_slow; // backslash first
+  }
+  // mask==0: bytes [s, s+64) clean → skip_string_from64(s) (future)
+  goto str_slow;
+}
+// fall through to AVX2 32B
+#elif BEAST_HAS_AVX2
+// ... existing Phase 36 code
+```
+
+**Expected gain**: citm (many long keys) **−5~10%** · twitter moderate
+
+---
+
+## Phase 44 — Twitter Bottleneck Profiling 🔜
+
+Use `perf stat` to quantify the exact source of the 13% yyjson advantage on twitter:
+
+```bash
+# Compare IPC, branch misses, cache misses
+perf stat -e cycles,instructions,branch-misses,L1-dcache-misses,LLC-misses \
+  ./bench_all twitter.json --iter 10
+
+# Identify hot functions
+perf record -g ./bench_all twitter.json --iter 50
+perf report --sort=dso,symbol
+```
+
+**Hypotheses to test**:
+1. Branch mispredictions in `parse()` dispatch (kActionLut switch)
+2. TapeNode push write bandwidth (many small strings = many tape writes)
+3. `scan_key_colon_next` called for every object key — overhead accumulation
+4. yyjson tape format difference (smaller per-node metadata?)
+
+---
+
+## Phase 45 — scan_key_colon_next SWAR-24 Cleanup 🔜
+
+`scan_key_colon_next` has a SWAR-24 fallthrough path that is redundant when AVX2/AVX-512 inline scan already covers the common case. Removing this dead path reduces function size → better I-cache utilization for the twitter hot path.
+
+---
 
 ## Branch Strategy
 
@@ -279,28 +338,40 @@ The overhead of creating, scheduling, and joining `std::thread`s on the OS level
 | 34 | `feature/phase34-avx2-string` | ✅ merged |
 | 35 | `feature/phase35-parallel-parse` | ⏸️ Hold (aborted) |
 | 36 | `claude/review-todos-optimize-kJcdz` | ✅ Done |
+| 40 | `claude/review-todos-optimize-kJcdz` | ❌ Reverted |
+| 41 | `claude/review-todos-optimize-kJcdz` | ✅ Done |
+| AVX-512 fix | `claude/review-todos-optimize-kJcdz` | ✅ Done |
+| 42 | `claude/review-todos-optimize-kJcdz` | 🔜 Next |
 
 ---
 
 ## Verification Checklist (run after every Phase)
 
 ```bash
-# Build
+# Build (AVX-512 machine — must include -mavx2 to activate BEAST_HAS_AVX2)
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-  -DBEAST_JSON_BUILD_TESTS=ON -DBEAST_JSON_BUILD_BENCHMARKS=ON
-cmake --build build -j$(sysctl -n hw.ncpu)        # or nproc on Linux
+  -DBEAST_JSON_BUILD_TESTS=ON -DBEAST_JSON_BUILD_BENCHMARKS=ON \
+  -DCMAKE_CXX_FLAGS="-O3 -mavx2 -march=native"
+cmake --build build -j$(nproc)
+
+# Verify AVX2/AVX-512 instructions are present
+objdump -d build/benchmarks/bench_all | grep "vpcmpeqb.*ymm\|vpmovmskb" | head -5
 
 # 1. All 81 tests must PASS
 ctest --test-dir build --output-on-failure
 
-# 2. No regression vs previous Phase
-cd build/benchmarks && ./bench_all --all --iter 50
+# 2. No regression vs previous Phase (run from build/benchmarks/)
+./bench_all --all --iter 100
 
 # 3. Commit
 git add include/beast_json/beast_json.hpp
-git commit -m "phase3X: ..."
+git commit -m "phaseXX: ..."
 ```
 
 > [!CAUTION]
-> If canada/gsoc/citm show regression, revert the Phase and re-examine
+> If any file shows regression, revert the Phase and re-examine
 > arch-specific conditional compilation before re-attempting.
+>
+> **Register pressure rule**: Never hoist `__m256i`/`__m512i` constants
+> outside the block that uses them — Phase 40 proved this causes universal
+> regression. SIMD constants belong adjacent to their use site.
