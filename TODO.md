@@ -1,9 +1,10 @@
 # Beast JSON Optimization — TODO
 
-> **최종 업데이트**: 2026-03-01 (Phase 53 완료)
-> **현재 최고 기록 (Phase 53 + PGO, Linux x86_64 AVX-512)**: twitter lazy **202μs** · canada lazy 1,448μs · citm lazy **757μs** · gsoc lazy 806μs
-> **새 목표**: yyjson 대비 **1.2× (20% 이상) 전 파일 동시 달성**
-> **1.2× 목표치**: twitter ≤219μs · canada ≤2,274μs · citm ≤592μs · gsoc ≤1,209μs
+> **최종 업데이트**: 2026-03-01 (Phase 53 완료, Phase 50-2 완료)
+> **현재 최고 기록 (Linux x86_64 AVX-512)**: twitter lazy **202μs** · canada lazy 1,448μs · citm lazy **757μs** · gsoc lazy 806μs
+> **현재 최고 기록 (macOS AArch64)**: twitter lazy **253μs** · canada lazy 1,839μs · citm lazy **643μs** · gsoc lazy 634μs
+> **새 목표 (x86_64 기준)**: yyjson 대비 **1.2× (20% 이상) 전 파일 동시 달성**
+> **1.2× 목표치 (x86_64)**: twitter ≤219μs · canada ≤2,274μs · citm ≤592μs · gsoc ≤1,209μs
 
 ---
 
@@ -163,6 +164,33 @@ simdjson 스타일 두 단계 파싱을 Beast 테이프 구조에 통합.
 
 ---
 
+### Phase 50-1 — NEON Single-Pass 스캐너 32B 언롤링 및 Branchless Pinpoint ⭐⭐⭐ ❌ (회귀, 취소)
+**실제 효과 (macOS AArch64)**: twitter **+8.8%** (328→357μs), citm **+30%** (645→839μs) 심각한 회귀 → **REVERT** | **난이도**: 높음
+
+- [x] AVX-512의 32B 루프 언롤링과 브랜치리스 비트 추출(`__builtin_ctzll`) 기법을 NEON에 이식 시도.
+- [x] `vgetq_lane_u64(_m, 0)` 추출 및 `CTZ`를 사용해 브랜치리스 스칼라 스캔 억제 알고리즘 구현.
+- [x] 실패 원인:
+  - AArch64 (Apple Silicon)는 데이타의 NEON 벡터 레지스터 ↔ GPR(일반 레지스터) 교차 이동(`vgetq_lane`)에 심각한 지연 페널티가 존재합니다.
+  - X86_64 환경에서는 회피 1순위인 `while (*p != '"')` 같은 스칼라 바이트 헌팅 루프가 AArch64에서는 오히려 브랜치 예측기에 의해 페널티 없이 압도적으로 빠르게 작동함이 증명되었습니다.
+- [x] **REVERTED** — 코드를 원래 상태로 되돌리고 원천적인 전략 전면 수정 (Phase 50-2로 이관).
+- ℹ️ 실패 기록: [OPTIMIZATION_FAILURES.md](./OPTIMIZATION_FAILURES.md) 참조
+
+---
+
+### Phase 50-2 — NEON 단일 경로 정밀 최적화 (Precision Refinements) ⭐⭐⭐⭐⭐ ✅
+**실제 효과 (macOS AArch64)**: twitter **-23%** (328→**253μs**), citm **+0%** (645→643μs) | **난이도**: 높음
+
+- [x] Phase 50-1(NEON 32B 언롤링 및 `vgetq_lane` 도입)의 +8~30% 회귀 원인 파악 및 롤백.
+- [x] `skip_to_action` 및 `scan_string_end`에서 GPR SWAR-8 (스칼라 전처리) 블록 완전 제거 (AArch64는 GPR-SIMD 혼용 시 레이턴시 발생, 순수 SIMD가 훨씬 빠름).
+- [x] `scan_string_end`에서 `vgetq_lane_u64` 추출 패턴을 제거하고 심플한 스칼라 `while` 루프로 구조 변경 (레지스터 전송 레이턴시 제거).
+- [x] ctest 81개 PASS
+- [x] bench_all (macOS M1 Pro, 150회):
+  - twitter: lazy **253μs** (이전 AArch64 최고 기록 328μs 대비 23% 단축)
+  - citm: lazy 643μs (이전 645μs 대비 유지)
+**핵심 교훈**: AArch64 (Apple Silicon)는 데이타의 GPR ↔ NEON 벡터 교차 이동을 심하게 페널티 줍니다. 그리고 스칼라 브랜치 예측 성능이 워낙 뛰어나서, SIMD 블록 이후의 미세 조정은 스칼라 `while` 루프로 맡기는 편이 비트 마스킹 방식보다 압도적으로 유리합니다.
+
+---
+
 ### Phase 51 — 64비트 TapeNode 단일 스토어 ⭐⭐⭐ ❌ (회귀, 취소)
 **실제 효과**: twitter **+11.7%**, citm **+14.4%** 심각한 회귀 → **REVERT** | **난이도**: 낮음
 
@@ -260,14 +288,14 @@ simdjson 스타일 두 단계 파싱을 Beast 테이프 구조에 통합.
 
 ---
 
-## 예상 최종 성능 (Phase 44-55 전체 완료 시)
+## 예상 최종 성능 (x86_64, Phase 44-55 전체 완료 시)
 
-| 파일 | Phase 43 | 최종 예상 | yyjson | Beast vs yyjson |
+| 파일 | Phase 53 현재 | 최종 예상 | yyjson | Beast vs yyjson |
 |:---|---:|---:|---:|:---:|
-| twitter.json | 307 μs | **~168 μs** | 263 μs | **+36%** ✅ |
-| canada.json | 1,467 μs | **~1,350 μs** | 2,729 μs | **+50%** ✅ |
-| citm_catalog.json | 721 μs | **~460 μs** | 710 μs | **+35%** ✅ |
-| gsoc-2018.json | 693 μs | **~620 μs** | 1,451 μs | **+57%** ✅ |
+| twitter.json | 202 μs | **~168 μs** | 248 μs | **+23%** 돌파 ✅ |
+| canada.json | 1,448 μs | **~1,350 μs** | 2,734 μs | **+89%** 돌파 ✅ |
+| citm_catalog.json | 757 μs | **~460 μs** | 736 μs | 아직 -2.8% ❌ |
+| gsoc-2018.json | 806 μs | **~620 μs** | 1,782 μs | **+121%** 돌파 ✅ |
 
 ---
 
@@ -296,8 +324,11 @@ simdjson 스타일 두 단계 파싱을 Beast 테이프 구조에 통합.
 | **Phase 45** | scan_key_colon_next SWAR-24 dead path 제거 | AVX2+ → goto skn_slow, SWAR-24는 #else 블록 격리 · twitter -5.9%, citm -7.3% |
 | **Phase 46** | AVX-512 64B 배치 공백 스킵 + SWAR-8 pre-gate | skip_to_action() — canada -21.2%, twitter -3.5%, citm -6.3%, gsoc -5.7% |
 | **Phase 47** | PGO 빌드 시스템 정비 | CMakeLists.txt GENERATE/USE 워크플로 문서화, canada -14.6% 추가 개선 |
-| **Phase 48** | 입력 선행 프리페치 + 테이프 쓰기 프리페치 | p_+192(read) & tape_head_+8(store) — twitter -5%, canada -10% (최선 측정치) |
+| Phase 48 | 입력 선행 프리페치 + 테이프 쓰기 프리페치 | p_+192(read) & tape_head_+8(store) — twitter -5%, canada -10% (최선 측정치) |
 | Phase 49 | 브랜치리스 push() 비트스택 (NEG+AND) | ❌ twitter +1.4%, citm +3.9% 회귀 → revert (컴파일러 CMOV이 이미 최적) |
+| **Phase 50** | Stage 1 구조적 문자 사전 인덱싱 | twitter -19.7%(PGO), yyjson 대비 1.8배/2.1배 우위 확보 |
+| Phase 50-1 | NEON 32B 언롤링 + 브랜치리스 Pinpoint | ❌ macOS AArch64 twitter +8.8%, citm +30% 회귀 → revert (vgetq_lane 페널티) |
+| **Phase 50-2** | NEON 정밀 최적화 (SWAR 제거 및 스칼라 폴백) | macOS AArch64 twitter **-23%** (253μs 달성) |
 | Phase 51 | 64비트 TapeNode 단일 스토어 (`__builtin_memcpy`) | ❌ twitter +11.7%, citm +14.4% 심각 회귀 → revert (컴파일러 Store Merging 방해) |
 | Phase 52 | AVX2 32B 디지트 스캐너 (kActNumber) | ❌ twitter +11.2%, citm +8.1% 회귀 → revert (YMM 레지스터 충돌, Phase 40 동일 패턴) |
 

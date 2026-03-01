@@ -19,6 +19,15 @@ Phase 43 결과를 기반으로 yyjson 1.2× 목표를 달성하기 위한 Phase
 | citm_catalog.json | 757 μs | 736 μs | yyjson 2.8% 빠름 | ≤592 μs | ⬜ |
 | gsoc-2018.json | **806 μs** | 1,782 μs | Beast **+121% 빠름** | ≤1,209 μs | ✅ |
 
+### 현재 성능 (Phase 50-2, macOS AArch64 M1 Pro, 150 iter)
+
+| 파일 | Beast | yyjson | Beast vs yyjson | 1.2× 목표 완료여부 |
+|:---|---:|---:|:---:|---:|
+| twitter.json | **253 μs** | 176 μs | yyjson 30% 빠름 | ❌ (대폭 단축 성공) |
+| canada.json | **1,839 μs** | 1,441 μs | yyjson 27% 빠름 | ❌ |
+| citm_catalog.json | **643 μs** | 474 μs | yyjson 35% 빠름 | ❌ |
+| gsoc-2018.json | **634 μs** | 990 μs | Beast **+56% 빠름** | ✅ |
+
 **남은 과제**: citm_catalog만 미달 (-21.6% 추가 필요)
 
 ### 누적 개선 (Phase 43 → Phase 53 + PGO)
@@ -767,8 +776,10 @@ Phase 51: 64비트 단일 TapeNode 스토어   → twitter -2%
 ### 장기 실행 (1-2주)
 
 ```
-Phase 50: Stage 1 구조적 문자 사전 인덱싱  → twitter -15 to -20%
-Phase 53: 적응형 공백 스캔                  → 전 파일 -3%
+Phase 50: Stage 1 구조적 문자 사전 인덱싱  → x86_64 twitter -19.7% ✅
+Phase 50-1: NEON 32B 언롤링 및 Branchless → ❌ 회귀 (AArch64 페널티 확인)
+Phase 50-2: NEON 정밀 최적화 (스칼라 폴백) → macOS twitter -23% (253μs) ✅
+Phase 53: 위치 배열 `:,` 제거 최적화         → twitter -31.1% 추가 단축 ✅
 Phase 54: 스키마 예측 캐시                  → twitter -5 to -10%
 Phase 55: TapeNode 배치 쓰기               → twitter -3%
 ```
@@ -779,12 +790,12 @@ Phase 55: TapeNode 배치 쓰기               → twitter -3%
 
 ## 예상 최종 성능 (모든 Phase 완료 시)
 
-| 파일 | 현재 Beast | 목표 Beast | yyjson | Beast vs yyjson |
+| 파일 | Phase 53 현재 | 최종 예상 | yyjson | Beast vs yyjson |
 |:---|---:|---:|---:|:---:|
-| twitter.json | 307 μs | **~168 μs** | 263 μs | **+36%** ✅ |
-| canada.json | 1,467 μs | **~1,350 μs** | 2,729 μs | **+50%** ✅ |
-| citm_catalog.json | 721 μs | **~460 μs** | 710 μs | **+35%** ✅ |
-| gsoc-2018.json | 693 μs | **~620 μs** | 1,451 μs | **+57%** ✅ |
+| twitter.json | 202 μs | **~168 μs** | 248 μs | **+23%** 돌파 ✅ |
+| canada.json | 1,448 μs | **~1,350 μs** | 2,734 μs | **+89%** 돌파 ✅ |
+| citm_catalog.json | 757 μs | **~460 μs** | 736 μs | 예약됨 ❌ |
+| gsoc-2018.json | 806 μs | **~620 μs** | 1,782 μs | **+121%** 돌파 ✅ |
 
 **직렬화 포함 시**: Phase E의 dump() -29% 이점이 추가되어 parse+dump 합산 성능은
 모든 파일에서 yyjson 대비 **1.5× 이상** 달성 가능.
@@ -801,7 +812,9 @@ Phase 55: TapeNode 배치 쓰기               → twitter -3%
 | 47 | `claude/phase47-pgo` | PGO 빌드 |
 | 48 | `claude/phase48-prefetch` | 프리페치 |
 | 49 | `claude/phase49-branchless-push` | 브랜치리스 push() |
-| 50 | `claude/phase50-stage1-scanner` | 구조적 문자 인덱서 |
+| 50 | `claude/phase50-stage1-scanner` | 구조적 문자 인덱서 ✅ |
+| 50-1| `neon-single-pass-opt` | NEON 32B Branchless ❌ |
+| 50-2| `neon-opt` | NEON 스칼라 폴백 정제 ✅ |
 | 51 | `claude/phase51-tape-store` | 64비트 tape 스토어 |
 | 52 | `claude/phase52-int-simd` | 정수 SIMD 파싱 |
 | 53 | `claude/phase53-adaptive-ws` | 적응형 공백 스캔 |
