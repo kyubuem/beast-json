@@ -1,6 +1,6 @@
 # Beast JSON — yyjson 1.2× Domination Plan (Phase 44-55)
 
-> **Date**: 2026-02-28 (Phase 44 complete — Bool/Null double-pump fusion)
+> **Date**: 2026-03-01 (Phase 53 complete — Stage 1+2 positions `:,` elimination)
 > **Mission**: Beat yyjson by **≥20% (1.2×) on ALL 4 benchmark files simultaneously**
 > **Architectures**: x86_64 (AVX-512) PRIMARY · aarch64 (NEON) SECONDARY
 
@@ -10,16 +10,25 @@
 
 Phase 43 결과를 기반으로 yyjson 1.2× 목표를 달성하기 위한 Phase 44–55 로드맵.
 
-### 현재 성능 (Phase 43, Linux x86_64 AVX-512, 150 iter)
+### 현재 성능 (Phase 53 + PGO, Linux x86_64 AVX-512, 150 iter)
 
 | 파일 | Beast | yyjson | Beast vs yyjson | 1.2× 목표 | 달성 |
 |:---|---:|---:|:---:|---:|:---:|
-| twitter.json | 307 μs | 263 μs | **yyjson 17% 빠름** | ≤219 μs | ⬜ |
-| canada.json | **1,467 μs** | 2,729 μs | Beast **+46%** | ≤2,274 μs | ✅ |
-| citm_catalog.json | 721 μs | 710 μs | yyjson 1.5% 빠름 | ≤592 μs | ⬜ |
-| gsoc-2018.json | **693 μs** | 1,451 μs | Beast **+53%** | ≤1,209 μs | ✅ |
+| twitter.json | **202 μs** | 248 μs | Beast **+23% 빠름** | ≤219 μs | ✅ |
+| canada.json | **1,448 μs** | 2,734 μs | Beast **+89% 빠름** | ≤2,274 μs | ✅ |
+| citm_catalog.json | 757 μs | 736 μs | yyjson 2.8% 빠름 | ≤592 μs | ⬜ |
+| gsoc-2018.json | **806 μs** | 1,782 μs | Beast **+121% 빠름** | ≤1,209 μs | ✅ |
 
-**남은 과제**: twitter.json (-29% 필요), citm_catalog (-18% 필요)
+**남은 과제**: citm_catalog만 미달 (-21.6% 추가 필요)
+
+### 누적 개선 (Phase 43 → Phase 53 + PGO)
+
+| 파일 | Phase 43 | Phase 53+PGO | 개선 |
+|:---|---:|---:|:---:|
+| twitter.json | 307 μs | **202 μs** | **-34.2%** |
+| canada.json | 1,467 μs | **1,448 μs** | -1.3% |
+| citm_catalog.json | 721 μs | 757 μs | +5.0% |
+| gsoc-2018.json | 693 μs | 806 μs | +16.3% |
 
 ---
 
