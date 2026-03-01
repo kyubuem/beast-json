@@ -291,10 +291,11 @@ simdjson 스타일 두 단계 파싱을 Beast 테이프 구조에 통합.
 ### Phase 56 — 신규 이론: Apple Silicon (AArch64) 1.2× 초격차 플랜 ⭐⭐⭐⭐⭐
 **예상 효과**: AArch64 전 파일 20~40% 대폭 향상 | **난이도**: 최상 | 🆕 신규
 
-- [ ] **Phase 56-1**: LDP (Load Pair) 기반 32B/64B 공백 스킵 (`skip_to_action` NEON 교체)
-- [ ] **Phase 56-2**: NEON 32B 문자열 스캐너 (Interleaved vceqq_u8 + Short-circuit 섀도잉 패턴)
-- [ ] **Phase 56-3**: vtbl1_u8 (Vector Table Lookup) 피드백 루프를 이용한 이스케이프 파서 (`scan_string_end`)
-- [ ] **Phase 56-4**: Apple Silicon 캐시라인 크기(128B)에 맞춘 `__builtin_prefetch` 튜닝
+- [x] ~~**Phase 56-1**: LDP (Load Pair) 기반 32B/64B 공백 스킵~~ ❌ (citm +30%, twitter +8.6% 회귀 → revert)
+- [x] ~~**Phase 56-2**: NEON 32B 문자열 스캐너 (Interleaved 섀도잉)~~ ❌ (효과 미달 ±1% → revert)
+- [x] ~~**Phase 56-3**: vtbl1_u8 이스케이프 파서~~ ❌ (NEON 지양 결론으로 취소)
+- [x] ~~**Phase 56-4**: Apple Silicon 캐시라인 크기 튜닝~~ ❌ (최적화 방향 선회로 취소)
+- [x] ~~**Phase 56-5**: NEON 32B Key Scanner~~ ❌ (`twitter` 키 스캔에서 GPR SWAR가 빠름 판명 +5.1% 회귀 → revert)
 
 ---
 
