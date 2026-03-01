@@ -1,7 +1,7 @@
 # Beast JSON Optimization — TODO
 
-> **최종 업데이트**: 2026-03-01 (Phase 49/51/52 실패 기록, Phase 50 준비 중)
-> **현재 최고 기록 (Phase 48, Linux x86_64 AVX-512)**: twitter lazy 365μs · canada lazy 1,416μs · citm lazy 890μs · gsoc lazy 751μs
+> **최종 업데이트**: 2026-03-01 (Phase 50 완료)
+> **현재 최고 기록 (Phase 50, Linux x86_64 AVX-512)**: twitter lazy 358μs · canada lazy 1,814μs · citm lazy 830μs · gsoc lazy 917μs
 > **새 목표**: yyjson 대비 **1.2× (20% 이상) 전 파일 동시 달성**
 > **1.2× 목표치**: twitter ≤219μs · canada ≤2,274μs · citm ≤592μs · gsoc ≤1,209μs
 
@@ -130,28 +130,27 @@ twitter.json의 불리언 값마다 루프 반복 2회 낭비 → 통합으로 �
 
 ---
 
-### Phase 50 — Stage 1 구조적 문자 사전 인덱싱 ⭐⭐⭐⭐⭐
-**예상 효과**: twitter **-15 to -20%**, citm **-10%** | **난이도**: 높음
+### Phase 50 — Stage 1 구조적 문자 사전 인덱싱 ⭐⭐⭐⭐⭐ ✅
+**실제 효과**: twitter **-1.9%** (365→358μs), citm **-6.7%** (890→830μs) | **난이도**: 높음
 
-이것이 현존하는 최대 단일 최적화 기회. simdjson의 두 단계 파싱 방식을
-Beast 테이프 구조에 통합.
+simdjson 스타일 두 단계 파싱을 Beast 테이프 구조에 통합.
+- Stage 1: AVX-512로 전체 JSON 스캔, 구조적 문자 위치 배열(`Stage1Index`) 생성
+- Stage 2: 위치 배열 순회, 문자열 길이 O(1) 계산 (공백 스캔 없음)
+- 크기 임계값 2MB: twitter(617KB)·citm(1.65MB)는 Stage 1+2 사용, canada(2.15MB)·gsoc(3.25MB)는 fallback
 
-- [ ] `Stage1Scanner` 클래스 설계:
-  - AVX-512 64B 청크 스캔
-  - 이스케이프 전파 알고리즘 (홀수 backslash 연속 처리)
-  - 구조적 문자 위치 인덱스 배열 생성
-- [ ] 이스케이프 마스크 계산 구현 (simdjson odd-carry 기법):
-  ```cpp
-  uint64_t starts = bs_bits & ~(bs_bits << 1);
-  uint64_t even_starts = starts & EVEN_BITS;
-  uint64_t escaped = ((bs_bits + even_starts) ^ (bs_bits + (starts & ~EVEN_BITS))
-                      ^ bs_bits) >> 1;
-  uint64_t real_quotes = q_bits & ~escaped;
-  ```
-- [ ] Stage 2: Parser가 index[] 배열을 순회하며 TapeNode 생성
-- [ ] Stage 1/2 통합 (parse_reuse() 진입점)
-- [ ] ctest 81개 PASS (escape 처리 정확성 중요)
-- [ ] bench_all: twitter ≤220μs 기대
+- [x] `Stage1Index` 구조체 설계 (uint32_t[] positions 배열, reserve/reset)
+- [x] `stage1_scan_avx512()` 구현 (AVX-512 64B 단위 스캔, 이스케이프 전파)
+- [x] `parse_staged()` Stage 2 구현 (위치 배열 순회, O(1) 문자열 길이)
+- [x] `parse_reuse()` Stage 1+2 통합 (2MB 임계값으로 큰 파일은 fallback)
+- [x] `last_off` 트래킹으로 trailing non-whitespace 검출 수정 (LazyErrors.InvalidLiterals 수정)
+- [x] ctest 81개 PASS
+- [x] bench_all (Phase 50, 150회, Stage 1+2 경로):
+  - twitter: lazy **358μs** · rtsm 339μs · yyjson 271μs (Stage 1+2 active, 617KB < 2MB)
+  - canada:  lazy **1,814μs** · rtsm 2,757μs · yyjson 3,213μs (fallback, 2.15MB > 2MB)
+  - citm:    lazy **830μs** · rtsm 1,331μs · yyjson 791μs (Stage 1+2 active, 1.65MB < 2MB)
+  - gsoc:    lazy **917μs** · rtsm 1,146μs · yyjson 1,695μs (fallback, 3.25MB > 2MB)
+
+**참고**: canada/gsoc 수치는 Phase 48 대비 회귀처럼 보이지만, Phase 48은 PGO 빌드였음. 현재 빌드는 `-O3 -march=native`만 사용. citm Stage 1+2 경로가 Phase 48 대비 **-6.7%** 개선을 실제로 달성.
 
 **구현 전략**: Stage 2 구조부터 설계 (Stage 1 없이 현재 파서를 Stage 2처럼 동작하도록 리팩토링), 그 다음 Stage 1 인덱서 통합.
 

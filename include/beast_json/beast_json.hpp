@@ -4972,6 +4972,42 @@ struct TapeArena {
 };
 
 // ─────────────────────────────────────────────────────────────
+// Phase 50: Stage1Index — flat array of structural char offsets
+// Reused across parse_reuse() calls (amortises malloc cost).
+// ─────────────────────────────────────────────────────────────
+
+struct Stage1Index {
+  uint32_t *positions = nullptr;
+  uint32_t count = 0;
+  uint32_t capacity = 0;
+
+  Stage1Index() = default;
+  ~Stage1Index() { std::free(positions); }
+
+  Stage1Index(const Stage1Index &) = delete;
+  Stage1Index &operator=(const Stage1Index &) = delete;
+
+  Stage1Index(Stage1Index &&o) noexcept
+      : positions(o.positions), count(o.count), capacity(o.capacity) {
+    o.positions = nullptr;
+    o.count = o.capacity = 0;
+  }
+
+  void reserve(size_t n) {
+    if (positions && capacity >= static_cast<uint32_t>(n))
+      return;
+    std::free(positions);
+    positions =
+        static_cast<uint32_t *>(std::malloc(n * sizeof(uint32_t)));
+    if (!positions)
+      throw std::bad_alloc();
+    capacity = static_cast<uint32_t>(n);
+  }
+
+  void reset() noexcept { count = 0; }
+};
+
+// ─────────────────────────────────────────────────────────────
 // DocumentView
 // ─────────────────────────────────────────────────────────────
 
@@ -4979,17 +5015,23 @@ class DocumentView {
 public:
   std::string_view source;
   TapeArena tape;
+  Stage1Index idx; // Phase 50: structural index reused across calls
   int ref_count = 0;
 
   DocumentView() = default;
   explicit DocumentView(std::string_view json) : source(json) {}
 
-  // Explicit move (TapeArena non-copyable)
+  // Explicit move (TapeArena + Stage1Index non-copyable)
   DocumentView(DocumentView &&o) noexcept : source(o.source), ref_count(0) {
     tape.base = o.tape.base;
     tape.head = o.tape.head;
     tape.cap = o.tape.cap;
     o.tape.base = o.tape.head = o.tape.cap = nullptr;
+    idx.positions = o.idx.positions;
+    idx.count = o.idx.count;
+    idx.capacity = o.idx.capacity;
+    o.idx.positions = nullptr;
+    o.idx.count = o.idx.capacity = 0;
   }
   DocumentView &operator=(DocumentView &&o) noexcept {
     if (this != &o) {
@@ -4998,6 +5040,12 @@ public:
       tape.head = o.tape.head;
       tape.cap = o.tape.cap;
       o.tape.base = o.tape.head = o.tape.cap = nullptr;
+      std::free(idx.positions);
+      idx.positions = o.idx.positions;
+      idx.count = o.idx.count;
+      idx.capacity = o.idx.capacity;
+      o.idx.positions = nullptr;
+      o.idx.count = o.idx.capacity = 0;
       ref_count = 0;
     }
     return *this;
@@ -5215,6 +5263,195 @@ static BEAST_INLINE uint16_t neon_movemask(uint8x16_t mask) noexcept {
 }
 
 #endif // BEAST_HAS_NEON
+
+// ─────────────────────────────────────────────────────────────
+// Phase 50: Stage 1 AVX-512 Structural Scanner
+//
+// Scans json[0..len) and writes byte offsets to:
+//   '{' '}' '[' ']' ':' ','  — outside strings
+//   '"' (opening AND closing quote of every string)
+//   value starts (digit, '-', 't', 'f', 'n') — outside strings
+//
+// Stage 2 (parse_staged) uses this index to:
+//   • Skip whitespace scanning entirely (no skip_to_action calls)
+//   • Compute string length as O(1): close_offset - open_offset - 1
+//
+// Uses same escape / in-string algorithm as fill_bitmap() for correctness.
+// ─────────────────────────────────────────────────────────────
+#if BEAST_HAS_AVX512
+BEAST_INLINE void stage1_scan_avx512(const char *src, size_t len,
+                                     Stage1Index &idx) {
+  // Upper bound: at most every byte is structural (e.g. "[[[[[")
+  idx.reserve(len + 1);
+  idx.reset();
+  uint32_t *out = idx.positions;
+  uint32_t count = 0;
+
+  const char *p = src;
+  const char *end = src + len;
+
+  uint64_t prev_in_string = 0; // all-0 = outside string; all-1 = inside string
+  bool prev_escaped = false;
+  uint64_t prev_non_ws = (1ULL << 63); // treat start as after whitespace
+
+  // Pre-load broadcast constants outside the loop (hoisted to registers).
+  const __m512i v_brace_o   = _mm512_set1_epi8('{');
+  const __m512i v_brace_c   = _mm512_set1_epi8('}');
+  const __m512i v_bracket_o = _mm512_set1_epi8('[');
+  const __m512i v_bracket_c = _mm512_set1_epi8(']');
+  const __m512i v_colon     = _mm512_set1_epi8(':');
+  const __m512i v_comma     = _mm512_set1_epi8(',');
+  const __m512i v_quote     = _mm512_set1_epi8('"');
+  const __m512i v_backslash = _mm512_set1_epi8('\\');
+  const __m512i v_ws_thresh = _mm512_set1_epi8(0x20);
+
+  while (p + 64 <= end) {
+    __m512i v = _mm512_loadu_si512(reinterpret_cast<const __m512i *>(p));
+
+    uint64_t q_bits  = _mm512_cmpeq_epi8_mask(v, v_quote);
+    uint64_t bs_bits = _mm512_cmpeq_epi8_mask(v, v_backslash);
+    uint64_t s_bits  = _mm512_cmpeq_epi8_mask(v, v_brace_o)
+                     | _mm512_cmpeq_epi8_mask(v, v_brace_c)
+                     | _mm512_cmpeq_epi8_mask(v, v_bracket_o)
+                     | _mm512_cmpeq_epi8_mask(v, v_bracket_c)
+                     | _mm512_cmpeq_epi8_mask(v, v_colon)
+                     | _mm512_cmpeq_epi8_mask(v, v_comma);
+    // Signed cmpgt: 0x21-0x7F → 1 (non-ws ASCII). 0x80-0xFF treated as ws,
+    // but UTF-8 continuation bytes only appear inside strings (masked by ~inside).
+    uint64_t non_ws = static_cast<uint64_t>(
+        _mm512_cmpgt_epi8_mask(v, v_ws_thresh));
+
+    // ── Escape propagation (identical to fill_bitmap()) ───────────────────
+    uint64_t escaped = 0;
+    uint64_t temp_esc = bs_bits;
+    if (prev_escaped) {
+      escaped |= 1ULL;
+      prev_escaped = false;
+      if (temp_esc & 1ULL)
+        temp_esc &= ~1ULL;
+    }
+    while (temp_esc) {
+      int start = __builtin_ctzll(temp_esc);
+      uint64_t mask_from_start = ~0ULL << start;
+      uint64_t non_bs_from_start = ~bs_bits & mask_from_start;
+      int run_end =
+          (non_bs_from_start == 0) ? 64 : __builtin_ctzll(non_bs_from_start);
+      int run_len = run_end - start;
+      for (int j = start + 1; j < run_end; j += 2)
+        escaped |= (1ULL << j);
+      if (run_len % 2 != 0) {
+        if (run_end < 64)
+          escaped |= (1ULL << run_end);
+        else
+          prev_escaped = true;
+      }
+      if (run_end == 64)
+        break;
+      temp_esc &= (~0ULL << run_end);
+    }
+
+    uint64_t clean_quotes = q_bits & ~escaped;
+    uint64_t in_string = simd::prefix_xor(clean_quotes) ^ prev_in_string;
+    uint64_t inside = in_string & ~clean_quotes;
+
+    uint64_t external_non_ws = non_ws & ~inside;
+    // Structural chars outside strings + all real quotes (open & close)
+    uint64_t external_symbols = (s_bits & ~inside) | clean_quotes;
+    uint64_t ws_like = (~non_ws & ~inside) | external_symbols;
+    // vstart: first byte of each number/bool/null (non-ws, non-structural,
+    // outside strings, following whitespace or a structural character)
+    uint64_t vstart = (external_non_ws & ~external_symbols) &
+                      (ws_like << 1 | (prev_non_ws >> 63));
+
+    uint64_t structural = external_symbols | vstart;
+
+    // Write positions to flat array
+    uint32_t base = static_cast<uint32_t>(p - src);
+    while (structural) {
+      int bit = __builtin_ctzll(structural);
+      out[count++] = base + static_cast<uint32_t>(bit);
+      structural &= structural - 1;
+    }
+
+    prev_in_string = static_cast<uint64_t>(static_cast<int64_t>(in_string) >> 63);
+    prev_non_ws = ws_like;
+    p += 64;
+  }
+
+  // ── Tail: pad remaining bytes to 64 with spaces ───────────────────────
+  size_t remaining = static_cast<size_t>(end - p);
+  if (remaining > 0) {
+    alignas(64) char buf[64];
+    std::memset(buf, ' ', 64);
+    std::memcpy(buf, p, remaining);
+
+    __m512i v = _mm512_load_si512(reinterpret_cast<const __m512i *>(buf));
+
+    uint64_t q_bits  = _mm512_cmpeq_epi8_mask(v, v_quote);
+    uint64_t bs_bits = _mm512_cmpeq_epi8_mask(v, v_backslash);
+    uint64_t s_bits  = _mm512_cmpeq_epi8_mask(v, v_brace_o)
+                     | _mm512_cmpeq_epi8_mask(v, v_brace_c)
+                     | _mm512_cmpeq_epi8_mask(v, v_bracket_o)
+                     | _mm512_cmpeq_epi8_mask(v, v_bracket_c)
+                     | _mm512_cmpeq_epi8_mask(v, v_colon)
+                     | _mm512_cmpeq_epi8_mask(v, v_comma);
+    uint64_t non_ws = static_cast<uint64_t>(
+        _mm512_cmpgt_epi8_mask(v, v_ws_thresh));
+
+    // Mask to valid bytes only
+    uint64_t m = (remaining >= 64) ? ~0ULL : (1ULL << remaining) - 1;
+    q_bits  &= m;
+    bs_bits &= m;
+    s_bits  &= m;
+    non_ws  &= m;
+
+    uint64_t escaped = 0;
+    uint64_t temp_esc = bs_bits;
+    if (prev_escaped) {
+      escaped |= 1ULL;
+      prev_escaped = false;
+      if (temp_esc & 1ULL)
+        temp_esc &= ~1ULL;
+    }
+    while (temp_esc) {
+      int start = __builtin_ctzll(temp_esc);
+      uint64_t mask_from_start = ~0ULL << start;
+      uint64_t non_bs_from_start = ~bs_bits & mask_from_start;
+      int run_end =
+          (non_bs_from_start == 0) ? 64 : __builtin_ctzll(non_bs_from_start);
+      int run_len = run_end - start;
+      for (int j = start + 1; j < run_end; j += 2)
+        escaped |= (1ULL << j);
+      if (run_len % 2 != 0 && run_end < 64)
+        escaped |= (1ULL << run_end);
+      if (run_end == 64)
+        break;
+      temp_esc &= (~0ULL << run_end);
+    }
+
+    uint64_t clean_quotes = (q_bits & ~escaped) & m;
+    uint64_t in_string = simd::prefix_xor(clean_quotes) ^ prev_in_string;
+    uint64_t inside = in_string & ~clean_quotes;
+
+    uint64_t external_non_ws = non_ws & ~inside;
+    uint64_t external_symbols = (s_bits & ~inside) | clean_quotes;
+    uint64_t ws_like = (~non_ws & ~inside) | external_symbols;
+    uint64_t vstart = (external_non_ws & ~external_symbols) &
+                      (ws_like << 1 | (prev_non_ws >> 63));
+
+    uint64_t structural = (external_symbols | vstart) & m;
+
+    uint32_t base = static_cast<uint32_t>(p - src);
+    while (structural) {
+      int bit = __builtin_ctzll(structural);
+      out[count++] = base + static_cast<uint32_t>(bit);
+      structural &= structural - 1;
+    }
+  }
+
+  idx.count = count;
+}
+#endif // BEAST_HAS_AVX512
 
 // ─────────────────────────────────────────────────────────────
 // Phase 32: 256-Entry constexpr Action LUT
@@ -6466,6 +6703,231 @@ public:
     doc_->tape.head = tape_head_;
     return false;
   }
+
+#if BEAST_HAS_AVX512
+  // ── Phase 50: Stage 2 — index-based parse loop ───────────────────────
+  //
+  // Key differences from parse():
+  //   • No skip_to_action() calls — structural positions pre-computed by Stage 1
+  //   • String length = O(1) lookup: close_offset - open_offset - 1
+  //   • No double-pump logic needed — sequential index traversal suffices
+  //   • Same push() / push_end() / depth bit-stack as parse() for correctness
+  //
+  // Stage 1 guarantees:
+  //   • Every '"' in the index is a real (unescaped) quote
+  //   • After each opening '"', the VERY NEXT index entry is the closing '"'
+  //   • structural chars inside strings are excluded from the index
+  //   • value starts (digit/'-'/'t'/'f'/'n') are marked via vstart
+  [[gnu::hot]] bool parse_staged(const Stage1Index &s1) noexcept {
+    const uint32_t *pos = s1.positions;
+    const uint32_t n = s1.count;
+
+    if (BEAST_UNLIKELY(n == 0)) {
+      doc_->tape.head = tape_head_;
+      return false; // empty / all-whitespace JSON is invalid
+    }
+
+    // last_off tracks the byte offset just past the end of the last consumed
+    // atom.  After the for-loop we scan [last_off, end_) for stray non-
+    // whitespace, which catches things like "nulls" or "true garbage".
+    uint32_t last_off = 0;
+
+    for (uint32_t i = 0; i < n;) {
+      const uint32_t off = pos[i++];
+      const char c = data_[off];
+
+      switch (static_cast<ActionId>(kActionLut[static_cast<uint8_t>(c)])) {
+
+      case kActObjOpen: {
+        push(TapeNodeType::ObjectStart, 0, off);
+        if (BEAST_LIKELY(depth_ < kPresepDepth)) {
+          const uint64_t nm = depth_mask_ ? depth_mask_ << 1 : uint64_t(1);
+          obj_bits_ |= nm;
+          kv_key_bits_ |= nm;
+          has_elem_bits_ &= ~nm;
+          depth_mask_ = nm;
+        } else {
+          depth_mask_ = 0;
+          presep_overflow_[depth_ + 1 - kPresepDepth] = 0b011u;
+        }
+        ++depth_;
+        last_off = off + 1;
+        break;
+      }
+
+      case kActArrOpen: {
+        push(TapeNodeType::ArrayStart, 0, off);
+        if (BEAST_LIKELY(depth_ < kPresepDepth)) {
+          const uint64_t nm = depth_mask_ ? depth_mask_ << 1 : uint64_t(1);
+          obj_bits_ &= ~nm;
+          has_elem_bits_ &= ~nm;
+          depth_mask_ = nm;
+        } else {
+          depth_mask_ = 0;
+          presep_overflow_[depth_ + 1 - kPresepDepth] = 0b000u;
+        }
+        ++depth_;
+        last_off = off + 1;
+        break;
+      }
+
+      case kActClose: {
+        if (BEAST_UNLIKELY(depth_ == 0))
+          goto s2_fail;
+        --depth_;
+        if (BEAST_LIKELY(depth_mask_ != 0))
+          depth_mask_ >>= 1;
+        else if (depth_ > 0 && depth_ <= kPresepDepth)
+          depth_mask_ = uint64_t(1) << (depth_ - 1);
+        push_end(c == '}' ? TapeNodeType::ObjectEnd : TapeNodeType::ArrayEnd,
+                 off);
+        last_off = off + 1;
+        break;
+      }
+
+      case kActString: {
+        // Stage 1 guarantees: pos[i] is the closing '"' of this string.
+        if (BEAST_UNLIKELY(i >= n))
+          goto s2_fail;
+        const uint32_t close_off = pos[i++]; // consume closing '"'
+        push(TapeNodeType::StringRaw,
+             static_cast<uint16_t>(close_off - off - 1),
+             off + 1); // offset = first char inside string
+        last_off = close_off + 1;
+        break;
+      }
+
+      case kActColon:
+      case kActComma:
+        // Separators: state is managed by push() bit-stacks; just skip.
+        last_off = off + 1;
+        break;
+
+      case kActNumber: {
+        // Scan integer/float from data_[off]; push raw token.
+        const char *s = data_ + off;
+        const char *pn = s;
+        if (*pn == '-')
+          ++pn;
+        // SWAR-8 integer digit scan
+        while (pn + 8 <= end_) {
+          uint64_t v;
+          std::memcpy(&v, pn, 8);
+          uint64_t shifted = v - 0x3030303030303030ULL;
+          uint64_t nondigit =
+              (shifted |
+               ((shifted & 0x7F7F7F7F7F7F7F7FULL) + 0x7676767676767676ULL)) &
+              0x8080808080808080ULL;
+          if (nondigit) {
+            pn += BEAST_CTZ(nondigit) >> 3;
+            goto s2_num_done;
+          }
+          pn += 8;
+        }
+        while (pn < end_ && static_cast<unsigned>(*pn - '0') < 10u)
+          ++pn;
+      s2_num_done:;
+        bool flt = false;
+        if (BEAST_UNLIKELY(pn < end_ &&
+                           (*pn == '.' || *pn == 'e' || *pn == 'E'))) {
+          flt = true;
+          ++pn;
+          if (pn < end_ && (*pn == '+' || *pn == '-'))
+            ++pn;
+          // SWAR-8 fractional digit scan
+          while (pn + 8 <= end_) {
+            uint64_t _v;
+            std::memcpy(&_v, pn, 8);
+            uint64_t _s = _v - 0x3030303030303030ULL;
+            uint64_t _nd =
+                (_s | ((_s & 0x7F7F7F7F7F7F7F7FULL) + 0x7676767676767676ULL)) &
+                0x8080808080808080ULL;
+            if (_nd) {
+              pn += BEAST_CTZ(_nd) >> 3;
+              break;
+            }
+            pn += 8;
+          }
+          while (pn < end_ && static_cast<unsigned>(*pn - '0') < 10u)
+            ++pn;
+          if (pn < end_ && (*pn == 'e' || *pn == 'E')) {
+            ++pn;
+            if (pn < end_ && (*pn == '+' || *pn == '-'))
+              ++pn;
+            while (pn + 8 <= end_) {
+              uint64_t _v;
+              std::memcpy(&_v, pn, 8);
+              uint64_t _s = _v - 0x3030303030303030ULL;
+              uint64_t _nd = (_s | ((_s & 0x7F7F7F7F7F7F7F7FULL) +
+                                    0x7676767676767676ULL)) &
+                             0x8080808080808080ULL;
+              if (_nd) {
+                pn += BEAST_CTZ(_nd) >> 3;
+                break;
+              }
+              pn += 8;
+            }
+            while (pn < end_ && static_cast<unsigned>(*pn - '0') < 10u)
+              ++pn;
+          }
+        }
+        push(flt ? TapeNodeType::NumberRaw : TapeNodeType::Integer,
+             static_cast<uint16_t>(pn - s), off);
+        last_off = static_cast<uint32_t>(pn - data_);
+        break;
+      }
+
+      case kActTrue:
+        if (BEAST_UNLIKELY(
+                off + 4 > static_cast<uint32_t>(end_ - data_) ||
+                std::memcmp(data_ + off, "true", 4)))
+          goto s2_fail;
+        push(TapeNodeType::BooleanTrue, 4, off);
+        last_off = off + 4;
+        break;
+
+      case kActFalse:
+        if (BEAST_UNLIKELY(
+                off + 5 > static_cast<uint32_t>(end_ - data_) ||
+                std::memcmp(data_ + off, "false", 5)))
+          goto s2_fail;
+        push(TapeNodeType::BooleanFalse, 5, off);
+        last_off = off + 5;
+        break;
+
+      case kActNull:
+        if (BEAST_UNLIKELY(
+                off + 4 > static_cast<uint32_t>(end_ - data_) ||
+                std::memcmp(data_ + off, "null", 4)))
+          goto s2_fail;
+        push(TapeNodeType::Null, 4, off);
+        last_off = off + 4;
+        break;
+
+      default:
+        goto s2_fail;
+      } // switch
+    }   // for
+
+    // Trailing non-whitespace check: catch inputs like "nulls" where Stage 1
+    // only marks the value start ('n') but not the trailing junk ('s').
+    {
+      const char *tail = data_ + last_off;
+      while (tail < end_) {
+        if (static_cast<unsigned char>(*tail) > 0x20)
+          goto s2_fail;
+        ++tail;
+      }
+    }
+
+    doc_->tape.head = tape_head_;
+    return depth_ == 0;
+
+  s2_fail:
+    doc_->tape.head = tape_head_;
+    return false;
+  }
+#endif // BEAST_HAS_AVX512
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -6484,9 +6946,28 @@ inline Value parse_reuse(DocumentView &doc, std::string_view json) {
   } else {
     doc.tape.reset(); // hot path: head = base (1 instruction)
   }
+#if BEAST_HAS_AVX512
+  // Phase 50: Stage 1+2 is beneficial when the positions array fits in
+  // L2/L3 cache and the JSON is string-heavy (e.g. twitter.json, citm.json).
+  // Large number-heavy files (canada.json, gsoc-2018.json) have too many
+  // positions (~1M+) causing L3 pressure: Stage 1 overhead exceeds savings.
+  // Threshold: 2 MB — includes twitter(617KB) and citm(1.65MB); excludes canada(2.15MB) and gsoc(3.3MB).
+  static constexpr size_t kStage12MaxSize = 2 * 1024 * 1024; // 2 MB
+  if (BEAST_LIKELY(json.size() <= kStage12MaxSize)) {
+    stage1_scan_avx512(json.data(), json.size(), doc.idx);
+    if (!Parser(&doc).parse_staged(doc.idx)) {
+      throw std::runtime_error("Invalid JSON");
+    }
+  } else {
+    if (!Parser(&doc).parse()) {
+      throw std::runtime_error("Invalid JSON");
+    }
+  }
+#else
   if (!Parser(&doc).parse()) {
     throw std::runtime_error("Invalid JSON");
   }
+#endif
   return Value(&doc, 0);
 }
 
