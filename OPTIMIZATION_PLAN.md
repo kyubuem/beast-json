@@ -30,6 +30,25 @@ Phase 43 결과를 기반으로 yyjson 1.2× 목표를 달성하기 위한 Phase
   - Snapdragon L3/SLC 계층에 맞춘 `__builtin_prefetch` 최적 거리 도출.
   - *필독*: [OPTIMIZATION_FAILURES.md](./OPTIMIZATION_FAILURES.md)의 "AArch64 Survival Guide" 준수 필수.
 
+---
+
+## 🌍 Universal AArch64 Neutrality (범용성 전략)
+
+Beast JSON의 목표는 특정 하드웨어(Apple Silicon)에 종속된 라이브러리가 아닌, 모든 AArch64 아키텍처에서 최고 성능을 내는 **범용 고성능 JSON 엔진**이 되는 것입니다.
+
+### 1. 왜 모바일(Fold 5)인가?
+Snapdragon 8 Gen 2는 ARM의 표준 **Cortex-X3 / A715** 코어를 사용합니다. 이는 클라우드 서버에서 사용되는 **AWS Graviton 3 (Neoverse V2)**나 **Ampere Altra**와 아키텍처 계보를 공유합니다. 
+따라서 모바일 폰(Termux)에서의 최적화 결과는 곧바로 서버급 AArch64 환경으로 전이(Transfer)될 수 있는 매우 가치 있는 데이터입니다.
+
+### 2. "Pure NEON" = 아키텍처 평준화
+우리가 Phase 57에서 발견한 "스칼라 게이트 제거 및 순수 NEON 통합" 전략은 Apple의 독자 코어뿐만 아니라, 표준 Cortex 코어들에게 더욱 유리한 방식입니다. 
+표준 코어들은 Apple Silicon보다 스칼라 연산창이 좁기 때문에, 벡터 파이프라인을 일관되게 유지하는 것이 성능 안정성에 결정적입니다.
+
+### 3. 향후 방향
+- **Apple Silicon**: 초거대 OoO 윈도우를 활용한 명령어 병렬성 극대화.
+- **Snapdragon/Graviton**: 표준 Cortex 파이프라인에 맞춘 프리페치 및 SVE(가변 벡터) 활용.
+- **결론**: 아키텍처별 분기를 최소화하되, 모든 ARM 코어가 공통적으로 좋아하는 **"파이프라인 무결성(Pipeline Integrity)"**을 최우선 가치로 삼습니다.
+
 ### 현재 성능 (Phase 50-2, macOS AArch64 M1 Pro, 150 iter)
 
 | 파일 | Beast | yyjson | Beast vs yyjson | 1.2× 목표 완료여부 |
