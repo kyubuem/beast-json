@@ -1,8 +1,9 @@
 # Beast JSON Optimization — TODO
 
-> **최종 업데이트**: 2026-03-01 (Phase 58-A 완료 - Snapdragon 프리페치 192B→256B 최적화)
+> **최종 업데이트**: 2026-03-01 (Phase 60-A 완료 - compact context state, canada -15.8%)
 > **현재 최고 기록 (Linux x86_64 AVX-512)**: twitter lazy **202μs** · canada lazy 1,448μs · citm lazy **757μs** · gsoc lazy 806μs
 > **현재 최고 기록 (macOS AArch64)**: twitter lazy **246μs** · canada lazy 1,845μs · citm lazy **627μs** · gsoc lazy 618μs
+> **현재 최고 기록 (Snapdragon Cortex-X3)**: twitter lazy **232μs** · canada lazy **1,692μs** · citm lazy **645μs** · gsoc lazy **651μs**
 > **새 목표 (x86_64 기준)**: yyjson 대비 **1.2× (20% 이상) 전 파일 동시 달성**
 > **1.2× 목표치 (x86_64)**: twitter ≤219μs · canada ≤2,274μs · citm ≤592μs · gsoc ≤1,209μs
 
@@ -341,13 +342,12 @@ simdjson 스타일 두 단계 파싱을 Beast 테이프 구조에 통합.
 
 | 과제 | Phase | 현재 | 목표 | 우선순위 |
 |:---|:---|---:|---:|:---:|
-| Snapdragon mixed twitter | 58-A | 342 μs | ≤323 μs | 🔴 즉시 |
 | x86_64 citm 1.2× | 59 | 757 μs | ≤592 μs | 🔴 즉시 |
-| M1 twitter 1.2× | 60-A+B | 246 μs | ≤204 μs* | 🟡 중기 |
+| M1 twitter 1.2× | 61+ | 246 μs | ≤204 μs | 🟡 중기 |
 | M1 canada 1.2× | TBD | 1,845 μs | ≤1,201 μs | 🟠 장기 |
 | M1 citm 1.2× | TBD | 627 μs | ≤395 μs | 🟠 장기 |
 
-> *Phase 60-A+B 적용 시 ~204μs 예상. M1 twitter 완전 1.2× (≤147μs)는 근본적 알고리즘 변화 필요.
+> Snapdragon Cortex-X3: 전 파일 1.2× 달성 유지 (Phase 60-A 이후 canada 1,692μs vs yyjson 2,761μs).
 
 ---
 
@@ -442,28 +442,34 @@ citm_catalog.json의 모든 이벤트 오브젝트는 동일한 키 시퀀스를
 
 ---
 
-### Phase 60-A — AArch64 push() Shallow-Depth Fast Path ⭐⭐⭐⭐
-**목표**: M1 twitter 246 → ~218 μs (-11%) | **난이도**: 중간
+### Phase 60-A — AArch64 push() Compact Context State ✅ COMPLETE
+**실제**: Cortex-X3 canada **-15.8%**, twitter **-4.7%**, gsoc **-1.2%** | **난이도**: 중간
 
-**근거 (per-token 사이클 분석)**:
-- Beast push(): 7 ops/token (3×AND + 2×XOR/OR + CMOV + tape write) = **~8 cy/tok**
-- yyjson push 등가: type+offset만 기록, separator 없음 = **~3 cy/tok**
-- M1에서 25,000 토큰 × 5 cy 차이 = **125K cycles = ~39μs 손실**
+**구현**:
+- 4×64-bit 비트스택 (`obj_bits_`, `kv_key_bits_`, `has_elem_bits_`, `depth_mask_`) + `presep_overflow_[1024]` 제거
+- `uint8_t cur_state_` (레지스터 상주, bit0=is_key, bit1=in_obj, bit2=has_elem) + `uint8_t cstate_stack_[1088]` (open/close 이벤트에만 접근) 추가
 
-twitter.json의 실제 최대 깊이는 ≤4 (root → tweets[] → tweet{} → nested{}). 64비트 비트스택 대신 **4-state 경량 머신**으로 depth ≤ 8 케이스를 처리하면 3 AND 연산이 1-2 CMOV로 축소된다.
-
+**핵심 수식**:
+```cpp
+// push(): cur_state_에서 sep 계산 → 3 bit extract → 1 CMOV
+new_cs = (cs & 0b010) | ((cs ^ (cs >> 1)) & 1) | 0b100;
+// kActObjOpen/ArrOpen: 저장 + 초기화 (기존 5-7 ops → 2 ops)
+cstate_stack_[depth_] = cur_state_; cur_state_ = 0b011; ++depth_;
+// kActClose: 복원 (기존 2-4 ops → 1 op)
+cur_state_ = cstate_stack_[--depth_];
 ```
-State: uint8_t compact_state = (in_obj<<1) | is_key | (has_elem<<2)
-Transition: is_key ^= in_obj; has_elem |= 1;
-sep = (in_obj & !is_key) ? 2 : (has_elem_prev ? 1 : 0);
-```
 
-- [ ] 깊이 ≤ 8 fast path 구현: compact_state 기반 push()
-- [ ] 깊이 > 8 시 기존 64비트 비트스택으로 fallback (twitter.json은 전혀 진입 안 함)
-- [ ] ctest 81개 PASS, 전 파일 회귀 없음 확인
-- [ ] M1 twitter 실측 및 Snapdragon X3 실측 (양쪽 모두 개선 확인)
+**결과 (Cortex-X3 pinned, 300 iter)**:
 
-**주의**: push_end()에도 동일한 compact_state 역전환 로직 필요
+| 파일 | Phase 58-A 기준 | Phase 60-A | 변화 |
+|:---|---:|---:|:---:|
+| twitter.json | 243 μs | **231.6 μs** | **-4.7%** ✅ |
+| canada.json | 2,009 μs | **1,692 μs** | **-15.8%** ✅✅ |
+| citm_catalog.json | 639 μs | 645 μs | ~0% (노이즈) |
+| gsoc-2018.json | 659 μs | **651 μs** | **-1.2%** ✅ |
+
+**canada 개선 이유**: GeoJSON 폴리곤 → 브래킷 이벤트 매우 빈번. kActArrOpen 5-7 ops → 2 ops, kActClose 2-4 ops → 1 op 단순화가 canada에 큰 효과.
+- [x] ctest 81개 PASS
 
 ---
 
@@ -519,6 +525,8 @@ sep = (in_obj & !is_key) ? 2 : (has_elem_prev ? 1 : 0);
 | **Phase 57** | **AArch64 Global Pure NEON 통합** | AArch64 모든 스칼라 게이트 제거 및 벡터 파이프라인 단일화 (twitter **246μs** 경신) |
 | **Phase 58** | **Snapdragon 8 Gen 2 베이스라인 측정** | Cortex-X3 pinned: twitter **244μs**, citm **654μs**, gsoc **647μs** — 전 파일 1.2× 달성. SVE 커널 비활성화 확인. README 분리 섹션 추가. |
 | **Phase 58-A** | **Snapdragon 프리페치 거리 튜닝** | 입력 프리페치 192B→**256B** (L2 hint), 테이프 +8→**+16** 노드. twitter pinned 246→**243.7μs** (-1.0%). 전 파일 회귀 없음. |
+| Phase 60-B | AArch64 단거리 키 스칼라 프리스캔 | ❌ 243.7→**257.5μs** (+5.6% 회귀) → revert. 분기 의존성이 NEON 스페큘레이션 저해. |
+| **Phase 60-A** | **compact context state (cur_state_)** | 4×64-bit 비트스택 → uint8_t cur_state_ 레지스터. twitter -4.7%, **canada -15.8%**, citm ~0%, gsoc -1.2%. ctest 81/81 PASS. |
 
 ---
 

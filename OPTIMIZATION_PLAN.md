@@ -1,6 +1,6 @@
 # Beast JSON — yyjson 1.2× Domination Plan (Phase 44-55)
 
-> **Date**: 2026-03-01 (Phase 58-A complete — Snapdragon prefetch 192B→256B tuned)
+> **Date**: 2026-03-01 (Phase 60-A complete — compact context state, canada -15.8%)
 > **Mission**: Beat yyjson by **≥20% (1.2×) on ALL 4 benchmark files simultaneously, ALL architectures**
 > **Architectures**: x86_64 (AVX-512) · AArch64/M1 · AArch64/Snapdragon (Cortex-X3)
 
@@ -21,14 +21,14 @@ Phase 43 결과를 기반으로 yyjson 1.2× 목표를 달성하기 위한 Phase
 | citm_catalog.json | 757 μs | 736 μs | yyjson 2.8% 빠름 | ≤592 μs | ❌ |
 | gsoc-2018.json | **806 μs** | 1,782 μs | Beast **+121%** | ≤1,209 μs | ✅ |
 
-#### AArch64 Snapdragon 8 Gen 2 (Phase 58-A, Cortex-X3 pinned, 300 iter)
+#### AArch64 Snapdragon 8 Gen 2 (Phase 60-A, Cortex-X3 pinned, 300 iter)
 
 | 파일 | Beast | yyjson | Beast vs yyjson | 1.2× 달성 |
 |:---|---:|---:|:---:|:---:|
-| twitter.json | **243 μs** | 371 μs | Beast **+53%** | ✅ |
-| canada.json | **2,009 μs** | 2,761 μs | Beast **+37%** | ✅ |
-| citm_catalog.json | **639 μs** | 973 μs | Beast **+52%** | ✅ |
-| gsoc-2018.json | **659 μs** | 1,742 μs | Beast **+164%** | ✅ |
+| twitter.json | **231.6 μs** | 371 μs | Beast **+60%** | ✅ |
+| canada.json | **1,692 μs** | 2,761 μs | Beast **+63%** | ✅ |
+| citm_catalog.json | **645 μs** | 961 μs | Beast **+49%** | ✅ |
+| gsoc-2018.json | **651 μs** | 1,781 μs | Beast **+173%** | ✅ |
 
 #### AArch64 Apple M1 Pro (Phase 57)
 
@@ -53,6 +53,11 @@ Phase 43 결과를 기반으로 yyjson 1.2× 목표를 달성하기 위한 Phase
   - A/B sweep: 192B → 256B → 320B → 384B + NTA vs L2 hint.
   - **결론**: 256B + L2(locality=1) 최적. twitter pinned 246 → **243.7μs** (-1.0%).
   - 테이프 프리페치: 8 → 16 노드 변경. twitter 무차이, canada 잠재 이익.
+
+- **Phase 60-A (compact context state)**: ✅ COMPLETE
+  - 4×64-bit 비트스택 (`obj_bits_`, `kv_key_bits_`, `has_elem_bits_`, `depth_mask_`) + `presep_overflow_[1024]` → `uint8_t cur_state_` + `cstate_stack_[1088]`.
+  - kActObjOpen/ArrOpen: 5-7 ops → 2 ops. kActClose: 2-4 ops → 1 op.
+  - **결과**: twitter -4.7%, **canada -15.8%** (브래킷 이벤트 단순화 직접 수혜), citm ~0%, gsoc -1.2%.
 
 ---
 
