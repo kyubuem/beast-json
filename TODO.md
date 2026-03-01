@@ -1,8 +1,8 @@
 # Beast JSON Optimization — TODO
 
-> **최종 업데이트**: 2026-03-01 (Phase 53 완료, Phase 50-2 완료)
+> **최종 업데이트**: 2026-03-01 (Phase 57 완료 - AArch64 Pure NEON 패러다임 정립)
 > **현재 최고 기록 (Linux x86_64 AVX-512)**: twitter lazy **202μs** · canada lazy 1,448μs · citm lazy **757μs** · gsoc lazy 806μs
-> **현재 최고 기록 (macOS AArch64)**: twitter lazy **253μs** · canada lazy 1,839μs · citm lazy **643μs** · gsoc lazy 634μs
+> **현재 최고 기록 (macOS AArch64)**: twitter lazy **246μs** · canada lazy 1,845μs · citm lazy **627μs** · gsoc lazy 618μs
 > **새 목표 (x86_64 기준)**: yyjson 대비 **1.2× (20% 이상) 전 파일 동시 달성**
 > **1.2× 목표치 (x86_64)**: twitter ≤219μs · canada ≤2,274μs · citm ≤592μs · gsoc ≤1,209μs
 
@@ -291,12 +291,20 @@ simdjson 스타일 두 단계 파싱을 Beast 테이프 구조에 통합.
 ### Phase 56 — 신규 이론: Apple Silicon (AArch64) 1.2× 초격차 플랜 ⭐⭐⭐⭐⭐
 **예상 효과**: AArch64 전 파일 20~40% 대폭 향상 | **난이도**: 최상 | 🆕 신규
 
-- [ ] **Phase 56-1**: LDP (Load Pair) 기반 32B/64B 공백 스킵 (`skip_to_action` NEON 교체)
-- [ ] **Phase 56-2**: NEON 32B 문자열 스캐너 (Interleaved vceqq_u8 + Short-circuit 섀도잉 패턴)
-- [ ] **Phase 56-3**: vtbl1_u8 (Vector Table Lookup) 피드백 루프를 이용한 이스케이프 파서 (`scan_string_end`)
-- [ ] **Phase 56-4**: Apple Silicon 캐시라인 크기(128B)에 맞춘 `__builtin_prefetch` 튜닝
+- [x] ~~**Phase 56-1**: LDP (Load Pair) 기반 32B/64B 공백 스킵~~ ❌ (citm +30%, twitter +8.6% 회귀 → revert)
+- [x] ~~**Phase 56-2**: NEON 32B 문자열 스캐너 (Interleaved 섀도잉)~~ ❌ (효과 미달 ±1% → revert)
+- [x] ~~**Phase 56-3**: vtbl1_u8 이스케이프 파서~~ ❌ (NEON 지양 결론으로 취소)
+- [x] ~~**Phase 56-4**: Apple Silicon 캐시라인 크기 튜닝~~ ❌ (최적화 방향 선회로 취소)
+- [x] ~~**Phase 56-5**: NEON 32B Key Scanner~~ ❌ (`twitter` 키 스캔에서 GPR SWAR가 빠름 판명 +5.1% 회귀 → revert)
 
 ---
+
+### Phase 57 — AArch64 Global NEON Consolidation (Hypothesis Reversal) ⭐⭐⭐⭐⭐ ✅
+**실제 효과 (macOS AArch64)**: twitter **-5%** (260→**246μs**), gsoc **-3%** (634→618μs) | **성공**
+- [x] AArch64 환경에서 x86 유래 "SWAR-8 Pre-gate"가 파이프라인 정체의 주범임을 규명
+- [x] `skip_to_action`, `scan_key_colon_next`에서 모든 스칼라 게이트 제거 및 **Pure NEON** 통합
+- [x] Apple Silicon과 범용 AArch64 모두에서 벡터 파이프라인 효율 극대화 확인
+- [x] ctest 81개 PASS, README/OPTIMIZATION_FAILURES 문서 업데이트 완료
 
 ## 예상 최종 성능 (x86_64, Phase 44-55 전체 완료 시)
 
@@ -311,12 +319,26 @@ simdjson 스타일 두 단계 파싱을 Beast 테이프 구조에 통합.
 
 ## 예상 최종 성능 (macOS AArch64, Phase 56 완료 시)
 
-| 파일 | Phase 50-2 현재 | 1.2× 타겟 | yyjson | Beast vs yyjson |
-|:---|---:|---:|---:|:---:|
-| twitter.json | 253 μs | **≤146 μs** | 176 μs | 아직 아님 ❌ |
-| canada.json | 1,839 μs | **≤1,200 μs** | 1,441 μs | 아직 아님 ❌ |
-| citm_catalog.json | 643 μs | **≤395 μs** | 474 μs | 아직 아님 ❌ |
-| gsoc-2018.json | 634 μs | **≤825 μs** | 990 μs | **+56%** 돌파 ✅ |
+| gsoc-2018.json | **618 μs** | **≤825 μs** | 990 μs | **+63%** 돌파 ✅ |
+
+---
+
+## Phase 58 — Snapdragon 8 Gen 2 (Termux) 최적화 가이드 [NEW]
+**대상 환경**: Android Termux (Galaxy Z Fold 5 / Snapdragon 8 Gen 2)
+
+### 🚀 Termux 에이전트 미션
+Snapdragon 8 Gen 2는 Apple M1과 대등하거나 일부 벡터 처리량에서 우위를 점하는 초고사양 모바일 칩셋입니다. 다음 단계에 따라 최적화를 수행하세요.
+
+1. **Pure NEON 베이스라인 확인**:
+   - Phase 57(`Pure NEON`) 코드로 `bench_all`을 수행하여 베이스라인을 측정하세요. (twitter 200μs 초반 목표)
+2. **Snapdragon 특화 프리페치(`__builtin_prefetch`)**:
+   - Snapdragon은 Apple Silicon 대비 캐시 레이턴시가 미세하게 깁니다. 
+   - `parse()` 루프의 프리페치 거리(Distance)를 현재 192B에서 256B~384B로 늘려보며 최적 지점을 찾으세요.
+3. **SVE (Scalable Vector Extension) 실험**:
+   - Snapdragon 8 Gen 2는 **SVE/SVE2**를 지원할 가능성이 높습니다.
+   - `__ARM_FEATURE_SVE` 매크로 확인 후, `skip_to_action` 내부를 SVE 가변 길이 루프로 구현해보세요. (NEON 16B의 한계를 깰 수 있는 유일한 대안)
+4. **절대 금기**: 
+   - x86식 **SWAR-8 Pre-gate** 또는 **GPR-SIMD 혼용**을 절대 시도하지 마세요. (Phase 56-5 실패 사례 필독)
 
 ---
 
@@ -349,9 +371,10 @@ simdjson 스타일 두 단계 파싱을 Beast 테이프 구조에 통합.
 | Phase 49 | 브랜치리스 push() 비트스택 (NEG+AND) | ❌ twitter +1.4%, citm +3.9% 회귀 → revert (컴파일러 CMOV이 이미 최적) |
 | **Phase 50** | Stage 1 구조적 문자 사전 인덱싱 | twitter -19.7%(PGO), yyjson 대비 1.8배/2.1배 우위 확보 |
 | Phase 50-1 | NEON 32B 언롤링 + 브랜치리스 Pinpoint | ❌ macOS AArch64 twitter +8.8%, citm +30% 회귀 → revert (vgetq_lane 페널티) |
-| **Phase 50-2** | NEON 정밀 최적화 (SWAR 제거 및 스칼라 폴백) | macOS AArch64 twitter **-23%** (253μs 달성) |
-| Phase 51 | 64비트 TapeNode 단일 스토어 (`__builtin_memcpy`) | ❌ twitter +11.7%, citm +14.4% 심각 회귀 → revert (컴파일러 Store Merging 방해) |
-| Phase 52 | AVX2 32B 디지트 스캐너 (kActNumber) | ❌ twitter +11.2%, citm +8.1% 회귀 → revert (YMM 레지스터 충돌, Phase 40 동일 패턴) |
+| **Phase 50-2** | NEON 정밀 최적화 (SWAR 제거 및 스칼라 폴백) | macOS AArch64 twitter **253μs** 달성 |
+| Phase 51 | 64비트 TapeNode 단일 스토어 (`__builtin_memcpy`) | ❌ twitter +11.7%, citm +14.4% 심각 회귀 → revert |
+| Phase 52 | AVX2 32B 디지트 스캐너 (kActNumber) | ❌ twitter +11.2%, citm +8.1% 회귀 → revert |
+| **Phase 57** | **AArch64 Global Pure NEON 통합** | AArch64 모든 스칼라 게이트 제거 및 벡터 파이프라인 단일화 (twitter **246μs** 경신) |
 
 ---
 

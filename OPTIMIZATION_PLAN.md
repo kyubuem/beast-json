@@ -19,6 +19,17 @@ Phase 43 결과를 기반으로 yyjson 1.2× 목표를 달성하기 위한 Phase
 | citm_catalog.json | 757 μs | 736 μs | yyjson 2.8% 빠름 | ≤592 μs | ⬜ |
 | gsoc-2018.json | **806 μs** | 1,782 μs | Beast **+121% 빠름** | ≤1,209 μs | ✅ |
 
+- **Phase 57 (AArch64 Global NEON 분기 역전현상 증명)**: ✅ SUCCESS
+  - Apple Silicon과 일반 AArch64의 분기를 테스트하던 중, Phase 56의 속도 하락 원인이 "NEON 자체"가 아닌, x86_64에서 들여온 "SWAR-8 Pre-gate" 분기 로직 때문임을 발견.
+  - 범용 레지스터 스칼라 의존성 체인(SWAR)을 완전히 제거하고 `skip_to_action`, `scan_key_colon_next` 모두 Global NEON Pipeline으로 통합.
+  - 결과: AArch64 `twitter.json`에서 **246μs** 파싱 타이밍 달성 (yyjson 추월을 위한 AArch64 최적 패러다임 정립).
+
+- **Phase 58 (Snapdragon 8 Gen 2 / Termux 최적화)**: 🆕 PLANNED
+  - 갤럭시 Z 폴드 5 (Android Termux) 환경에서 Phase 57 베이스라인 검증.
+  - Snapdragon의 SVE/SVE2 명령어 지원 여부 확인 및 32B+ 가변 길이 벡터 스캐너 실험.
+  - Snapdragon L3/SLC 계층에 맞춘 `__builtin_prefetch` 최적 거리 도출.
+  - *필독*: [OPTIMIZATION_FAILURES.md](./OPTIMIZATION_FAILURES.md)의 "AArch64 Survival Guide" 준수 필수.
+
 ### 현재 성능 (Phase 50-2, macOS AArch64 M1 Pro, 150 iter)
 
 | 파일 | Beast | yyjson | Beast vs yyjson | 1.2× 목표 완료여부 |

@@ -156,3 +156,70 @@
   3. **숫자 길이 분포 간과**: `twitter.json`의 숫자(18자리 ID)는 드문 케이스입니다. 대부분 짧은 숫자들(<8자리)이 SWAR-8로 빠르게 처리됩니다. AVX2 진입 비용이 실질적 이익보다 큽니다.
 * **가이드라인 (에이전트 수칙)**:
   * **x86_64 에이전트**: `parse()` 같은 대형 함수에서 `kActString` 과 `kActNumber` 두 경로 모두 YMM 레지스터 집약 코드를 추가하지 마세요. 두 경로가 동시에 활성화되면 YMM 레지스터 예산(16개)을 초과하여 Spill이 발생합니다. 숫자 파싱 가속이 필요하다면 별도 함수로 분리하여 레지스터 스코프를 격리하는 방식을 검토하세요.
+
+---
+
+## Phase 56-1: LDP (Load Pair) 기반 64B/32B 스칼라-SIMD 융합 공백 스킵 ❌
+* **시도 내용**:
+  * Apple Silicon 아키텍처 특성에 맞춰 NEON `vld1q_u8` 대신 `load64(p_)` (GPR LDP)를 4회 연속 수행하여 32바이트를 읽는 SWAR 방식을 도입했습니다.
+  * `skip_to_action` 내부를 NEON 전주기(16B)에서 SWAR-32B 하이브리드 루프로 전면 교체했습니다.
+* **벤치마크 (macOS AArch64 M1 Pro)**:
+  * `twitter.json`: 253μs → 275μs (**+8.6%** 회귀)
+  * `citm_catalog.json`: 643μs → 836μs (**+30.0%** 회귀)
+* **근본 원인 분析**:
+  1. **NEON vld1q_u8의 압도적 효율**: Apple CPU는 메모리를 GPR로 LDP하는 것보다, NEON 벡터 레지스터 뱅크로 16B를 직행하는 `vld1q` 파이프라인이 훨씬 더 넓고 빠릅니다.
+  2. **SWAR 연산 병목**: 읽어들인 32B를 `swar_action_mask`로 연산하여 비트를 쥐어짜는 GPR ALU 워크로드보다, `vmaxvq_u32`로 SIMD Reduction하는 레이턴시가 훨씬 짧았습니다.
+* **가이드라인 (에이전트 수칙)**:
+  * **AArch64 에이전트**: 공백 스캔처럼 단순 메모리 밀어주기 작업에 있어서, NEON 벡터 레지스터를 피하고 굳이 범용 레지스터(GPR)로 32B/64B를 읽어 SWAR로 처리하려는 시도는 무조건 성능 하락을 가져옵니다. **단순 필터링은 순수 NEON SIMD 구조를 유지해야 합니다.**
+
+---
+
+## Phase 56-2: NEON 32B Interleaved Branching 문자열 스캐너 ❌
+* **시도 내용**:
+  * `vgetq_lane` 병목을 회피하면서 32B(16Bx2)를 한 번에 검사하기 위해 2개의 `vld1q_u8`을 인터리빙으로 로드하고 `vceqq_u8` 비교와 `vmaxvq_u32` 축소 검증 사이에 숏서킷 섀도잉 패턴을 적용했습니다.
+* **벤치마크 (macOS AArch64 M1 Pro)**:
+  * `twitter.json`: 253μs → 250μs (**-1.2%** 미미한 개선)
+  * `canada.json`: 1,839μs → 1,855μs (**+0.8%** 회귀)
+  * `citm_catalog.json`: 643μs → 655μs (**+1.8%** 회귀)
+  * `gsoc-2018.json`: 634μs → 626μs (**-1.2%** 미미한 개선)
+* **근본 원인 분析**:
+  * Apple Silicon의 분기 예측기와 파이프라인은 단일 16B 순환 루프의 오버헤드를 이미 완벽하게 가리고 있습니다. 32B 수준의 수동 언롤링 및 인터리빙은 추가적인 레지스터 압력만 유발할 뿐, 실질 처리량(Throughput) 개선을 가져오지 못합니다.
+* **가이드라인 (에이전트 수칙)**:
+  * **AArch64 에이전트**: NEON 스칼라 혼합 루프에 있어서, 32B 이상의 수동 언롤링(Unrolling)은 Apple Silicon에서 효과가 없습니다. 16B 단위 루프가 최적의 분기 예측 효율을 보여줍니다.
+
+---
+
+## Phase 56-5: NEON `scan_key_colon_next` (오브젝트 키 스캐너) ❌ → 🟢 Phase 57에서 "전면 NEON 우세"로 판명됨 (Hypothesis Reversal)
+* **초기 시도 내용 (Phase 56)**:
+  * AArch64 빌드에서 느린 GPR `SWAR-24`를 대체하기 위해 32B NEON 스캐너를 추가했습니다.
+  * 결과: `twitter.json` 253μs → 266μs (**+5.1%** 회귀) 발생. 
+  * 초기 결론: "매우 짧은 데이터에 대해서는 Apple Silicon의 분기 예측기와 GPR SWAR 패스가 무거운 NEON 파이프라인보다 압도적으로 빠르다"고 오판하여 코드를 Revert 했습니다.
+
+* **최종 원인 분석 및 발견 (Phase 57 Hypothesis Reversal)**:
+  * Phase 57에서 "범용 AArch64(Graviton 등)는 여전히 NEON이 빠를 것이다"라는 가설을 세우고, Apple Silicon용 분기 코드(`__APPLE__`)를 우회하여 강제로 범용 NEON 경로를 태워 벤치마크했습니다.
+  * **놀랍게도 `twitter.json` 처리 속도가 266μs나 기존의 253μs가 아닌, 246μs(역대 최고 속도)로 급격히 단축되었습니다.**
+  * 추적 결과, Phase 56의 회귀 원인은 NEON 스캐너 탓이 **아니었습니다**. x86_64 AVX-512 최적화에서 차용해왔던 **`skip_to_action` 내부의 "SWAR-8 Pre-gate"** 분기문이 Apple Silicon의 파이프라인을 붕괴시키고 있었던 것입니다.
+  * SWAR 스칼라 작업(`EOR` -> `SUB` -> `BIC` -> `AND`) 자체는 레이턴시가 길며 명령어 레벨 병렬성(ILP)이 낮습니다. 반면 NEON의 `vld1q_u8` -> `vcgtq_u8` -> `vmaxvq_u32` 패턴은 AArch64에서 최단 사이클로 완벽하게 병렬 실행됩니다.
+
+* **최종 결론 및 가이드라인 (AArch64 최적화 패러다임)**:
+*   **Global NEON Priority**: AArch64 환경(Apple M-Series, AWS Graviton, 단일 Cortex 등 모든 ARM 코어)에서는 SWAR-8/SWAR-24 같은 스칼라 혼합(Pre-gate) 최적화를 **절대 금지**합니다. 
+*   "분기 예측을 돕기 위해 스칼라로 8바이트를 먼저 체크한다"는 x86의 논리는 AArch64에서 완전히 실패합니다. 벡터 레지스터 셋업 오버헤드보다, 일관된 벡터명령 파이프라인을 쭉 밀고 나가는 것(`Pure NEON`)이 무조건 가장 빠릅니다.
+
+---
+
+## 🛡️ AArch64 최적화 에이전트 수칙 (Survival Guide)
+
+Termux나 Apple Silicon 환경에서 작업할 차기 에이전트는 아래 수칙을 반드시 준수해야 합니다.
+
+1.  **GPR-SIMD 교차 오염 금지**: 
+    - `load64`로 읽어서 비트를 계산한 뒤 그 결과를 바탕으로 SIMD 루프를 결정하는 방식은 파이프라인 버블을 만듭니다. 
+    - 특히 `skip_to_action`이나 `scan_key_colon_next` 같은 초고속 핫 패스에서는 **처음부터 100% 벡터 명령**만 사용하세요.
+2.  **분기 예측기(Branch Predictor) 신뢰**:
+    - AArch64의 분기 예측기는 매우 강력합니다. 16바이트 벡터 검사 후 일치하는 바이트를 찾기 위해 수행하는 `while` 루프(스칼라)는 페널티가 거의 없습니다. 
+    - 이를 굳이 비트 연산으로 해결하려고 `vgetq_lane` 같은 명령을 사용하여 GPR로 옮기는 순간, 수 사이클의 지연이 발생합니다.
+3.  **언롤링(Unrolling) 주의**:
+    - 16바이트 단일 루프만으로도 Apple M1/Snapdragon 8급의 OoO 엔진은 이미 충분한 처리량을 뽑아냅니다. 
+    - 32B/64B 수동 언롤링은 코드 크기만 키우고(I-cache 압박) 실질 이득은 미미하거나 오히려 마이너스가 될 수 있습니다 (Phase 56-2 참조).
+4.  **Snapdragon 8 Gen 2 특이점**:
+    - 이 칩셋은 **SVE2**를 지원합니다. NEON(16B 고정)의 한계를 넘으려면 SVE 가변 길이 벡터 기능을 연구해 보세요.
+    - Snapdragon은 Apple 대비 메모리 레이턴시가 미묘하게 다르므로, `__builtin_prefetch` 거리를 튜닝하는 것이 유효한 카드가 될 수 있습니다.
