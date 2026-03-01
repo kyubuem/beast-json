@@ -91,19 +91,21 @@ Beast **beats yyjson on parse speed for 3 out of 4 files** and is near-tied on t
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| yyjson | 176 | 3.50 GB/s | 101 |
-| **beast::lazy** | **246** | **2.51 GB/s** | **116** |
-| beast::rtsm | 275 | 2.24 GB/s | — |
-| nlohmann | 3,567 | 172 MB/s | 1,353 |
+| yyjson | 179 | 3.45 GB/s | 106 |
+| **beast::lazy** | **245** | **2.52 GB/s** | **112** |
+| beast::rtsm | 281 | 2.19 GB/s | — |
+| nlohmann | 3,565 | 173 MB/s | 1,359 |
+
+> Serialize is **near yyjson** (112 vs 106 μs).
 
 #### canada.json — 2.2 MB · dense floating-point arrays
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| yyjson | 1,441 | 1.52 GB/s | 2,219 |
-| **beast::lazy** | **1,845** | **1.19 GB/s** | **883** |
-| beast::rtsm | 1,880 | 1.16 GB/s | — |
-| nlohmann | 19,489 | 112 MB/s | 6,775 |
+| yyjson | 1,444 | 1.52 GB/s | 2,206 |
+| **beast::lazy** | **1,935** | **1.14 GB/s** | **895** |
+| beast::rtsm | 1,880 | 1.17 GB/s | — |
+| nlohmann | 19,301 | 114 MB/s | 6,780 |
 
 > beast::lazy serialize is **2.5× faster** than yyjson.
 
@@ -111,34 +113,34 @@ Beast **beats yyjson on parse speed for 3 out of 4 files** and is near-tied on t
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| yyjson | 474 | 3.55 GB/s | 163 |
-| **beast::lazy** | **627** | **2.69 GB/s** | **262** |
-| beast::rtsm | 1,016 | 1.66 GB/s | — |
-| nlohmann | 8,132 | 207 MB/s | 1,352 |
+| yyjson | 472 | 3.57 GB/s | 163 |
+| **beast::lazy** | **632** | **2.67 GB/s** | **263** |
+| beast::rtsm | 1,008 | 1.67 GB/s | — |
+| nlohmann | 8,109 | 208 MB/s | 1,334 |
 
 #### gsoc-2018.json — 3.2 MB · large object array
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **618** | **5.26 GB/s** | **285** |
+| **beast::lazy** | **606** | **5.36 GB/s** | **278** |
 | beast::rtsm | 726 | 4.47 GB/s | — |
-| yyjson | 1,014 | 3.20 GB/s | 725 |
+| yyjson | 980 | 3.32 GB/s | 709 |
 | nlohmann | 13,624 | 238 MB/s | 11,728 |
 
-> beast::lazy is **63% faster** to parse and **2.5× faster** to serialize than yyjson.
+> beast::lazy is **62% faster** to parse and **2.5× faster** to serialize than yyjson.
 
 #### Summary
 
 | Benchmark | Beast vs yyjson (parse) | Beast vs yyjson (serialize) |
 | :--- | :--- | :--- |
-| twitter.json | yyjson 21% faster | yyjson 15% faster |
-| canada.json | yyjson 21% faster | **Beast 2.5× faster** |
-| citm_catalog.json | yyjson 24% faster | yyjson 60% faster |
-| gsoc-2018.json | **Beast 63% faster** ✅ | **Beast 2.5× faster** |
+| twitter.json | yyjson 27% faster | yyjson 6% faster |
+| canada.json | yyjson 34% faster | **Beast 2.5× faster** |
+| citm_catalog.json | yyjson 34% faster | yyjson 60% faster |
+| gsoc-2018.json | **Beast 62% faster** ✅ | **Beast 2.5× faster** |
 
-Beast **dominates serialization** on gsoc and canada workloads. On gsoc-2018, beast beats yyjson on parse by **63%**.
+Beast **dominates serialization** on gsoc and canada workloads. On gsoc-2018, beast beats yyjson on parse by **62%**.
 
-> **Phase 57 Discovery**: "Pure NEON" (removing all scalar SWAR gates) is the optimal AArch64 strategy. GPR-SIMD mixing stalls the vector pipeline; a clean NEON-only path reduced `twitter.json` from 260 μs to **246 μs**.
+> **Phase 57 Discovery**: "Pure NEON" (removing all scalar SWAR gates) is the optimal AArch64 strategy. GPR-SIMD mixing stalls the vector pipeline; a clean NEON-only path reduced `twitter.json` from 260 μs to **245 μs**.
 
 ---
 

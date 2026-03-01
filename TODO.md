@@ -1,8 +1,8 @@
 # Beast JSON Optimization — TODO
 
-> **최종 업데이트**: 2026-03-01 (Phase 60-A 완료 - compact context state, canada -15.8%)
+> **최종 업데이트**: 2026-03-01 (Phase 57 완료 - AArch64 Pure NEON 패러다임 정립)
 > **현재 최고 기록 (Linux x86_64 AVX-512)**: twitter lazy **202μs** · canada lazy 1,448μs · citm lazy **757μs** · gsoc lazy 806μs
-> **현재 최고 기록 (macOS AArch64)**: twitter lazy **246μs** · canada lazy 1,845μs · citm lazy **627μs** · gsoc lazy 618μs
+> **현재 최고 기록 (macOS AArch64)**: twitter lazy **245μs** · canada lazy **1,935μs** · citm lazy **632μs** · gsoc lazy **606μs**
 > **현재 최고 기록 (Snapdragon Cortex-X3)**: twitter lazy **232μs** · canada lazy **1,692μs** · citm lazy **645μs** · gsoc lazy **651μs**
 > **새 목표 (x86_64 기준)**: yyjson 대비 **1.2× (20% 이상) 전 파일 동시 달성**
 > **1.2× 목표치 (x86_64)**: twitter ≤219μs · canada ≤2,274μs · citm ≤592μs · gsoc ≤1,209μs
@@ -301,7 +301,7 @@ simdjson 스타일 두 단계 파싱을 Beast 테이프 구조에 통합.
 ---
 
 ### Phase 57 — AArch64 Global NEON Consolidation (Hypothesis Reversal) ⭐⭐⭐⭐⭐ ✅
-**실제 효과 (macOS AArch64)**: twitter **-5%** (260→**246μs**), gsoc **-3%** (634→618μs) | **성공**
+**실제 효과 (macOS AArch64)**: twitter **-6%** (260→**245μs**), gsoc **-4.5%** (634→606μs) | **성공**
 - [x] AArch64 환경에서 x86 유래 "SWAR-8 Pre-gate"가 파이프라인 정체의 주범임을 규명
 - [x] `skip_to_action`, `scan_key_colon_next`에서 모든 스칼라 게이트 제거 및 **Pure NEON** 통합
 - [x] Apple Silicon과 범용 AArch64 모두에서 벡터 파이프라인 효율 극대화 확인
@@ -322,10 +322,10 @@ simdjson 스타일 두 단계 파싱을 Beast 테이프 구조에 통합.
 
 | 파일 | Beast | yyjson | Beast vs yyjson | 1.2× 달성 |
 |:---|---:|---:|:---:|:---:|
-| twitter.json | 246 μs | 176 μs | yyjson +40% 빠름 | ❌ |
-| canada.json | 1,845 μs | 1,441 μs | yyjson +28% 빠름 | ❌ |
-| citm_catalog.json | 627 μs | 474 μs | yyjson +32% 빠름 | ❌ |
-| gsoc-2018.json | **618 μs** | 990 μs | **Beast +60%** | ✅ |
+| twitter.json | **245 μs** | 179 μs | yyjson +37% 빠름 | ❌ |
+| canada.json | **1,935 μs** | 1,444 μs | yyjson +34% 빠름 | ❌ |
+| citm_catalog.json | **632 μs** | 472 μs | yyjson +34% 빠름 | ❌ |
+| gsoc-2018.json | **606 μs** | 980 μs | **Beast +62%** | ✅ |
 
 ### AArch64 Generic (Snapdragon 8 Gen 2, Phase 57+58 베이스라인, Cortex-X3 pinned)
 
@@ -522,7 +522,7 @@ cur_state_ = cstate_stack_[--depth_];
 | **Phase 50-2** | NEON 정밀 최적화 (SWAR 제거 및 스칼라 폴백) | macOS AArch64 twitter **253μs** 달성 |
 | Phase 51 | 64비트 TapeNode 단일 스토어 (`__builtin_memcpy`) | ❌ twitter +11.7%, citm +14.4% 심각 회귀 → revert |
 | Phase 52 | AVX2 32B 디지트 스캐너 (kActNumber) | ❌ twitter +11.2%, citm +8.1% 회귀 → revert |
-| **Phase 57** | **AArch64 Global Pure NEON 통합** | AArch64 모든 스칼라 게이트 제거 및 벡터 파이프라인 단일화 (twitter **246μs** 경신) |
+| **Phase 57** | **AArch64 Global Pure NEON 통합** | AArch64 모든 스칼라 게이트 제거 및 벡터 파이프라인 단일화 (twitter **245μs** 경신) |
 | **Phase 58** | **Snapdragon 8 Gen 2 베이스라인 측정** | Cortex-X3 pinned: twitter **244μs**, citm **654μs**, gsoc **647μs** — 전 파일 1.2× 달성. SVE 커널 비활성화 확인. README 분리 섹션 추가. |
 | **Phase 58-A** | **Snapdragon 프리페치 거리 튜닝** | 입력 프리페치 192B→**256B** (L2 hint), 테이프 +8→**+16** 노드. twitter pinned 246→**243.7μs** (-1.0%). 전 파일 회귀 없음. |
 | Phase 60-B | AArch64 단거리 키 스칼라 프리스캔 | ❌ 243.7→**257.5μs** (+5.6% 회귀) → revert. 분기 의존성이 NEON 스페큘레이션 저해. |
