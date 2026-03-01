@@ -1,6 +1,6 @@
 # Architecture Optimization Failure Log
 
-> **마지막 업데이트**: 2026-03-01
+> **마지막 업데이트**: 2026-03-01 (Phase 49/51/52 x86_64 회귀 사례 추가)
 > 이 문서는 Beast JSON 라이브러리 개발 중 각 아키텍처(x86_64, aarch64 등)별로 시도되었으나 실패(성능 회귀, Regression)한 최적화 사례와 그 원인을 면밀히 분석한 자료입니다.
 > 에이전트는 새로운 SIMD 최적화를 시도하기 전에 **반드시 이 문서를 숙지**하여 동일한 실수를 반복하지 않도록 해야 합니다.
 
@@ -43,3 +43,89 @@
   * 프로그래머가 이를 억지로 루프 바깥으로 끄집어내면 레지스터 압력이 증가(Register Pressure)하여 오히려 컴파일러가 해당 레지스터 값을 스택에 Spill/Reload 하는 최악의 코드를 생성합니다.
 * **가이드라인 (에이전트 수칙)**:
   * **x86_64 에이전트**: SIMD 상수는 **항상 사용 지점(스코프)에 가장 가깝게(인접 선언)** `const __m256i v = _mm256_set1...` 형태로 선언할 것. 컴파일러의 레지스터 프로모션을 절대 방해하지 마세요. (AVX-512도 동일)
+
+---
+
+### ❌ [Phase 49] 브랜치리스 push() 비트스택 연산 (Branchless Bit-Stack in push())
+* **목표**: `push()` 함수 내 `bool` 타입 + 삼항 연산자(CMOV) 패턴을, 순수 정수 산술(NEG+AND)로 대체하여 분기를 완전 제거.
+  ```cpp
+  // 기존 (컴파일러가 CMOV 생성)
+  const bool in_obj = !!(obj_bits_ & mask);
+  sep = is_val ? uint8_t(2) : uint8_t(has_el);
+  kv_key_bits_ ^= (in_obj ? mask : uint64_t(0));
+
+  // 시도 (NEG+AND 방식)
+  const uint64_t in_obj = (obj_bits_ & mask) != 0;
+  sep = static_cast<uint8_t>((is_val << 1) | (~is_val & has_el));
+  kv_key_bits_ ^= (-in_obj) & mask;
+  ```
+* **적용 대상**: `push()` 함수 (line ~5863)
+* **실패 결과 (성능 회귀)**:
+  * `twitter.json`: 365μs → 370μs (+1.4%)
+  * `citm_catalog.json`: 955μs → 992μs (+3.9%)
+  * `gsoc-2018.json`: 751μs → 770μs (+2.5%)
+  * `canada.json`: 1,416μs → 1,497μs (+5.7%) ← 최대 회귀
+* **근본 원인 분석**:
+  1. **CMOV은 이미 최적**: GCC/Clang `-O3`는 `bool + 삼항` 패턴에서 단일 `cmov` 명령을 생성합니다. 이것이 곧 branchless 코드이므로, 명시적 정수 산술로 바꿔도 이점이 없습니다.
+  2. **명령어 수 증가**: `(is_val << 1) | (~is_val & has_el)` 는 4개 명령(SHL, NOT, AND, OR)을 생성합니다. 컴파일러의 CMOV는 단 1개 명령(`cmovne`)입니다.
+  3. **NEG+AND vs CMOV**: `(-in_obj) & mask`는 NEG+AND+XOR = 3 ops, 원래 `(in_obj ? mask : 0) ^= kv_key_bits_`는 CMOV+XOR = 2 ops로 오히려 더 효율적이었습니다.
+* **가이드라인 (에이전트 수칙)**:
+  * **x86_64 에이전트**: `bool` + 삼항 연산자 패턴을 NEG+AND 방식의 `uint64_t` 정수 산술로 대체하지 마세요. 컴파일러는 이미 최적의 CMOV를 생성하며, 명시적 정수 산술은 명령어 수를 오히려 늘립니다. 특히 `push()` 같은 hotpath 함수에서 컴파일러의 최적화를 간섭하지 마세요.
+
+---
+
+### ❌ [Phase 51] 64비트 TapeNode 단일 스토어 (Single 64-bit Store)
+* **목표**: `push()` / `push_end()` 에서 두 개의 32비트 필드 스토어를 단일 `uint64_t` packed 스토어(`__builtin_memcpy`)로 통합하여 store 횟수를 절반으로 줄이려는 시도.
+  ```cpp
+  // 기존 (32비트 ×2)
+  n->meta   = (uint32_t(t) << 24) | (uint32_t(sep) << 16) | uint32_t(l);
+  n->offset = o;
+
+  // 시도 (64비트 ×1)
+  const uint64_t packed = static_cast<uint64_t>(meta_val) | (static_cast<uint64_t>(o) << 32);
+  TapeNode *n = tape_head_++;
+  __builtin_memcpy(n, &packed, 8);
+  ```
+* **적용 대상**: `push()` (line ~5895), `push_end()` (line ~5910)
+* **실패 결과 (심각한 성능 회귀)**:
+  * `twitter.json`: 365μs → 408μs (**+11.7%**)
+  * `citm_catalog.json`: 955μs → 1,093μs (**+14.4%**)
+  * `gsoc-2018.json`: 751μs → 811μs (+8.0%)
+  * `canada.json`: 1,416μs → 1,502μs (+6.1%)
+* **근본 원인 분석**:
+  1. **컴파일러 스토어 병합(Store Merging) 방해**: GCC/Clang `-O3`는 인접한 두 32비트 스토어를 자동으로 단일 64비트 스토어(`movq`)로 병합합니다. 이 최적화는 이미 기존 코드에 적용되어 있었습니다.
+  2. **중간 변수로 인한 레지스터 압력 증가**: `const uint64_t packed = ...`를 위해 중간 계산 결과를 별도 레지스터에 담아야 했고, 이 추가 레지스터 사용이 핫 루프 내 레지스터 스필(Spill)을 유발했습니다.
+  3. **`__builtin_memcpy` 패턴의 부작용**: 컴파일러 입장에서 `__builtin_memcpy(n, &packed, 8)`은 임의의 포인터 복사로 해석될 여지가 있어, 이전 스토어 병합 최적화 기회를 오히려 차단했습니다.
+* **가이드라인 (에이전트 수칙)**:
+  * **x86_64 에이전트**: TapeNode 같은 `struct {uint32_t meta; uint32_t offset}` 구조에서 두 필드를 개별 대입으로 쓰는 것은 컴파일러가 이미 스토어 병합으로 최적화합니다. `uint64_t packed + __builtin_memcpy` 패턴으로 직접 병합을 강제하지 마세요. 이는 컴파일러 최적화를 방해하고 레지스터 압력을 증가시킵니다.
+
+---
+
+### ❌ [Phase 52] 정수 파싱 AVX2 SIMD 가속 (AVX2 Digit Scanner in kActNumber)
+* **목표**: `kActNumber` 처리 경로에서 기존 SWAR-8(8바이트 스칼라 워드) 대신 AVX2 32B 벡터 스캐너를 추가하여 긴 숫자(8자리 초과) 파싱 속도 향상.
+  ```cpp
+  // 시도: SWAR-8 pre-gate → AVX2 32B bulk
+  const __m256i vzero = _mm256_set1_epi8('0');
+  const __m256i vnine = _mm256_set1_epi8(9);
+  while (p_ + 32 <= end_) {
+    __m256i v       = _mm256_loadu_si256(...);
+    __m256i shifted = _mm256_sub_epi8(v, vzero);
+    __m256i lt0     = _mm256_cmpgt_epi8(_mm256_setzero_si256(), shifted);
+    __m256i gt9     = _mm256_cmpgt_epi8(shifted, vnine);
+    uint32_t mask   = _mm256_movemask_epi8(_mm256_or_si256(lt0, gt9));
+    if (mask) { p_ += __builtin_ctz(mask); goto num_done; }
+    p_ += 32;
+  }
+  ```
+* **적용 대상**: `kActNumber` case (line ~6309)
+* **실패 결과**:
+  * `canada.json`: 1,416μs → 1,374μs (**-2.9%** ← 유일한 개선)
+  * `twitter.json`: 365μs → 406μs (**+11.2%** 회귀)
+  * `citm_catalog.json`: 955μs → 1,033μs (**+8.1%** 회귀)
+  * `gsoc-2018.json`: 751μs → 797μs (**+6.1%** 회귀)
+* **근본 원인 분析**:
+  1. **YMM 레지스터 충돌**: `kActNumber` 내 `const __m256i vzero/vnine`을 추가하면 `parse()` 함수 전체에서 YMM 레지스터 압력이 급격히 증가합니다. `kActString` 경로의 AVX2 스캐너(`vq`, `vbs` 등 YMM 레지스터)와 충돌하여 컴파일러가 스택 Spill/Reload를 유발했습니다.
+  2. **Phase 40과 동일한 메커니즘**: Phase 40 (상수 호이스팅) 실패와 완전히 같은 레지스터 압력 문제입니다. `parse()` 함수 내 두 서로 다른 SIMD 처리 경로가 YMM 레지스터를 공유하면, 컴파일러의 레지스터 할당 예산을 초과합니다.
+  3. **숫자 길이 분포 간과**: `twitter.json`의 숫자(18자리 ID)는 드문 케이스입니다. 대부분 짧은 숫자들(<8자리)이 SWAR-8로 빠르게 처리됩니다. AVX2 진입 비용이 실질적 이익보다 큽니다.
+* **가이드라인 (에이전트 수칙)**:
+  * **x86_64 에이전트**: `parse()` 같은 대형 함수에서 `kActString` 과 `kActNumber` 두 경로 모두 YMM 레지스터 집약 코드를 추가하지 마세요. 두 경로가 동시에 활성화되면 YMM 레지스터 예산(16개)을 초과하여 Spill이 발생합니다. 숫자 파싱 가속이 필요하다면 별도 함수로 분리하여 레지스터 스코프를 격리하는 방식을 검토하세요.
