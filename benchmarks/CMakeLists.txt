@@ -77,13 +77,26 @@ if(NOT CMAKE_BUILD_TYPE MATCHES "Debug")
     add_link_options(-flto)
 endif()
 
-set(PGO_MODE "" CACHE STRING "PGO mode: GENERATE or USE")
+# Phase 47: Profile-Guided Optimization (PGO)
+# Usage:
+#   Step 1 — instrument build:
+#     cmake -DPGO_MODE=GENERATE -B build && cmake --build build -j$(nproc)
+#     ./build/benchmarks/bench_all --iter 30 --all   # collects .gcda profiles
+#   Step 2 — optimized build:
+#     cmake -DPGO_MODE=USE -B build && cmake --build build -j$(nproc)
+#
+# GCC PGO: .gcda files are written alongside .o files in the build directory.
+# -fprofile-use (without a path) reads them from the same location automatically.
+# -fprofile-correction tolerates minor profile/source mismatches.
+set(PGO_MODE "" CACHE STRING "PGO mode: GENERATE or USE (leave empty for normal build)")
 if(PGO_MODE STREQUAL "GENERATE")
+    message(STATUS "PGO: instrument build (GENERATE) — run benchmarks to collect profiles")
     add_compile_options(-fprofile-generate)
     add_link_options(-fprofile-generate)
 elseif(PGO_MODE STREQUAL "USE")
-    add_compile_options(-fprofile-use=${CMAKE_SOURCE_DIR}/default.profdata -fprofile-correction)
-    add_link_options(-fprofile-use=${CMAKE_SOURCE_DIR}/default.profdata -fprofile-correction)
+    message(STATUS "PGO: optimized build (USE) — reading .gcda profiles from build tree")
+    add_compile_options(-fprofile-use -fprofile-correction)
+    add_link_options(-fprofile-use -fprofile-correction)
 endif()
 
 # C++17 Benchmarks

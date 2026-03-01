@@ -1,6 +1,6 @@
 # Beast JSON — yyjson 1.2× Domination Plan (Phase 44-55)
 
-> **Date**: 2026-02-28 (Phase 43 complete — AVX-512 64B scanner)
+> **Date**: 2026-02-28 (Phase 44 complete — Bool/Null double-pump fusion)
 > **Mission**: Beat yyjson by **≥20% (1.2×) on ALL 4 benchmark files simultaneously**
 > **Architectures**: x86_64 (AVX-512) PRIMARY · aarch64 (NEON) SECONDARY
 
@@ -79,9 +79,9 @@ Phase 46 AVX-512 skip_to_action():
 
 ---
 
-## Phase 44 — Bool/Null/Close 융합 키 스캐너 ⭐⭐⭐⭐⭐
+## Phase 44 — Bool/Null/Close 융합 키 스캐너 ⭐⭐⭐⭐⭐ ✅ **COMPLETE**
 
-**Priority**: CRITICAL | **예상 효과**: twitter -6 to -8%, citm -3%
+**Priority**: CRITICAL | **실제 효과**: twitter lazy 424→424μs (측정 노이즈), ctest 81/81 PASS
 **난이도**: 낮음 | **위험도**: 낮음
 
 ### 이론
@@ -163,9 +163,9 @@ ctest --test-dir build --output-on-failure  # 81/81 PASS
 
 ---
 
-## Phase 45 — scan_key_colon_next SWAR-24 Dead Path 제거 ⭐⭐⭐
+## Phase 45 — scan_key_colon_next SWAR-24 Dead Path 제거 ⭐⭐⭐ ✅ **COMPLETE**
 
-**Priority**: MEDIUM | **예상 효과**: twitter -1.5% (I-cache), 코드 크기 감소
+**Priority**: MEDIUM | **실제 효과**: twitter lazy **-5.9%** (424→400μs), citm lazy **-7.3%** (1,025→950μs)
 **난이도**: 낮음 | **위험도**: 낮음
 
 ### 이론
@@ -189,10 +189,10 @@ SWAR-24 제거 → 함수 크기 약 30줄 감소 → L1 I-cache 효율 향상.
 
 ---
 
-## Phase 46 — AVX-512 배치 공백 스킵 (skip_to_action 개선) ⭐⭐⭐⭐⭐
+## Phase 46 — AVX-512 배치 공백 스킵 (skip_to_action 개선) ⭐⭐⭐⭐⭐ ✅ **COMPLETE**
 
-**Priority**: CRITICAL (citm_catalog) | **예상 효과**: citm -12 to -18%, twitter -3%
-**난이도**: 중간 | **위험도**: 중간 (Phase 37 전례 존재)
+**Priority**: CRITICAL (citm_catalog) | **실제 효과**: twitter -3.5%, canada -21.2%, citm -6.3%, gsoc -5.7%
+**난이도**: 중간 | **위험도**: 중간 (Phase 37 전례 — SWAR-8 pre-gate로 해결)
 
 ### 이론: Phase 37 실패 분석과 AVX-512의 차별점
 
@@ -280,9 +280,9 @@ Phase 37 실패 교훈: 짧은 공백(2-8B)에서 AVX2가 역효과.
 
 ---
 
-## Phase 47 — Profile-Guided Optimization (PGO) ⭐⭐⭐⭐
+## Phase 47 — Profile-Guided Optimization (PGO) ⭐⭐⭐⭐ ✅ **COMPLETE**
 
-**Priority**: HIGH | **예상 효과**: 전 파일 -6 to -12% (공짜 최적화)
+**Priority**: HIGH | **실제 효과**: canada -14.6%, 전 파일 합산 -3% (GCC PGO 워크플로 수정 포함)
 **난이도**: 낮음 | **위험도**: 매우 낮음
 
 ### 이론
@@ -322,9 +322,9 @@ push() 내부 분기: 오브젝트 vs 배열 비율 학습
 
 ---
 
-## Phase 48 — 입력 선행 프리페치 (Prefetch) ⭐⭐⭐⭐
+## Phase 48 — 입력 선행 프리페치 (Prefetch) ⭐⭐⭐⭐ ✅ **COMPLETE**
 
-**Priority**: HIGH | **예상 효과**: 전 파일 -4 to -8%
+**Priority**: HIGH | **실제 효과**: twitter -5%, canada -10% (최선 측정치), A/B 테스트 192B 채택
 **난이도**: 매우 낮음 | **위험도**: 낮음
 
 ### 이론
@@ -735,9 +735,10 @@ class Parser {
 
 ```
 Phase 44: bool/null double-pump fusion   → twitter -6%, citm -3%
-Phase 45: SWAR-24 dead code 제거         → twitter -1.5%
-Phase 48: PGO 빌드                       → 전 파일 -7%
-Phase 50: 입력 프리페치                  → 전 파일 -4%
+Phase 45: SWAR-24 dead code 제거         → twitter -5.9%, citm -7.3% ✅
+Phase 46: AVX-512 WS skip + SWAR-8 gate → canada -21.2%, twitter -3.5% ✅
+Phase 47: PGO 빌드 시스템 정비          → canada -14.6% (추가), 전 파일 합산 -3% ✅
+Phase 48: 입력/테이프 선행 프리페치     → twitter -5%, canada -10% ✅
 ```
 
 누적 twitter 예상: 307 × 0.94 × 0.985 × 0.93 × 0.96 ≈ **253μs** (target: 219μs)

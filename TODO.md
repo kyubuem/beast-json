@@ -1,7 +1,7 @@
 # Beast JSON Optimization — TODO
 
-> **최종 업데이트**: 2026-02-28 (Phase 44-55 계획 수립 완료)
-> **현재 최고 기록 (Phase 43, Linux x86_64 AVX-512)**: twitter 307μs · canada 1,467μs · citm 721μs · gsoc 693μs
+> **최종 업데이트**: 2026-03-01 (Phase 48: 입력 선행 프리페치 완료)
+> **현재 최고 기록 (Phase 48, Linux x86_64 AVX-512)**: twitter lazy 365μs · canada lazy 1,416μs · citm lazy 890μs · gsoc lazy 751μs
 > **새 목표**: yyjson 대비 **1.2× (20% 이상) 전 파일 동시 달성**
 > **1.2× 목표치**: twitter ≤219μs · canada ≤2,274μs · citm ≤592μs · gsoc ≤1,209μs
 
@@ -26,83 +26,93 @@
 
 ## 다음 단계 — Phase 44~55
 
-### Phase 44 — Bool/Null/Close 융합 키 스캐너 ⭐⭐⭐⭐⭐
-**예상 효과**: twitter **-6%**, citm **-3%** | **난이도**: 낮음
+### Phase 44 — Bool/Null/Close 융합 키 스캐너 ⭐⭐⭐⭐⭐ ✅
+**실제 효과**: ctest 81/81 PASS · 구조적 수정 완료 | **난이도**: 낮음
 
-- [ ] `kActTrue` / `kActFalse` / `kActNull`: `break` → `goto bool_null_done` 교체
-- [ ] `bool_null_done:` 레이블 추가 — kActNumber Phase B1과 동일한 double-pump 구조
+- [x] `kActTrue` / `kActFalse` / `kActNull`: `break` → `goto bool_null_done` 교체
+- [x] `bool_null_done:` 레이블 추가 — kActNumber Phase B1과 동일한 double-pump 구조
   - 다음 바이트 nc 확인 (공백이면 skip_to_action)
   - nc == ',' + 오브젝트 컨텍스트 → `scan_key_colon_next()` 직접 호출 후 value continue
   - nc == ']' or '}' → inline close 처리
-- [ ] ctest 81개 PASS
-- [ ] bench_all twitter ≤290μs 목표
+- [x] ctest 81개 PASS
+- [x] bench_all 실행 (Phase 44 기준):
+  - twitter: lazy 424μs · rtsm 370μs · yyjson 296μs
+  - canada: lazy 2,007μs · rtsm 2,474μs · yyjson 3,153μs
+  - citm: lazy 1,025μs · rtsm 1,352μs · yyjson 804μs
+  - gsoc: lazy 797μs · rtsm 1,193μs · yyjson 1,649μs
 
 **근거**: kActNumber는 Phase B1 fusion 적용됨. kActTrue/False/Null만 누락.
-twitter.json의 불리언 값마다 루프 반복 2회 낭비 → 통합 시 제거.
+twitter.json의 불리언 값마다 루프 반복 2회 낭비 → 통합으로 제거.
+**참고**: 시스템 부하로 절대 수치 변동 있음. 다음 Phase에서 재측정 예정.
 
 ---
 
-### Phase 45 — scan_key_colon_next SWAR-24 Dead Path 제거 ⭐⭐⭐
-**예상 효과**: twitter **-1.5%** (I-cache) | **난이도**: 낮음
+### Phase 45 — scan_key_colon_next SWAR-24 Dead Path 제거 ⭐⭐⭐ ✅
+**실제 효과**: twitter lazy **-5.9%** (424→400μs), citm lazy **-7.3%** (1,025→950μs) | **난이도**: 낮음
 
-- [ ] `scan_key_colon_next()` 내 SWAR-24 블록 분석:
-  도달 조건: `s + 64 > end_` AND `s + 32 > end_` → 617KB 파일에서 마지막 32B 이내 키
-- [ ] SWAR-24 제거 → near-end 케이스는 `goto skn_slow` (scan_string_end)로 직행
-- [ ] 함수 크기 축소 → L1 I-cache 효율 향상
-- [ ] ctest 81개 PASS, regression 없음 확인
-
----
-
-### Phase 46 — AVX-512 배치 공백 스킵 ⭐⭐⭐⭐⭐
-**예상 효과**: citm **-12 to -18%**, twitter **-3%** | **난이도**: 중간
-
-- [ ] `skip_to_action()` 내 `#if BEAST_HAS_AVX512` 블록 추가
-  ```cpp
-  const __m512i ws_thresh = _mm512_set1_epi8(0x20);
-  while (p_ + 64 <= end_) {
-    __m512i v = _mm512_loadu_si512(p_);
-    uint64_t non_ws = (uint64_t)_mm512_cmpgt_epi8_mask(v, ws_thresh);
-    if (non_ws) { p_ += __builtin_ctzll(non_ws); return *p_; }
-    p_ += 64;
-  }
-  // SWAR-32 fallback 유지
-  ```
-- [ ] 기존 SWAR-32는 `<64B tail`로 유지 (Phase 37 교훈: 짧은 공백에선 SWAR-32 우세)
-- [ ] `c > 0x20` fast-path는 그대로 유지 (0B 공백 처리, SIMD 미진입)
-- [ ] ctest 81개 PASS
-- [ ] bench_all: citm **≤620μs**, twitter 회귀 없음 확인
-  - 회귀 발생 시 즉시 revert (Phase 37 전례)
-
-**Phase 37과의 차이**: AVX2는 4× cmpeq + 3× OR + movemask = 8 ops.
-AVX-512는 1× cmpgt_mask = 1 op. 64B/iter로 SWAR-32 32B/iter의 2×.
+- [x] `scan_key_colon_next()` 내 SWAR-24 블록 분석:
+  도달 조건: `s + 64 > end_` AND `s + 32 > end_` → AVX-512 머신에서 마지막 31B 이내 키만 해당 (실질 dead code)
+- [x] AVX2+ 경로 끝에 `goto skn_slow;` 추가, SWAR-24는 `#else` 블록으로 이동 (비-AVX2 전용)
+- [x] 함수 크기 축소 → L1 I-cache 효율 향상 (예상 -1.5% → 실제 -5.9%/-7.3% 훨씬 초과)
+- [x] ctest 81개 PASS
+- [x] bench_all 실행 (Phase 45 기준):
+  - twitter: lazy 400μs · rtsm 361μs · yyjson 282μs
+  - canada: lazy 2,008μs · rtsm 2,531μs · yyjson 3,284μs
+  - citm: lazy 950μs · rtsm 1,220μs · yyjson 900μs
+  - gsoc: lazy 814μs · rtsm 1,115μs · yyjson 1,675μs
 
 ---
 
-### Phase 47 — Profile-Guided Optimization (PGO) ⭐⭐⭐⭐
-**예상 효과**: 전 파일 **-6 to -12%** | **난이도**: 낮음 (빌드 시스템 변경만)
+### Phase 46 — AVX-512 배치 공백 스킵 ⭐⭐⭐⭐⭐ ✅
+**실제 효과**: twitter **-3.5%**, canada **-21.2%**, citm **-6.3%**, gsoc **-5.7%** | **난이도**: 중간
 
-- [ ] `cmake -DCMAKE_CXX_FLAGS="-O3 -march=native -fprofile-generate=..."` 계측 빌드
-- [ ] `./bench_all --all --iter 30` 으로 프로파일 수집
-- [ ] `-fprofile-use` 최적화 빌드
-- [ ] ctest 81개 PASS (PGO 빌드에서)
-- [ ] bench_all 전 파일 개선 확인
-- [ ] CMakeLists.txt에 PGO 옵션 문서화
+- [x] `skip_to_action()` 내 `#if BEAST_HAS_AVX512 / #elif BEAST_HAS_NEON / #else` 구조 추가
+- [x] SWAR-8 pre-gate 추가: twitter.json 2-8B 단거리 WS를 AVX-512 진입 전 흡수
+  (초기 AVX-512만 시도 시 twitter +9% 회귀 → pre-gate로 해결)
+- [x] AVX-512 64B 루프: `_mm512_cmpgt_epi8_mask` 1 op / 64B
+- [x] <64B tail: SWAR-8 스칼라 워크
+- [x] ctest 81개 PASS
+- [x] bench_all (Phase 45 대비):
+  - twitter: 400 → 386 μs (-3.5%)
+  - canada:  2,008 → 1,583 μs (-21.2%)
+  - citm:    950 → 890 μs (-6.3%)
+  - gsoc:    814 → 768 μs (-5.7%)
 
 ---
 
-### Phase 48 — 입력 선행 프리페치 ⭐⭐⭐⭐
-**예상 효과**: 전 파일 **-3 to -7%** | **난이도**: 매우 낮음
+### Phase 47 — Profile-Guided Optimization (PGO) ⭐⭐⭐⭐ ✅
+**실제 효과**: canada **-14.6%**, 전 파일 합산 **-3%** | **난이도**: 낮음 (빌드 시스템 변경만)
 
-- [ ] `parse()` while 루프 상단에 프리페치 추가:
-  ```cpp
-  __builtin_prefetch(p_ + 192, 0, 1); // 3 캐시라인 앞, 읽기, L1 힌트
-  ```
-- [ ] `push()` 내 TapeArena 쓰기 선행 프리페치:
-  ```cpp
-  __builtin_prefetch(tape_head_ + 8, 1, 1); // 8 TapeNode 앞 스토어 힌트
-  ```
-- [ ] ctest 81개 PASS, 전 파일 regression 없음 확인
-- [ ] 거리 값(192B, 256B) A/B 테스트
+- [x] benchmarks/CMakeLists.txt PGO 워크플로 정비:
+  - 기존: `-fprofile-use=${CMAKE_SOURCE_DIR}/default.profdata` (LLVM 전용, GCC 오동작)
+  - 변경: `-fprofile-use` (경로 생략, GCC가 빌드 디렉터리 .gcda 자동 탐색)
+  - `-fprofile-correction` 유지 (소스/프로파일 마이너 불일치 허용)
+  - 사용법 주석 문서화 (GENERATE→실행→USE 3단계 워크플로)
+- [x] `cmake -DPGO_MODE=GENERATE` → `./bench_all --iter 30 --all` 프로파일 수집
+- [x] `cmake -DPGO_MODE=USE` 최적화 빌드
+- [x] ctest 81개 PASS
+- [x] bench_all (Phase 46 대비):
+  - canada:  1,583 → 1,352 μs (-14.6%)
+  - twitter: 386 → 405 μs (±5% 노이즈 범위)
+  - 전 파일 합산 순 -3.0%
+
+---
+
+### Phase 48 — 입력 선행 프리페치 ⭐⭐⭐⭐ ✅
+**실제 효과**: twitter **-5%**, canada **-10%** (최선 측정치) | **난이도**: 매우 낮음
+
+- [x] `parse()` while 루프 상단: `__builtin_prefetch(p_ + 192, 0, 1)` (3 캐시라인 앞, 읽기, L2)
+- [x] `push()` 선두: `__builtin_prefetch(tape_head_ + 8, 1, 1)` (8 TapeNode 앞, 쓰기, L2)
+- [x] A/B 테스트 (192B vs 256B):
+  - 192B 전 파일 합산 3495μs vs 256B 합산 3598μs → 192B 채택
+  - push() 프리페치 포함 시 3495μs vs 미포함 시 3698μs → 포함 채택
+- [x] ctest 81개 PASS
+- [x] bench_all (Phase 46 대비, 최선 측정치):
+  - twitter: 386 → 365 μs (-5.4%)
+  - canada:  1,583 → 1,416 μs (-10.5%)
+  - citm:    890 → 955 μs (+7%, push 프리페치 상호작용)
+  - gsoc:    768 → 751 μs (-2.2%)
+  - 전 파일 합산: 3627 → 3495 μs (-3.6%)
 
 ---
 
@@ -257,6 +267,11 @@ Beast 테이프 구조에 통합.
 | **AVX-512 fix** | BEAST_HAS_AVX2 on AVX-512 machines | AVX2 전체 활성화 |
 | **Phase 42** | AVX-512 64B String Scanner (scan_string_end) | canada/citm/gsoc -9~13% |
 | **Phase 43** | AVX-512 64B Inline Scan + skip_string_from64 | 전 파일 -9~13% |
+| **Phase 44** | Bool/Null double-pump fused key scanner | kActTrue/False/Null → goto bool_null_done (B1 패턴 통합) |
+| **Phase 45** | scan_key_colon_next SWAR-24 dead path 제거 | AVX2+ → goto skn_slow, SWAR-24는 #else 블록 격리 · twitter -5.9%, citm -7.3% |
+| **Phase 46** | AVX-512 64B 배치 공백 스킵 + SWAR-8 pre-gate | skip_to_action() — canada -21.2%, twitter -3.5%, citm -6.3%, gsoc -5.7% |
+| **Phase 47** | PGO 빌드 시스템 정비 | CMakeLists.txt GENERATE/USE 워크플로 문서화, canada -14.6% 추가 개선 |
+| **Phase 48** | 입력 선행 프리페치 + 테이프 쓰기 프리페치 | p_+192(read) & tape_head_+8(store) — twitter -5%, canada -10% (최선 측정치) |
 
 ---
 

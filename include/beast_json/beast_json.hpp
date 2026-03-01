@@ -5318,7 +5318,45 @@ class Parser {
     if (BEAST_LIKELY(c > 0x20))
       return static_cast<char>(c);
 
-#if BEAST_HAS_NEON
+#if BEAST_HAS_AVX512
+    // ── Phase 46: AVX-512 64B batch whitespace skip ──────────────────────────
+    // _mm512_cmpgt_epi8_mask vs 0x20 is 1 op (vs AVX2's 8 ops for 32B).
+    // 64B/iter vs SWAR-32's 32B/iter → ~2× throughput for whitespace-heavy JSON.
+    //
+    // SWAR-8 pre-gate: twitter.json has 2-8 WS bytes between tokens; absorb
+    // them here before paying any 512-bit register setup cost (Phase 37 lesson).
+    {
+      uint64_t am = swar_action_mask(load64(p_));
+      if (BEAST_LIKELY(am != 0)) {
+        p_ += BEAST_CTZ(am) >> 3;
+        return *p_;
+      }
+      p_ += 8;
+    }
+    // Still in whitespace → bulk path: AVX-512 64B/iter for long WS runs.
+    if (BEAST_LIKELY(p_ + 64 <= end_)) {
+      const __m512i ws_thresh = _mm512_set1_epi8(0x20);
+      do {
+        __m512i v = _mm512_loadu_si512(reinterpret_cast<const __m512i *>(p_));
+        uint64_t non_ws =
+            static_cast<uint64_t>(_mm512_cmpgt_epi8_mask(v, ws_thresh));
+        if (BEAST_LIKELY(non_ws)) {
+          p_ += __builtin_ctzll(non_ws);
+          return *p_;
+        }
+        p_ += 64;
+      } while (BEAST_LIKELY(p_ + 64 <= end_));
+    }
+    // <64B tail: SWAR-8 scalar walk
+    while (BEAST_LIKELY(p_ + 8 <= end_)) {
+      uint64_t am = swar_action_mask(load64(p_));
+      if (BEAST_LIKELY(am != 0)) {
+        p_ += BEAST_CTZ(am) >> 3;
+        return *p_;
+      }
+      p_ += 8;
+    }
+#elif BEAST_HAS_NEON
     while (BEAST_LIKELY(p_ + 16 <= end_)) {
       uint8x16_t v = vld1q_u8(reinterpret_cast<const uint8_t *>(p_));
       uint8x16_t mask = vcgtq_u8(v, vdupq_n_u8(0x20));
@@ -5734,9 +5772,13 @@ class Parser {
         return 0;
       goto skn_found;
     }
-    // near end of buffer: fall through to SWAR-24
-#endif
-    // SWAR cascaded fast path (≤24-byte key, no backslash).
+    // ── Phase 45: near end of buffer on AVX2+ → skn_slow directly ──────────
+    // SWAR-24 is dead code on AVX2/AVX-512 machines (only reached for keys
+    // within the last 31B of input, i.e. essentially never on real files).
+    // Removing it shrinks the function → better L1 I-cache utilization.
+    goto skn_slow;
+#else
+    // ── SWAR-24 (non-AVX2 machines only) ────────────────────────────────────
     // Phase D2: load v0 first; exit immediately for ≤8-char keys (most common
     // twitter.json keys: "id", "text", "user", "lang" etc.) before loading
     // v1/v2.
@@ -5776,6 +5818,7 @@ class Parser {
       }
       // Backslash found → fall through to full scan
     }
+#endif // BEAST_HAS_AVX2
   skn_slow:
     e = skip_string(s);
     if (BEAST_UNLIKELY(e >= end_ || *e != '"'))
@@ -5818,6 +5861,9 @@ class Parser {
   //   sep = 1  → comma         (non-first array element or object key)
   //   sep = 2  → colon         (object value, always)
   BEAST_INLINE void push(TapeNodeType t, uint16_t l, uint32_t o) noexcept {
+    // Phase 48: prefetch tape write slot 8 TapeNodes (128B) ahead — store hint.
+    // Hides tape-arena write latency; significant gain on large files (canada).
+    __builtin_prefetch(tape_head_ + 8, 1, 1);
     const uint64_t mask = depth_mask_; // precomputed: no variable shift
     uint8_t sep = 0;
     if (mask) { // depths 1..64: bit-stack path
@@ -5887,6 +5933,9 @@ public:
     }
 
     while (p_ < end_) {
+      // Phase 48: prefetch input 3 cache lines (192B) ahead — read, L2 hint.
+      // Hides DRAM latency for the next iteration's LUT + data loads.
+      __builtin_prefetch(p_ + 192, 0, 1);
       // Phase 32: LUT dispatch — 11 ActionId cases vs 17 raw char cases.
       // kActionLut[c] maps every byte to an ActionId in one L1 cache access.
       switch (static_cast<ActionId>(kActionLut[static_cast<uint8_t>(c)])) {
@@ -6177,7 +6226,7 @@ public:
           p_ += 4;
         } else
           goto fail;
-        break;
+        goto bool_null_done;
       case kActFalse:
         if (BEAST_LIKELY(p_ + 5 <= end_ && !std::memcmp(p_, "false", 5))) {
           push(TapeNodeType::BooleanFalse, 5,
@@ -6185,13 +6234,72 @@ public:
           p_ += 5;
         } else
           goto fail;
-        break;
+        goto bool_null_done;
       case kActNull:
         if (BEAST_LIKELY(p_ + 4 <= end_ && !std::memcmp(p_, "null", 4))) {
           push(TapeNodeType::Null, 4, static_cast<uint32_t>(p_ - data_));
           p_ += 4;
         } else
           goto fail;
+      bool_null_done:
+        // ── Phase 44: Double-pump bool/null with fused key scanner ──────
+        // true/false/null are values; always followed by ',', ']', or '}'.
+        // Mirrors the Phase B1 number fusion: avoid re-entering switch top,
+        // and in object context fuse the next key scan after ','.
+        if (BEAST_LIKELY(p_ < end_)) {
+          unsigned char nc = static_cast<unsigned char>(*p_);
+          if (nc <= 0x20) {
+            c = skip_to_action();
+            if (BEAST_UNLIKELY(p_ >= end_))
+              goto done;
+            nc = static_cast<unsigned char>(c);
+          }
+          if (BEAST_LIKELY(nc == ',')) {
+            ++p_;
+            if (BEAST_LIKELY(depth_ > 0 && depth_ <= 64 &&
+                             (obj_bits_ >> (depth_ - 1)) & 1)) {
+              if (BEAST_LIKELY(p_ < end_)) {
+                unsigned char fc = static_cast<unsigned char>(*p_);
+                if (fc <= 0x20) {
+                  fc = static_cast<unsigned char>(skip_to_action());
+                  if (BEAST_UNLIKELY(p_ >= end_))
+                    goto done;
+                }
+                if (BEAST_LIKELY(fc == '"')) {
+                  char vc = scan_key_colon_next(p_ + 1, nullptr);
+                  if (BEAST_UNLIKELY(vc == 0))
+                    goto fail;
+                  if (BEAST_UNLIKELY(p_ >= end_))
+                    goto done;
+                  c = vc;
+                  continue;
+                }
+                c = static_cast<char>(fc);
+                continue;
+              }
+              goto done;
+            }
+            c = skip_to_action();
+            if (BEAST_UNLIKELY(p_ >= end_))
+              goto done;
+            continue;
+          }
+          if (BEAST_LIKELY(nc == ']' || nc == '}')) {
+            if (BEAST_UNLIKELY(depth_ == 0))
+              goto fail;
+            --depth_;
+            if (BEAST_LIKELY(depth_ < kPresepDepth))
+              depth_mask_ >>= 1;
+            push_end(nc == '}' ? TapeNodeType::ObjectEnd
+                               : TapeNodeType::ArrayEnd,
+                     static_cast<uint32_t>(p_ - data_));
+            ++p_;
+            c = skip_to_action();
+            if (BEAST_UNLIKELY(p_ >= end_))
+              goto done;
+            continue;
+          }
+        }
         break;
       case kActColon:
       case kActComma:
