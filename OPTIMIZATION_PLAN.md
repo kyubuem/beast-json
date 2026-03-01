@@ -848,3 +848,33 @@ Phase 31-43의 상세 기록은 이 파일의 구 버전 참조 또는 git log�
 - AVX-512 fix: BEAST_HAS_AVX2 on AVX-512 → AVX2 코드 전체 활성화
 - Phase 42: AVX-512 64B scan in scan_string_end → canada/citm/gsoc -9~13%
 - Phase 43: AVX-512 64B inline (kActString + scan_key_colon_next) → twitter -12.4%
+
+---
+
+## 신규: AArch64 (NEON) 1.2× 초격차 플랜 (Phase 56+)
+
+x86_64 (AVX-512) 환경에서는 이미 압도적인 성능을 달성했지만, macOS AArch64(M1/M2/M3) 환경에서는 yyjson을 1.2배 이상 앞서기 위해 기존의 단순 포팅을 넘어선 **Apple Silicon 아키텍처 맞춤형 신규 이론**이 필요합니다. Phase 56은 AArch64의 약점을 피하고 강점만을 극대화하는 전용 최적화 페이즈입니다.
+
+### 이론 1: LDP (Load Pair) 기반의 초고속 32B/64B 스칼라-SIMD 융합 스킵
+
+Apple Silicon의 메모리 컨트롤러는 `ldp` (Load Pair) 명령어 처리에 극도로 최적화되어 있습니다. 기존 NEON 16B 읽기(`vld1q_u8`)를 루프 언롤링하는 대신, ARM64 어셈블리 또는 `__uav512` 수준의 64B 분산 로딩을 시도합니다.
+특히 공백 스킵(`skip_to_action`)에서 `ldp`로 32바이트를 GPR(General Purpose Registers)에 올린 뒤 스칼라 분기로 탈출하는 기법이 순수 NEON보다 빠를 가능성이 있습니다.
+
+### 이론 2: NEON String Scanner의 32B Interleaved Branching
+
+Phase 50-1에서 실패했던 NEON 32B 언롤링은 `vgetq_lane` 병목 때문이었습니다. 이를 회피하는 새로운 패턴을 고안합니다.
+- `vld1q_u8` 2개를 인터리빙(Interleaving)으로 병렬 로드합니다.
+- `vceqq_u8` 비교 후 `vmaxvq_u32` 축소 연산을 2개 벡터에 대해 각각 수행하되, 첫 번째 벡터에서 Hit가 발생하면 두 번째 벡터 연산은 파이프라인 브랜치 예측을 통해 폐기하도록(Shadowing) 숏서킷(Short-circuit) 검사 루틴을 설계합니다.
+- 추출은 절대 `vgetq_lane`을 쓰지 않고, 조건 분기가 통과된 정확한 16B 청크에 대해서만 스칼라 `while` 루프로 폴백합니다. (Phase 50-2의 극대화 버전)
+
+### 이론 3: NEON 기반 Table Lookup (TBL) State Machine 가속
+
+AArch64의 진정한 강력함은 파이프라인된 `tbl` (Vector Table Lookup) 명령어에 있습니다.
+- `scan_string_end` 과정에서 이스케이프 문자(`\`)를 만났을 때 분기하는 느린 폴백 경로를 `vtbl1_u8`을 활용한 SIMD 룩업 기반 이스케이프 파서로 교체합니다.
+- 이스케이프 처리 빈도가 높은 JSON(예: html이 포함된 payload)에서 압도적인 가속이 예상됩니다.
+
+### 이론 4: CPU Cache-Line Sizing 맞춤형 프리페치
+
+Apple Silicon의 L1/L2 캐시라인 동작 방식은 x86과 다릅니다. 현재 x86 기준으로 맞춰진 `__builtin_prefetch(p_ + 192, 0, 0)`의 거리(Distance)와 로컬리티(Locality) 힌트를 AArch64 전용(예: 128B 또는 256B)으로 재조정하여 PVM(Page Validation Miss)을 방지합니다.
+
+> **작업 지침**: Phase 56은 단일 Phase로 묶지 않고 56-1 (공백), 56-2 (문자열), 56-3 (이스케이프), 56-4 (프리페치 튜닝)의 4단계로 철저히 쪼개서 각 단계별 성능 회귀 유무를 현미경 검증하며 진행합니다.
