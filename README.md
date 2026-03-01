@@ -74,7 +74,7 @@ Beast **dominates** on float-heavy (canada) and large-object-array (gsoc) worklo
 ### macOS (Apple M1 Pro)
 
 > **Environment**: macOS 26.3, Apple Clang 17 (`-O3 -flto`), Apple M1 Pro.
-> Phase 31-34 applied (NEON string gate · Action LUT · SWAR float scanner · AVX2 x86_64).
+> Phase 31-48 applied (NEON string gate · Action LUT · SWAR float scanner · AVX2 x86_64).
 > All benchmarks: 300 iterations.
 > All results verified correct (✓ PASS).
 
