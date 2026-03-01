@@ -5892,6 +5892,7 @@ class Parser {
     // ── Stage 1: 8B SWAR gate ──────────────────────────────────────
     // Short strings (≤8 chars) exit here with zero SIMD overhead.
     // Backslash-early strings also exit early (benefit escape-heavy JSON).
+#if !BEAST_HAS_NEON
     if (BEAST_LIKELY(p + 8 <= end_)) {
       uint64_t v0;
       std::memcpy(&v0, p, 8);
@@ -5903,11 +5904,12 @@ class Parser {
         return p + (BEAST_CTZ(hq0 | hb0) >> 3);
       p += 8; // string confirmed > 8 chars: advance to SIMD
     }
+#endif
 
     // ── Stage 2: SIMD loop (string > 8 chars confirmed) ───────────
 
 #if BEAST_HAS_NEON
-    // aarch64 PRIMARY: NEON 16B. Pinpoint via vgetq_lane_u64 (no scalar loop).
+    // aarch64 PRIMARY: NEON 16B. Pinpoint via scalar fallback loop.
     {
       const uint8x16_t vq = vdupq_n_u8('"');
       const uint8x16_t vbs = vdupq_n_u8('\\');
@@ -5915,13 +5917,11 @@ class Parser {
         uint8x16_t v = vld1q_u8(reinterpret_cast<const uint8_t *>(p));
         uint8x16_t m = vorrq_u8(vceqq_u8(v, vq), vceqq_u8(v, vbs));
         if (BEAST_UNLIKELY(vmaxvq_u32(vreinterpretq_u32_u8(m)) != 0)) {
-          // Pinpoint: extract 64-bit lanes, find first set bit without scalar
-          // loop
-          uint64_t lo = vgetq_lane_u64(vreinterpretq_u64_u8(m), 0);
-          uint64_t hi = vgetq_lane_u64(vreinterpretq_u64_u8(m), 1);
-          if (lo)
-            return p + (BEAST_CTZ(lo) >> 3);
-          return p + 8 + (BEAST_CTZ(hi) >> 3);
+          // Pinpoint: AArch64 strongly prefers scalar loop over cross-register
+          // extraction latency.
+          while (*p != '"' && *p != '\\')
+            ++p;
+          return p;
         }
         p += 16;
       }
