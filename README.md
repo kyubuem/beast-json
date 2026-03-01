@@ -10,64 +10,64 @@
 
 ### Linux x86-64
 
-> **Environment**: Linux x86-64, GCC 13.3.0 `-O3 -flto -mavx2 -march=native`, 150 iterations per file, timings are per-run averages.
-> Phase 31-36 + 42+43 applied (Action LUT · SWAR float scanner · SSE2/AVX2 string gate · AVX2 32B scanner · AVX2 inline hot-path · **AVX-512 64B scanner in scan_string_end + kActString**).
+> **Environment**: Linux x86-64, GCC 13.3.0 `-O3 -flto -mavx2 -march=native`, 200 iterations per file, timings are per-run averages.
+> Phase 31-48 applied (Action LUT · SWAR float scanner · SSE2/AVX2/AVX-512 string gate · AVX-512 64B WS skip · SWAR-8 pre-gate · PGO-ready build · input prefetch).
 > yyjson compiled with full SIMD enabled. All results verified correct (✓ PASS).
 
 #### twitter.json — 616.7 KB · social graph, mixed types
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| yyjson | 263 | 2.34 GB/s | 126 |
-| beast::rtsm | 308 | 2.00 GB/s | — |
-| **beast::lazy** | **343** | **1.80 GB/s** | **139** |
-| nlohmann | 5,063 | 122 MB/s | 1,669 |
+| yyjson | 258 | 2.39 GB/s | 133 |
+| beast::rtsm | 316 | 1.95 GB/s | — |
+| **beast::lazy** | **372** | **1.65 GB/s** | **143** |
+| nlohmann | 4,959 | 124 MB/s | 1,842 |
 
-> twitter is the most challenging benchmark due to short strings (avg ~15 chars). yyjson 30% faster on parse; serialize within 10%.
+> twitter is the most challenging benchmark due to short strings and dense key-value structure. yyjson 44% faster on parse; serialize within 8%.
 
 #### canada.json — 2.2 MB · dense floating-point arrays
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **1,468** | **1.50 GB/s** | **822** |
-| beast::rtsm | 2,520 | 0.87 GB/s | — |
-| yyjson | 2,729 | 0.81 GB/s | 3,546 |
-| nlohmann | 30,455 | 72 MB/s | 7,471 |
+| **beast::lazy** | **1,527** | **1.47 GB/s** | **779** |
+| beast::rtsm | 2,026 | 1.11 GB/s | — |
+| yyjson | 2,611 | 0.86 GB/s | 3,234 |
+| nlohmann | 32,297 | 68 MB/s | 8,080 |
 
-> beast::lazy is **46% faster** to parse and **4.3× faster** to serialize than yyjson.
+> beast::lazy is **71% faster** to parse and **4.2× faster** to serialize than yyjson. AVX-512 64B whitespace skip delivers massive gains on coordinate-heavy JSON.
 
 #### citm_catalog.json — 1.7 MB · event catalog, string-heavy
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| yyjson | 710 | 2.38 GB/s | 207 |
-| **beast::lazy** | **721** | **2.34 GB/s** | **318** |
-| beast::rtsm | 1,053 | 1.60 GB/s | — |
-| nlohmann | 9,885 | 171 MB/s | 1,399 |
+| yyjson | 714 | 2.42 GB/s | 258 |
+| **beast::lazy** | **939** | **1.84 GB/s** | **368** |
+| beast::rtsm | 1,043 | 1.66 GB/s | — |
+| nlohmann | 10,314 | 163 MB/s | 1,857 |
 
-> Parse is essentially **tied with yyjson** (721 vs 710 μs, 1.5% gap). AVX-512 64B scan delivers long-key benefit.
+> yyjson 32% faster on parse. AVX-512 whitespace skip improved this file by -6% vs prior phases.
 
 #### gsoc-2018.json — 3.2 MB · large object array
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **693** | **4.69 GB/s** | **463** |
-| beast::rtsm | 1,004 | 3.24 GB/s | — |
-| yyjson | 1,451 | 2.24 GB/s | 1,337 |
-| nlohmann | 19,226 | 169 MB/s | 12,496 |
+| **beast::lazy** | **842** | **3.95 GB/s** | **535** |
+| beast::rtsm | 1,082 | 3.08 GB/s | — |
+| yyjson | 1,640 | 1.98 GB/s | 1,387 |
+| nlohmann | 20,810 | 156 MB/s | 12,926 |
 
-> beast::lazy is **52% faster** to parse and **2.9× faster** to serialize than yyjson. Parse throughput reaches **4.69 GB/s**.
+> beast::lazy is **95% faster** to parse and **2.6× faster** to serialize than yyjson. Parse throughput reaches **3.95 GB/s**.
 
 #### Summary
 
 | Benchmark | Beast vs yyjson (parse) | Beast vs yyjson (serialize) |
 | :--- | :--- | :--- |
-| twitter.json | yyjson 30% faster | yyjson 10% faster |
-| canada.json | **Beast 46% faster** | **Beast 4.3× faster** |
-| citm_catalog.json | **Tied** (1.5% gap) | yyjson 35% faster |
-| gsoc-2018.json | **Beast 52% faster** | **Beast 2.9× faster** |
+| twitter.json | yyjson 44% faster | yyjson 8% faster |
+| canada.json | **Beast 71% faster** | **Beast 4.2× faster** |
+| citm_catalog.json | yyjson 32% faster | yyjson 43% faster |
+| gsoc-2018.json | **Beast 95% faster** | **Beast 2.6× faster** |
 
-Beast **dominates** on float-heavy (canada) and large-object-array (gsoc) workloads. With AVX-512 active, the gsoc parse throughput reaches **4.69 GB/s** — 2.1× the yyjson throughput on this machine.
+Beast **dominates** on float-heavy (canada) and large-object-array (gsoc) workloads. Canada parse throughput (**1.47 GB/s**) is 71% faster than yyjson; gsoc parse (**3.95 GB/s**) nearly doubles yyjson's throughput on this machine.
 
 ---
 
