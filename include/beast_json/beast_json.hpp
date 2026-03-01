@@ -5308,14 +5308,19 @@ BEAST_INLINE void stage1_scan_avx512(const char *src, size_t len,
   while (p + 64 <= end) {
     __m512i v = _mm512_loadu_si512(reinterpret_cast<const __m512i *>(p));
 
-    uint64_t q_bits  = _mm512_cmpeq_epi8_mask(v, v_quote);
-    uint64_t bs_bits = _mm512_cmpeq_epi8_mask(v, v_backslash);
-    uint64_t s_bits  = _mm512_cmpeq_epi8_mask(v, v_brace_o)
-                     | _mm512_cmpeq_epi8_mask(v, v_brace_c)
-                     | _mm512_cmpeq_epi8_mask(v, v_bracket_o)
-                     | _mm512_cmpeq_epi8_mask(v, v_bracket_c)
-                     | _mm512_cmpeq_epi8_mask(v, v_colon)
-                     | _mm512_cmpeq_epi8_mask(v, v_comma);
+    uint64_t q_bits      = _mm512_cmpeq_epi8_mask(v, v_quote);
+    uint64_t bs_bits     = _mm512_cmpeq_epi8_mask(v, v_backslash);
+    // Phase 53: split structural chars into bracket_bits ({}[]) and sep_bits (:,).
+    // sep_bits participates in ws_like/vstart computation (so values after :,
+    // are still detected as vstart), but is NOT included in the emitted structural
+    // bitmask — shrinks positions[] by ~33% for string-heavy files (twitter, citm).
+    uint64_t bracket_bits = _mm512_cmpeq_epi8_mask(v, v_brace_o)
+                          | _mm512_cmpeq_epi8_mask(v, v_brace_c)
+                          | _mm512_cmpeq_epi8_mask(v, v_bracket_o)
+                          | _mm512_cmpeq_epi8_mask(v, v_bracket_c);
+    uint64_t sep_bits    = _mm512_cmpeq_epi8_mask(v, v_colon)
+                          | _mm512_cmpeq_epi8_mask(v, v_comma);
+    uint64_t s_bits = bracket_bits | sep_bits; // used only for ws_like / vstart
     // Signed cmpgt: 0x21-0x7F → 1 (non-ws ASCII). 0x80-0xFF treated as ws,
     // but UTF-8 continuation bytes only appear inside strings (masked by ~inside).
     uint64_t non_ws = static_cast<uint64_t>(
@@ -5363,7 +5368,11 @@ BEAST_INLINE void stage1_scan_avx512(const char *src, size_t len,
     uint64_t vstart = (external_non_ws & ~external_symbols) &
                       (ws_like << 1 | (prev_non_ws >> 63));
 
-    uint64_t structural = external_symbols | vstart;
+    // Phase 53: emit bracket_bits ({[}]) + quotes + vstart — omit sep_bits (:,).
+    // sep_bits is still in external_symbols (for correct ws_like/vstart), but
+    // Stage 2 (parse_staged) infers context from the push() bit-stack without
+    // needing explicit :, position entries.
+    uint64_t structural = ((bracket_bits & ~inside) | clean_quotes) | vstart;
 
     // Write positions to flat array
     uint32_t base = static_cast<uint32_t>(p - src);
@@ -5388,22 +5397,25 @@ BEAST_INLINE void stage1_scan_avx512(const char *src, size_t len,
     __m512i v = _mm512_load_si512(reinterpret_cast<const __m512i *>(buf));
 
     uint64_t q_bits  = _mm512_cmpeq_epi8_mask(v, v_quote);
-    uint64_t bs_bits = _mm512_cmpeq_epi8_mask(v, v_backslash);
-    uint64_t s_bits  = _mm512_cmpeq_epi8_mask(v, v_brace_o)
-                     | _mm512_cmpeq_epi8_mask(v, v_brace_c)
-                     | _mm512_cmpeq_epi8_mask(v, v_bracket_o)
-                     | _mm512_cmpeq_epi8_mask(v, v_bracket_c)
-                     | _mm512_cmpeq_epi8_mask(v, v_colon)
-                     | _mm512_cmpeq_epi8_mask(v, v_comma);
+    uint64_t bs_bits      = _mm512_cmpeq_epi8_mask(v, v_backslash);
+    uint64_t bracket_bits = _mm512_cmpeq_epi8_mask(v, v_brace_o)
+                          | _mm512_cmpeq_epi8_mask(v, v_brace_c)
+                          | _mm512_cmpeq_epi8_mask(v, v_bracket_o)
+                          | _mm512_cmpeq_epi8_mask(v, v_bracket_c);
+    uint64_t sep_bits    = _mm512_cmpeq_epi8_mask(v, v_colon)
+                          | _mm512_cmpeq_epi8_mask(v, v_comma);
+    uint64_t s_bits = bracket_bits | sep_bits;
     uint64_t non_ws = static_cast<uint64_t>(
         _mm512_cmpgt_epi8_mask(v, v_ws_thresh));
 
     // Mask to valid bytes only
     uint64_t m = (remaining >= 64) ? ~0ULL : (1ULL << remaining) - 1;
-    q_bits  &= m;
-    bs_bits &= m;
-    s_bits  &= m;
-    non_ws  &= m;
+    q_bits        &= m;
+    bs_bits       &= m;
+    bracket_bits  &= m;
+    sep_bits      &= m;
+    s_bits        &= m;
+    non_ws        &= m;
 
     uint64_t escaped = 0;
     uint64_t temp_esc = bs_bits;
@@ -5439,7 +5451,8 @@ BEAST_INLINE void stage1_scan_avx512(const char *src, size_t len,
     uint64_t vstart = (external_non_ws & ~external_symbols) &
                       (ws_like << 1 | (prev_non_ws >> 63));
 
-    uint64_t structural = (external_symbols | vstart) & m;
+    // Phase 53: emit only bracket_bits + quotes + vstart (no :,)
+    uint64_t structural = (((bracket_bits & ~inside) | clean_quotes) | vstart) & m;
 
     uint32_t base = static_cast<uint32_t>(p - src);
     while (structural) {
@@ -6797,11 +6810,8 @@ public:
         break;
       }
 
-      case kActColon:
-      case kActComma:
-        // Separators: state is managed by push() bit-stacks; just skip.
-        last_off = off + 1;
-        break;
+      // Phase 53: kActColon / kActComma are no longer emitted by stage1_scan_avx512.
+      // push() bit-stacks handle key↔value alternation internally.
 
       case kActNumber: {
         // Scan integer/float from data_[off]; push raw token.
