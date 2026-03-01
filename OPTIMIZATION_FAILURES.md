@@ -23,6 +23,20 @@
 * **가이드라인 (에이전트 수칙)**:
   * **AArch64 에이전트**: NEON에서 32바이트 이상을 루프 언롤링하여 억지로 처리하려 하지 마세요. NEON 환경은 `uint8x16_t`를 1~2개 처리하는 수준에서 분기를 최소화하는 루프가 최적입니다. x86_64의 AVX-512 극단적 기법을 NEON에 1:1로 이식하려 시도하지 마세요.
 
+### ❌ [Phase 50 시도] NEON Stage 1 구조적 문자 사전 인덱싱 (Two-Phase Parsing)
+* **목표**: AVX-512에서 45% (365μs → 202μs) 파싱 속도 향상을 입증한 `stage1_scan_avx512`를 모방하여, NEON에서도 `stage1_scan_neon`을 구현하고 `parse_staged`로 데이터 처리 구조 변경. 64B 단위로 `vld1q_u8` 4회 언롤링 스코프 사용.
+* **적용 대상**: `beast_json.hpp` 내 `stage1_scan_neon` 및 `parse_reuse` 라우팅 로직
+* **실패 결과 (성능 회귀)**: 
+  * `twitter.json`: 328μs → 478μs (**+45% 회귀**)
+  * `citm_catalog.json`: ~645μs → 933μs (**+44% 회귀**)
+* **근본 원인 분석**:
+  1. **Neon_movemask의 과도한 오버헤드**: AVX-512에서는 `_mm512_cmp*_mask` 명령 하나로 64비트 정수 마스크가 바로 도출됩니다. 반면 NEON에서는 16바이트 청크마다 `vshrq_n_u8`, `vmulq_u8`, `vpaddlq_*` 등의 리덕션 트리를 타고 내려와야 하는 고비용의 소프트웨어 에뮬레이션(`neon_movemask`)이 필요합니다.
+  2. **1루프 당 20개 이상의 movemask 호출 비용 발생**: 루프 1번당 4번의 16B 청크를 처리하고, 청크 하나당 Quote, Backslash, Brackets, Separators, Whitespace의 5개 마스크를 생성해야 하므로 총 20개의 `neon_movemask` 호출이 64B를 스캔할 때마다 발생합니다.
+  3. **비효율적 아키텍처 매핑**: AArch64 (M1 등) 프로세서는 파이프라인과 비순차 실행(Out-of-order execution) 및 분기 예측(Branch Prediction) 성능이 매우 뛰어납니다. 64B 단위로 무거운 산술 연산을 욱여넣는 "SIMD 내 인덱싱" 기법보다, 짧은 바이트를 빠르게 읽고 루프로 바로 건너뛰는 기존 "Single Pass 선형 파서"가 더 오버헤드 없이 잘 동작합니다.
+* **가이드라인 (에이전트 수칙)**:
+  * **AArch64 에이전트**: SIMD "마스킹" 기반의 Two-Phase 처리 (미리 구조적 문자의 인덱스를 뽑고 나중에 파싱하는 simdjson 류의 방식)는 ARM64 환경에 적합하지 않습니다. NEON에는 Native MoveMask가 없다는 점을 항상 기억하고, 단일 경로 선형 파서 최적화에 집중하세요.
+
+
 ---
 
 ## 2. x86_64 (AVX2 / AVX-512) 최적화 회귀 사례

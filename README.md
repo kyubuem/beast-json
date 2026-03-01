@@ -243,6 +243,8 @@ The biggest parse-speed breakthrough: a simdjson-inspired two-phase parsing pipe
 
 A 2 MB size threshold selects the path: files ≤2 MB (twitter, citm) use Stage 1+2; larger number-heavy files (canada, gsoc) fall back to the optimized single-pass parser, where the positions array would exceed L3 capacity.
 
+> **Note on NEON/ARM64**: We implemented an equivalent `stage1_scan_neon` processing 64 bytes per iteration (unrolling 4 × 16-byte `vld1q_u8`). However, benchmark results showed a **~30-45% performance degradation** compared to the single-pass parser. Generating the 64-bit structural bitmasks requires too many shift-and-OR operations (`neon_movemask` per 16B chunk), creating higher overhead than simply scanning line-by-line. AArch64 benefits far more from our highly optimized single-pass linear scans than a two-phase architecture.
+
 ---
 
 ## Features

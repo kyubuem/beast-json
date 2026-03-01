@@ -104,7 +104,7 @@
 #include <emmintrin.h>
 #if defined(__AVX512F__)
 #define BEAST_HAS_AVX512 1
-#define BEAST_HAS_AVX2 1  // AVX-512 is a superset of AVX2; all ymm code active
+#define BEAST_HAS_AVX2 1 // AVX-512 is a superset of AVX2; all ymm code active
 #include <immintrin.h>
 #elif defined(__AVX2__)
 #define BEAST_HAS_AVX2 1
@@ -4997,8 +4997,7 @@ struct Stage1Index {
     if (positions && capacity >= static_cast<uint32_t>(n))
       return;
     std::free(positions);
-    positions =
-        static_cast<uint32_t *>(std::malloc(n * sizeof(uint32_t)));
+    positions = static_cast<uint32_t *>(std::malloc(n * sizeof(uint32_t)));
     if (!positions)
       throw std::bad_alloc();
     capacity = static_cast<uint32_t>(n);
@@ -5295,36 +5294,38 @@ BEAST_INLINE void stage1_scan_avx512(const char *src, size_t len,
   uint64_t prev_non_ws = (1ULL << 63); // treat start as after whitespace
 
   // Pre-load broadcast constants outside the loop (hoisted to registers).
-  const __m512i v_brace_o   = _mm512_set1_epi8('{');
-  const __m512i v_brace_c   = _mm512_set1_epi8('}');
+  const __m512i v_brace_o = _mm512_set1_epi8('{');
+  const __m512i v_brace_c = _mm512_set1_epi8('}');
   const __m512i v_bracket_o = _mm512_set1_epi8('[');
   const __m512i v_bracket_c = _mm512_set1_epi8(']');
-  const __m512i v_colon     = _mm512_set1_epi8(':');
-  const __m512i v_comma     = _mm512_set1_epi8(',');
-  const __m512i v_quote     = _mm512_set1_epi8('"');
+  const __m512i v_colon = _mm512_set1_epi8(':');
+  const __m512i v_comma = _mm512_set1_epi8(',');
+  const __m512i v_quote = _mm512_set1_epi8('"');
   const __m512i v_backslash = _mm512_set1_epi8('\\');
   const __m512i v_ws_thresh = _mm512_set1_epi8(0x20);
 
   while (p + 64 <= end) {
     __m512i v = _mm512_loadu_si512(reinterpret_cast<const __m512i *>(p));
 
-    uint64_t q_bits      = _mm512_cmpeq_epi8_mask(v, v_quote);
-    uint64_t bs_bits     = _mm512_cmpeq_epi8_mask(v, v_backslash);
-    // Phase 53: split structural chars into bracket_bits ({}[]) and sep_bits (:,).
-    // sep_bits participates in ws_like/vstart computation (so values after :,
-    // are still detected as vstart), but is NOT included in the emitted structural
-    // bitmask — shrinks positions[] by ~33% for string-heavy files (twitter, citm).
-    uint64_t bracket_bits = _mm512_cmpeq_epi8_mask(v, v_brace_o)
-                          | _mm512_cmpeq_epi8_mask(v, v_brace_c)
-                          | _mm512_cmpeq_epi8_mask(v, v_bracket_o)
-                          | _mm512_cmpeq_epi8_mask(v, v_bracket_c);
-    uint64_t sep_bits    = _mm512_cmpeq_epi8_mask(v, v_colon)
-                          | _mm512_cmpeq_epi8_mask(v, v_comma);
+    uint64_t q_bits = _mm512_cmpeq_epi8_mask(v, v_quote);
+    uint64_t bs_bits = _mm512_cmpeq_epi8_mask(v, v_backslash);
+    // Phase 53: split structural chars into bracket_bits ({}[]) and sep_bits
+    // (:,). sep_bits participates in ws_like/vstart computation (so values
+    // after :, are still detected as vstart), but is NOT included in the
+    // emitted structural bitmask — shrinks positions[] by ~33% for string-heavy
+    // files (twitter, citm).
+    uint64_t bracket_bits = _mm512_cmpeq_epi8_mask(v, v_brace_o) |
+                            _mm512_cmpeq_epi8_mask(v, v_brace_c) |
+                            _mm512_cmpeq_epi8_mask(v, v_bracket_o) |
+                            _mm512_cmpeq_epi8_mask(v, v_bracket_c);
+    uint64_t sep_bits =
+        _mm512_cmpeq_epi8_mask(v, v_colon) | _mm512_cmpeq_epi8_mask(v, v_comma);
     uint64_t s_bits = bracket_bits | sep_bits; // used only for ws_like / vstart
     // Signed cmpgt: 0x21-0x7F → 1 (non-ws ASCII). 0x80-0xFF treated as ws,
-    // but UTF-8 continuation bytes only appear inside strings (masked by ~inside).
-    uint64_t non_ws = static_cast<uint64_t>(
-        _mm512_cmpgt_epi8_mask(v, v_ws_thresh));
+    // but UTF-8 continuation bytes only appear inside strings (masked by
+    // ~inside).
+    uint64_t non_ws =
+        static_cast<uint64_t>(_mm512_cmpgt_epi8_mask(v, v_ws_thresh));
 
     // ── Escape propagation (identical to fill_bitmap()) ───────────────────
     uint64_t escaped = 0;
@@ -5368,10 +5369,10 @@ BEAST_INLINE void stage1_scan_avx512(const char *src, size_t len,
     uint64_t vstart = (external_non_ws & ~external_symbols) &
                       (ws_like << 1 | (prev_non_ws >> 63));
 
-    // Phase 53: emit bracket_bits ({[}]) + quotes + vstart — omit sep_bits (:,).
-    // sep_bits is still in external_symbols (for correct ws_like/vstart), but
-    // Stage 2 (parse_staged) infers context from the push() bit-stack without
-    // needing explicit :, position entries.
+    // Phase 53: emit bracket_bits ({[}]) + quotes + vstart — omit sep_bits
+    // (:,). sep_bits is still in external_symbols (for correct ws_like/vstart),
+    // but Stage 2 (parse_staged) infers context from the push() bit-stack
+    // without needing explicit :, position entries.
     uint64_t structural = ((bracket_bits & ~inside) | clean_quotes) | vstart;
 
     // Write positions to flat array
@@ -5382,7 +5383,8 @@ BEAST_INLINE void stage1_scan_avx512(const char *src, size_t len,
       structural &= structural - 1;
     }
 
-    prev_in_string = static_cast<uint64_t>(static_cast<int64_t>(in_string) >> 63);
+    prev_in_string =
+        static_cast<uint64_t>(static_cast<int64_t>(in_string) >> 63);
     prev_non_ws = ws_like;
     p += 64;
   }
@@ -5396,26 +5398,26 @@ BEAST_INLINE void stage1_scan_avx512(const char *src, size_t len,
 
     __m512i v = _mm512_load_si512(reinterpret_cast<const __m512i *>(buf));
 
-    uint64_t q_bits  = _mm512_cmpeq_epi8_mask(v, v_quote);
-    uint64_t bs_bits      = _mm512_cmpeq_epi8_mask(v, v_backslash);
-    uint64_t bracket_bits = _mm512_cmpeq_epi8_mask(v, v_brace_o)
-                          | _mm512_cmpeq_epi8_mask(v, v_brace_c)
-                          | _mm512_cmpeq_epi8_mask(v, v_bracket_o)
-                          | _mm512_cmpeq_epi8_mask(v, v_bracket_c);
-    uint64_t sep_bits    = _mm512_cmpeq_epi8_mask(v, v_colon)
-                          | _mm512_cmpeq_epi8_mask(v, v_comma);
+    uint64_t q_bits = _mm512_cmpeq_epi8_mask(v, v_quote);
+    uint64_t bs_bits = _mm512_cmpeq_epi8_mask(v, v_backslash);
+    uint64_t bracket_bits = _mm512_cmpeq_epi8_mask(v, v_brace_o) |
+                            _mm512_cmpeq_epi8_mask(v, v_brace_c) |
+                            _mm512_cmpeq_epi8_mask(v, v_bracket_o) |
+                            _mm512_cmpeq_epi8_mask(v, v_bracket_c);
+    uint64_t sep_bits =
+        _mm512_cmpeq_epi8_mask(v, v_colon) | _mm512_cmpeq_epi8_mask(v, v_comma);
     uint64_t s_bits = bracket_bits | sep_bits;
-    uint64_t non_ws = static_cast<uint64_t>(
-        _mm512_cmpgt_epi8_mask(v, v_ws_thresh));
+    uint64_t non_ws =
+        static_cast<uint64_t>(_mm512_cmpgt_epi8_mask(v, v_ws_thresh));
 
     // Mask to valid bytes only
     uint64_t m = (remaining >= 64) ? ~0ULL : (1ULL << remaining) - 1;
-    q_bits        &= m;
-    bs_bits       &= m;
-    bracket_bits  &= m;
-    sep_bits      &= m;
-    s_bits        &= m;
-    non_ws        &= m;
+    q_bits &= m;
+    bs_bits &= m;
+    bracket_bits &= m;
+    sep_bits &= m;
+    s_bits &= m;
+    non_ws &= m;
 
     uint64_t escaped = 0;
     uint64_t temp_esc = bs_bits;
@@ -5452,7 +5454,209 @@ BEAST_INLINE void stage1_scan_avx512(const char *src, size_t len,
                       (ws_like << 1 | (prev_non_ws >> 63));
 
     // Phase 53: emit only bracket_bits + quotes + vstart (no :,)
-    uint64_t structural = (((bracket_bits & ~inside) | clean_quotes) | vstart) & m;
+    uint64_t structural =
+        (((bracket_bits & ~inside) | clean_quotes) | vstart) & m;
+
+    uint32_t base = static_cast<uint32_t>(p - src);
+    while (structural) {
+      int bit = __builtin_ctzll(structural);
+      out[count++] = base + static_cast<uint32_t>(bit);
+      structural &= structural - 1;
+    }
+  }
+
+  idx.count = count;
+}
+#elif BEAST_HAS_NEON
+// ─────────────────────────────────────────────────────────────
+// Phase 50: Stage 1 NEON Structural Scanner
+// ─────────────────────────────────────────────────────────────
+BEAST_INLINE void stage1_scan_neon(const char *src, size_t len,
+                                   Stage1Index &idx) {
+  idx.reserve(len + 1);
+  idx.reset();
+  uint32_t *out = idx.positions;
+  uint32_t count = 0;
+
+  const char *p = src;
+  const char *end = src + len;
+
+  uint64_t prev_in_string = 0;
+  bool prev_escaped = false;
+  uint64_t prev_non_ws = (1ULL << 63);
+
+  const uint8x16_t v_brace_o = vdupq_n_u8('{');
+  const uint8x16_t v_brace_c = vdupq_n_u8('}');
+  const uint8x16_t v_bracket_o = vdupq_n_u8('[');
+  const uint8x16_t v_bracket_c = vdupq_n_u8(']');
+  const uint8x16_t v_colon = vdupq_n_u8(':');
+  const uint8x16_t v_comma = vdupq_n_u8(',');
+  const uint8x16_t v_quote = vdupq_n_u8('"');
+  const uint8x16_t v_backslash = vdupq_n_u8('\\');
+  const uint8x16_t v_ws_thresh = vdupq_n_u8(0x20);
+
+  while (p + 64 <= end) {
+    uint64_t q_bits = 0, bs_bits = 0, bracket_bits = 0, sep_bits = 0,
+             non_ws = 0;
+
+    for (int i = 0; i < 4; ++i) {
+      uint8x16_t chunk =
+          vld1q_u8(reinterpret_cast<const uint8_t *>(p + i * 16));
+
+      uint8x16_t m_quo = vceqq_u8(chunk, v_quote);
+      uint8x16_t m_esc = vceqq_u8(chunk, v_backslash);
+
+      uint8x16_t m_bracket = vorrq_u8(
+          vorrq_u8(vceqq_u8(chunk, v_brace_o), vceqq_u8(chunk, v_brace_c)),
+          vorrq_u8(vceqq_u8(chunk, v_bracket_o), vceqq_u8(chunk, v_bracket_c)));
+      uint8x16_t m_sep =
+          vorrq_u8(vceqq_u8(chunk, v_colon), vceqq_u8(chunk, v_comma));
+
+      uint8x16_t m_not_white = vcgtq_u8(chunk, v_ws_thresh);
+
+      q_bits |= (uint64_t)neon_movemask(m_quo) << (i * 16);
+      bs_bits |= (uint64_t)neon_movemask(m_esc) << (i * 16);
+      bracket_bits |= (uint64_t)neon_movemask(m_bracket) << (i * 16);
+      sep_bits |= (uint64_t)neon_movemask(m_sep) << (i * 16);
+      non_ws |= (uint64_t)neon_movemask(m_not_white) << (i * 16);
+    }
+
+    uint64_t s_bits = bracket_bits | sep_bits;
+
+    // ── Escape propagation ───────────────────
+    uint64_t escaped = 0;
+    uint64_t temp_esc = bs_bits;
+    if (prev_escaped) {
+      escaped |= 1ULL;
+      prev_escaped = false;
+      if (temp_esc & 1ULL)
+        temp_esc &= ~1ULL;
+    }
+    while (temp_esc) {
+      int start = __builtin_ctzll(temp_esc);
+      uint64_t mask_from_start = ~0ULL << start;
+      uint64_t non_bs_from_start = ~bs_bits & mask_from_start;
+      int run_end =
+          (non_bs_from_start == 0) ? 64 : __builtin_ctzll(non_bs_from_start);
+      int run_len = run_end - start;
+      for (int j = start + 1; j < run_end; j += 2)
+        escaped |= (1ULL << j);
+      if (run_len % 2 != 0) {
+        if (run_end < 64)
+          escaped |= (1ULL << run_end);
+        else
+          prev_escaped = true;
+      }
+      if (run_end == 64)
+        break;
+      temp_esc &= (~0ULL << run_end);
+    }
+
+    uint64_t clean_quotes = q_bits & ~escaped;
+    uint64_t in_string = simd::prefix_xor(clean_quotes) ^ prev_in_string;
+    uint64_t inside = in_string & ~clean_quotes;
+
+    uint64_t external_non_ws = non_ws & ~inside;
+    uint64_t external_symbols = (s_bits & ~inside) | clean_quotes;
+    uint64_t ws_like = (~non_ws & ~inside) | external_symbols;
+
+    uint64_t vstart = (external_non_ws & ~external_symbols) &
+                      (ws_like << 1 | (prev_non_ws >> 63));
+
+    uint64_t structural = ((bracket_bits & ~inside) | clean_quotes) | vstart;
+
+    // Write positions to flat array
+    uint32_t base = static_cast<uint32_t>(p - src);
+    while (structural) {
+      int bit = __builtin_ctzll(structural);
+      out[count++] = base + static_cast<uint32_t>(bit);
+      structural &= structural - 1;
+    }
+
+    prev_in_string =
+        static_cast<uint64_t>(static_cast<int64_t>(in_string) >> 63);
+    prev_non_ws = ws_like;
+    p += 64;
+  }
+
+  // ── Tail: pad remaining bytes to 64 with spaces ───────────────────────
+  size_t remaining = static_cast<size_t>(end - p);
+  if (remaining > 0) {
+    alignas(64) char buf[64];
+    std::memset(buf, ' ', 64);
+    std::memcpy(buf, p, remaining);
+
+    uint64_t q_bits = 0, bs_bits = 0, bracket_bits = 0, sep_bits = 0,
+             non_ws = 0;
+
+    for (int i = 0; i < 4; ++i) {
+      uint8x16_t chunk =
+          vld1q_u8(reinterpret_cast<const uint8_t *>(buf + i * 16));
+
+      uint8x16_t m_quo = vceqq_u8(chunk, v_quote);
+      uint8x16_t m_esc = vceqq_u8(chunk, v_backslash);
+
+      uint8x16_t m_bracket = vorrq_u8(
+          vorrq_u8(vceqq_u8(chunk, v_brace_o), vceqq_u8(chunk, v_brace_c)),
+          vorrq_u8(vceqq_u8(chunk, v_bracket_o), vceqq_u8(chunk, v_bracket_c)));
+      uint8x16_t m_sep =
+          vorrq_u8(vceqq_u8(chunk, v_colon), vceqq_u8(chunk, v_comma));
+
+      uint8x16_t m_not_white = vcgtq_u8(chunk, v_ws_thresh);
+
+      q_bits |= (uint64_t)neon_movemask(m_quo) << (i * 16);
+      bs_bits |= (uint64_t)neon_movemask(m_esc) << (i * 16);
+      bracket_bits |= (uint64_t)neon_movemask(m_bracket) << (i * 16);
+      sep_bits |= (uint64_t)neon_movemask(m_sep) << (i * 16);
+      non_ws |= (uint64_t)neon_movemask(m_not_white) << (i * 16);
+    }
+
+    uint64_t s_bits = bracket_bits | sep_bits;
+
+    // Mask to valid bytes only
+    uint64_t m = (remaining >= 64) ? ~0ULL : (1ULL << remaining) - 1;
+    q_bits &= m;
+    bs_bits &= m;
+    bracket_bits &= m;
+    sep_bits &= m;
+    s_bits &= m;
+    non_ws &= m;
+
+    uint64_t escaped = 0;
+    uint64_t temp_esc = bs_bits;
+    if (prev_escaped) {
+      escaped |= 1ULL;
+      prev_escaped = false;
+      if (temp_esc & 1ULL)
+        temp_esc &= ~1ULL;
+    }
+    while (temp_esc) {
+      int start = __builtin_ctzll(temp_esc);
+      uint64_t mask_from_start = ~0ULL << start;
+      uint64_t non_bs_from_start = ~bs_bits & mask_from_start;
+      int run_end =
+          (non_bs_from_start == 0) ? 64 : __builtin_ctzll(non_bs_from_start);
+      int run_len = run_end - start;
+      for (int j = start + 1; j < run_end; j += 2)
+        escaped |= (1ULL << j);
+      if (run_len % 2 != 0 && run_end < 64)
+        escaped |= (1ULL << run_end);
+      if (run_end == 64)
+        break;
+      temp_esc &= (~0ULL << run_end);
+    }
+
+    uint64_t clean_quotes = (q_bits & ~escaped) & m;
+    uint64_t in_string = simd::prefix_xor(clean_quotes) ^ prev_in_string;
+    uint64_t inside = in_string & ~clean_quotes;
+
+    uint64_t external_non_ws = non_ws & ~inside;
+    uint64_t external_symbols = (s_bits & ~inside) | clean_quotes;
+    uint64_t ws_like = (~non_ws & ~inside) | external_symbols;
+    uint64_t vstart = (external_non_ws & ~external_symbols) &
+                      (ws_like << 1 | (prev_non_ws >> 63));
+
+    uint64_t structural = ((bracket_bits & ~inside) | clean_quotes) | vstart;
 
     uint32_t base = static_cast<uint32_t>(p - src);
     while (structural) {
@@ -5571,10 +5775,12 @@ class Parser {
 #if BEAST_HAS_AVX512
     // ── Phase 46: AVX-512 64B batch whitespace skip ──────────────────────────
     // _mm512_cmpgt_epi8_mask vs 0x20 is 1 op (vs AVX2's 8 ops for 32B).
-    // 64B/iter vs SWAR-32's 32B/iter → ~2× throughput for whitespace-heavy JSON.
+    // 64B/iter vs SWAR-32's 32B/iter → ~2× throughput for whitespace-heavy
+    // JSON.
     //
     // SWAR-8 pre-gate: twitter.json has 2-8 WS bytes between tokens; absorb
-    // them here before paying any 512-bit register setup cost (Phase 37 lesson).
+    // them here before paying any 512-bit register setup cost (Phase 37
+    // lesson).
     {
       uint64_t am = swar_action_mask(load64(p_));
       if (BEAST_LIKELY(am != 0)) {
@@ -5728,13 +5934,16 @@ class Parser {
     // Phase 42: AVX-512 64B per iteration — halves loop count vs AVX2.
     // _mm512_cmpeq_epi8_mask → uint64_t mask directly (no vpor needed).
     {
-      const __m512i vq512  = _mm512_set1_epi8('"');
+      const __m512i vq512 = _mm512_set1_epi8('"');
       const __m512i vbs512 = _mm512_set1_epi8('\\');
       while (BEAST_LIKELY(p + 64 <= end_)) {
         __m512i v = _mm512_loadu_si512(reinterpret_cast<const __m512i *>(p));
-        uint64_t mask = _mm512_cmpeq_epi8_mask(v, vq512)
-                      | _mm512_cmpeq_epi8_mask(v, vbs512);
-        if (BEAST_UNLIKELY(mask)) { p += __builtin_ctzll(mask); return p; }
+        uint64_t mask = _mm512_cmpeq_epi8_mask(v, vq512) |
+                        _mm512_cmpeq_epi8_mask(v, vbs512);
+        if (BEAST_UNLIKELY(mask)) {
+          p += __builtin_ctzll(mask);
+          return p;
+        }
         p += 64;
       }
     }
@@ -5843,12 +6052,13 @@ class Parser {
   BEAST_INLINE const char *skip_string_from32(const char *s) noexcept {
     const char *p = s + 32;
 #if BEAST_HAS_AVX2
-    const __m256i vq  = _mm256_set1_epi8('"');
+    const __m256i vq = _mm256_set1_epi8('"');
     const __m256i vbs = _mm256_set1_epi8('\\');
     while (BEAST_LIKELY(p + 32 <= end_)) {
       __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p));
-      uint32_t mask = static_cast<uint32_t>(_mm256_movemask_epi8(
-          _mm256_or_si256(_mm256_cmpeq_epi8(v, vq), _mm256_cmpeq_epi8(v, vbs))));
+      uint32_t mask =
+          static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_or_si256(
+              _mm256_cmpeq_epi8(v, vq), _mm256_cmpeq_epi8(v, vbs))));
       if (BEAST_LIKELY(mask != 0)) {
         p += __builtin_ctz(mask);
         if (BEAST_LIKELY(*p == '"'))
@@ -5860,7 +6070,7 @@ class Parser {
     }
     // ── Tail: SSE2 16B (handles remaining <32B) ──────────────────────────
     {
-      const __m128i vq128  = _mm_set1_epi8('"');
+      const __m128i vq128 = _mm_set1_epi8('"');
       const __m128i vbs128 = _mm_set1_epi8('\\');
       while (p + 16 <= end_) {
         __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i *>(p));
@@ -5868,7 +6078,8 @@ class Parser {
             _mm_or_si128(_mm_cmpeq_epi8(v, vq128), _mm_cmpeq_epi8(v, vbs128)));
         if (mask) {
           p += __builtin_ctz(mask);
-          if (*p == '"') return p;
+          if (*p == '"')
+            return p;
           p += 2;
           break;
         }
@@ -5879,8 +6090,10 @@ class Parser {
     // SWAR-8 + scalar tail (platform-agnostic, handles last <16B)
     while (p < end_) {
       p = scan_string_end(p);
-      if (p >= end_) return end_;
-      if (*p == '"') return p;
+      if (p >= end_)
+        return end_;
+      if (*p == '"')
+        return p;
       p += 2;
     }
     return p;
@@ -5894,15 +6107,16 @@ class Parser {
   BEAST_INLINE const char *skip_string_from64(const char *s) noexcept {
     const char *p = s + 64;
     {
-      const __m512i vq512  = _mm512_set1_epi8('"');
+      const __m512i vq512 = _mm512_set1_epi8('"');
       const __m512i vbs512 = _mm512_set1_epi8('\\');
       while (BEAST_LIKELY(p + 64 <= end_)) {
         __m512i v = _mm512_loadu_si512(reinterpret_cast<const __m512i *>(p));
-        uint64_t mask = _mm512_cmpeq_epi8_mask(v, vq512)
-                      | _mm512_cmpeq_epi8_mask(v, vbs512);
+        uint64_t mask = _mm512_cmpeq_epi8_mask(v, vq512) |
+                        _mm512_cmpeq_epi8_mask(v, vbs512);
         if (BEAST_LIKELY(mask != 0)) {
           p += __builtin_ctzll(mask);
-          if (BEAST_LIKELY(*p == '"')) return p;
+          if (BEAST_LIKELY(*p == '"'))
+            return p;
           p += 2; // skip escape sequence
           continue;
         }
@@ -5911,15 +6125,17 @@ class Parser {
     }
     // AVX2 32B tail (handles remaining <64B)
     {
-      const __m256i vq  = _mm256_set1_epi8('"');
+      const __m256i vq = _mm256_set1_epi8('"');
       const __m256i vbs = _mm256_set1_epi8('\\');
       while (BEAST_LIKELY(p + 32 <= end_)) {
         __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p));
-        uint32_t mask = static_cast<uint32_t>(_mm256_movemask_epi8(
-            _mm256_or_si256(_mm256_cmpeq_epi8(v, vq), _mm256_cmpeq_epi8(v, vbs))));
+        uint32_t mask =
+            static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_or_si256(
+                _mm256_cmpeq_epi8(v, vq), _mm256_cmpeq_epi8(v, vbs))));
         if (BEAST_LIKELY(mask != 0)) {
           p += __builtin_ctz(mask);
-          if (BEAST_LIKELY(*p == '"')) return p;
+          if (BEAST_LIKELY(*p == '"'))
+            return p;
           p += 2;
           continue;
         }
@@ -5928,7 +6144,7 @@ class Parser {
     }
     // SSE2 16B tail
     {
-      const __m128i vq128  = _mm_set1_epi8('"');
+      const __m128i vq128 = _mm_set1_epi8('"');
       const __m128i vbs128 = _mm_set1_epi8('\\');
       while (p + 16 <= end_) {
         __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i *>(p));
@@ -5936,7 +6152,8 @@ class Parser {
             _mm_or_si128(_mm_cmpeq_epi8(v, vq128), _mm_cmpeq_epi8(v, vbs128)));
         if (mask) {
           p += __builtin_ctz(mask);
-          if (*p == '"') return p;
+          if (*p == '"')
+            return p;
           p += 2;
           break;
         }
@@ -5946,13 +6163,15 @@ class Parser {
     // Scalar tail (platform-agnostic, handles last <16B)
     while (p < end_) {
       p = scan_string_end(p);
-      if (p >= end_) return end_;
-      if (*p == '"') return p;
+      if (p >= end_)
+        return end_;
+      if (*p == '"')
+        return p;
       p += 2;
     }
     return p;
   }
-#endif  // BEAST_HAS_AVX512
+#endif // BEAST_HAS_AVX512
 
   // Fused key scanner: scan string end, then consume ':' immediately.
   // For object keys: after closing '"', the next structural char is always ':'.
@@ -5977,11 +6196,11 @@ class Parser {
     // ── Phase 43: AVX-512 64B one-shot key scan ─────────────────────────────
     // Handles keys ≤63 chars in one 512-bit operation.
     if (BEAST_LIKELY(s + 64 <= end_)) {
-      const __m512i _vq512  = _mm512_set1_epi8('"');
+      const __m512i _vq512 = _mm512_set1_epi8('"');
       const __m512i _vbs512 = _mm512_set1_epi8('\\');
       __m512i _v512 = _mm512_loadu_si512(reinterpret_cast<const __m512i *>(s));
-      uint64_t _mask512 = _mm512_cmpeq_epi8_mask(_v512, _vq512)
-                        | _mm512_cmpeq_epi8_mask(_v512, _vbs512);
+      uint64_t _mask512 = _mm512_cmpeq_epi8_mask(_v512, _vq512) |
+                          _mm512_cmpeq_epi8_mask(_v512, _vbs512);
       if (BEAST_LIKELY(_mask512 != 0)) {
         e = s + __builtin_ctzll(_mask512);
         if (BEAST_LIKELY(*e == '"')) {
@@ -6001,12 +6220,12 @@ class Parser {
     // Handles keys ≤31 chars in one 256-bit operation.
     // mask==0 or backslash → goto skn_slow directly (no SWAR-24 redundancy).
     if (BEAST_LIKELY(s + 32 <= end_)) {
-      const __m256i _vq  = _mm256_set1_epi8('"');
+      const __m256i _vq = _mm256_set1_epi8('"');
       const __m256i _vbs = _mm256_set1_epi8('\\');
       __m256i _v = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(s));
-      uint32_t _mask = static_cast<uint32_t>(_mm256_movemask_epi8(
-          _mm256_or_si256(_mm256_cmpeq_epi8(_v, _vq),
-                          _mm256_cmpeq_epi8(_v, _vbs))));
+      uint32_t _mask =
+          static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_or_si256(
+              _mm256_cmpeq_epi8(_v, _vq), _mm256_cmpeq_epi8(_v, _vbs))));
       if (BEAST_LIKELY(_mask != 0)) {
         e = s + __builtin_ctz(_mask);
         if (BEAST_LIKELY(*e == '"')) {
@@ -6266,11 +6485,12 @@ public:
         // One 512-bit load handles ≤63-char strings in a single zmm op.
         // Expected gain: citm (long keys) −5~10%, twitter moderate.
         if (BEAST_LIKELY(s + 64 <= end_)) {
-          const __m512i _vq512  = _mm512_set1_epi8('"');
+          const __m512i _vq512 = _mm512_set1_epi8('"');
           const __m512i _vbs512 = _mm512_set1_epi8('\\');
-          __m512i _v512 = _mm512_loadu_si512(reinterpret_cast<const __m512i *>(s));
-          uint64_t _mask512 = _mm512_cmpeq_epi8_mask(_v512, _vq512)
-                            | _mm512_cmpeq_epi8_mask(_v512, _vbs512);
+          __m512i _v512 =
+              _mm512_loadu_si512(reinterpret_cast<const __m512i *>(s));
+          uint64_t _mask512 = _mm512_cmpeq_epi8_mask(_v512, _vq512) |
+                              _mm512_cmpeq_epi8_mask(_v512, _vbs512);
           if (BEAST_LIKELY(_mask512 != 0)) {
             e = s + __builtin_ctzll(_mask512);
             if (BEAST_LIKELY(*e == '"')) {
@@ -6295,14 +6515,15 @@ public:
         // ── Phase 36: AVX2 32B inline string scan ─────────────────────────
         // One 256-bit load handles strings up to 31 chars in 1 SIMD op.
         // twitter.json: 84% of strings ≤24 chars — major hot-path speedup.
-        // mask==0 or backslash → goto str_slow directly (no SWAR-24 redundancy).
+        // mask==0 or backslash → goto str_slow directly (no SWAR-24
+        // redundancy).
         if (BEAST_LIKELY(s + 32 <= end_)) {
-          const __m256i _vq  = _mm256_set1_epi8('"');
+          const __m256i _vq = _mm256_set1_epi8('"');
           const __m256i _vbs = _mm256_set1_epi8('\\');
           __m256i _v = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(s));
-          uint32_t _mask = static_cast<uint32_t>(_mm256_movemask_epi8(
-              _mm256_or_si256(_mm256_cmpeq_epi8(_v, _vq),
-                              _mm256_cmpeq_epi8(_v, _vbs))));
+          uint32_t _mask =
+              static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_or_si256(
+                  _mm256_cmpeq_epi8(_v, _vq), _mm256_cmpeq_epi8(_v, _vbs))));
           if (BEAST_LIKELY(_mask != 0)) {
             e = s + __builtin_ctz(_mask);
             if (BEAST_LIKELY(*e == '"')) {
@@ -6586,7 +6807,8 @@ public:
           // ── Phase 33: SWAR-8 float digit scanner (fractional part) ──
           // canada.json has 2.32M floats: scalar was 1 byte/iter.
           // SWAR-8 processes 8 digits in a single 64-bit operation.
-          // Architecture-agnostic pure SWAR — fully inlined, zero call overhead.
+          // Architecture-agnostic pure SWAR — fully inlined, zero call
+          // overhead.
 #define BEAST_SWAR_SKIP_DIGITS()                                               \
   do {                                                                         \
     while (p_ + 8 <= end_) {                                                   \
@@ -6717,14 +6939,14 @@ public:
     return false;
   }
 
-#if BEAST_HAS_AVX512
+#if BEAST_HAS_AVX512 || BEAST_HAS_NEON
   // ── Phase 50: Stage 2 — index-based parse loop ───────────────────────
   //
   // Key differences from parse():
-  //   • No skip_to_action() calls — structural positions pre-computed by Stage 1
-  //   • String length = O(1) lookup: close_offset - open_offset - 1
-  //   • No double-pump logic needed — sequential index traversal suffices
-  //   • Same push() / push_end() / depth bit-stack as parse() for correctness
+  //   • No skip_to_action() calls — structural positions pre-computed by Stage
+  //   1 • String length = O(1) lookup: close_offset - open_offset - 1 • No
+  //   double-pump logic needed — sequential index traversal suffices • Same
+  //   push() / push_end() / depth bit-stack as parse() for correctness
   //
   // Stage 1 guarantees:
   //   • Every '"' in the index is a real (unescaped) quote
@@ -6810,8 +7032,9 @@ public:
         break;
       }
 
-      // Phase 53: kActColon / kActComma are no longer emitted by stage1_scan_avx512.
-      // push() bit-stacks handle key↔value alternation internally.
+        // Phase 53: kActColon / kActComma are no longer emitted by
+        // stage1_scan_avx512. push() bit-stacks handle key↔value alternation
+        // internally.
 
       case kActNumber: {
         // Scan integer/float from data_[off]; push raw token.
@@ -6824,10 +7047,9 @@ public:
           uint64_t v;
           std::memcpy(&v, pn, 8);
           uint64_t shifted = v - 0x3030303030303030ULL;
-          uint64_t nondigit =
-              (shifted |
-               ((shifted & 0x7F7F7F7F7F7F7F7FULL) + 0x7676767676767676ULL)) &
-              0x8080808080808080ULL;
+          uint64_t nondigit = (shifted | ((shifted & 0x7F7F7F7F7F7F7F7FULL) +
+                                          0x7676767676767676ULL)) &
+                              0x8080808080808080ULL;
           if (nondigit) {
             pn += BEAST_CTZ(nondigit) >> 3;
             goto s2_num_done;
@@ -6888,27 +7110,24 @@ public:
       }
 
       case kActTrue:
-        if (BEAST_UNLIKELY(
-                off + 4 > static_cast<uint32_t>(end_ - data_) ||
-                std::memcmp(data_ + off, "true", 4)))
+        if (BEAST_UNLIKELY(off + 4 > static_cast<uint32_t>(end_ - data_) ||
+                           std::memcmp(data_ + off, "true", 4)))
           goto s2_fail;
         push(TapeNodeType::BooleanTrue, 4, off);
         last_off = off + 4;
         break;
 
       case kActFalse:
-        if (BEAST_UNLIKELY(
-                off + 5 > static_cast<uint32_t>(end_ - data_) ||
-                std::memcmp(data_ + off, "false", 5)))
+        if (BEAST_UNLIKELY(off + 5 > static_cast<uint32_t>(end_ - data_) ||
+                           std::memcmp(data_ + off, "false", 5)))
           goto s2_fail;
         push(TapeNodeType::BooleanFalse, 5, off);
         last_off = off + 5;
         break;
 
       case kActNull:
-        if (BEAST_UNLIKELY(
-                off + 4 > static_cast<uint32_t>(end_ - data_) ||
-                std::memcmp(data_ + off, "null", 4)))
+        if (BEAST_UNLIKELY(off + 4 > static_cast<uint32_t>(end_ - data_) ||
+                           std::memcmp(data_ + off, "null", 4)))
           goto s2_fail;
         push(TapeNodeType::Null, 4, off);
         last_off = off + 4;
@@ -6917,7 +7136,7 @@ public:
       default:
         goto s2_fail;
       } // switch
-    }   // for
+    } // for
 
     // Trailing non-whitespace check: catch inputs like "nulls" where Stage 1
     // only marks the value start ('n') but not the trailing junk ('s').
@@ -6961,7 +7180,8 @@ inline Value parse_reuse(DocumentView &doc, std::string_view json) {
   // L2/L3 cache and the JSON is string-heavy (e.g. twitter.json, citm.json).
   // Large number-heavy files (canada.json, gsoc-2018.json) have too many
   // positions (~1M+) causing L3 pressure: Stage 1 overhead exceeds savings.
-  // Threshold: 2 MB — includes twitter(617KB) and citm(1.65MB); excludes canada(2.15MB) and gsoc(3.3MB).
+  // Threshold: 2 MB — includes twitter(617KB) and citm(1.65MB); excludes
+  // canada(2.15MB) and gsoc(3.3MB).
   static constexpr size_t kStage12MaxSize = 2 * 1024 * 1024; // 2 MB
   if (BEAST_LIKELY(json.size() <= kStage12MaxSize)) {
     stage1_scan_avx512(json.data(), json.size(), doc.idx);
