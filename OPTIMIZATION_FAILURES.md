@@ -220,6 +220,7 @@ Termux나 Apple Silicon 환경에서 작업할 차기 에이전트는 아래 수
 3.  **언롤링(Unrolling) 주의**:
     - 16바이트 단일 루프만으로도 Apple M1/Snapdragon 8급의 OoO 엔진은 이미 충분한 처리량을 뽑아냅니다. 
     - 32B/64B 수동 언롤링은 코드 크기만 키우고(I-cache 압박) 실질 이득은 미미하거나 오히려 마이너스가 될 수 있습니다 (Phase 56-2 참조).
-4.  **Snapdragon 8 Gen 2 특이점**:
-    - 이 칩셋은 **SVE2**를 지원합니다. NEON(16B 고정)의 한계를 넘으려면 SVE 가변 길이 벡터 기능을 연구해 보세요.
-    - Snapdragon은 Apple 대비 메모리 레이턴시가 미묘하게 다르므로, `__builtin_prefetch` 거리를 튜닝하는 것이 유효한 카드가 될 수 있습니다.
+4.  **Snapdragon 8 Gen 2 (Fold 5) = Standard ARM Proxy**:
+    - Snapdragon 8 Gen 2는 표준 Cortex-X3 코어를 사용합니다. 이는 AWS Graviton 3(Neoverse V2)와 사실상 형제 모델입니다.
+    - 애플 전용 최적화(`__APPLE__`)에 매몰되지 마세요. Phase 57에서 증명했듯, 우리의 **Pure NEON** 전략은 애플과 표준 ARM 모두에서 승리하는 유일한 "범용 아키텍처 중립" 코드입니다.
+    - Snapdragon 환경에서 속도가 떨어진다면, 그것은 알고리즘의 문제이지 아키텍처의 문제가 아닐 가능성이 큽니다.
