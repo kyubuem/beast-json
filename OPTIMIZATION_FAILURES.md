@@ -202,5 +202,24 @@
   * SWAR 스칼라 작업(`EOR` -> `SUB` -> `BIC` -> `AND`) 자체는 레이턴시가 길며 명령어 레벨 병렬성(ILP)이 낮습니다. 반면 NEON의 `vld1q_u8` -> `vcgtq_u8` -> `vmaxvq_u32` 패턴은 AArch64에서 최단 사이클로 완벽하게 병렬 실행됩니다.
 
 * **최종 결론 및 가이드라인 (AArch64 최적화 패러다임)**:
-  * **Global NEON Priority**: AArch64 환경(Apple M-Series, AWS Graviton, 단일 Cortex 등 모든 ARM 코어)에서는 SWAR-8/SWAR-24 같은 스칼라 혼합(Pre-gate) 최적화를 **절대 금지**합니다. 
-  * "분기 예측을 돕기 위해 스칼라로 8바이트를 먼저 체크한다"는 x86의 논리는 AArch64에서 완전히 실패합니다. 벡터 레지스터 셋업 오버헤드보다, 일관된 벡터명령 파이프라인을 쭉 밀고 나가는 것(`Pure NEON`)이 무조건 가장 빠릅니다.
+*   **Global NEON Priority**: AArch64 환경(Apple M-Series, AWS Graviton, 단일 Cortex 등 모든 ARM 코어)에서는 SWAR-8/SWAR-24 같은 스칼라 혼합(Pre-gate) 최적화를 **절대 금지**합니다. 
+*   "분기 예측을 돕기 위해 스칼라로 8바이트를 먼저 체크한다"는 x86의 논리는 AArch64에서 완전히 실패합니다. 벡터 레지스터 셋업 오버헤드보다, 일관된 벡터명령 파이프라인을 쭉 밀고 나가는 것(`Pure NEON`)이 무조건 가장 빠릅니다.
+
+---
+
+## 🛡️ AArch64 최적화 에이전트 수칙 (Survival Guide)
+
+Termux나 Apple Silicon 환경에서 작업할 차기 에이전트는 아래 수칙을 반드시 준수해야 합니다.
+
+1.  **GPR-SIMD 교차 오염 금지**: 
+    - `load64`로 읽어서 비트를 계산한 뒤 그 결과를 바탕으로 SIMD 루프를 결정하는 방식은 파이프라인 버블을 만듭니다. 
+    - 특히 `skip_to_action`이나 `scan_key_colon_next` 같은 초고속 핫 패스에서는 **처음부터 100% 벡터 명령**만 사용하세요.
+2.  **분기 예측기(Branch Predictor) 신뢰**:
+    - AArch64의 분기 예측기는 매우 강력합니다. 16바이트 벡터 검사 후 일치하는 바이트를 찾기 위해 수행하는 `while` 루프(스칼라)는 페널티가 거의 없습니다. 
+    - 이를 굳이 비트 연산으로 해결하려고 `vgetq_lane` 같은 명령을 사용하여 GPR로 옮기는 순간, 수 사이클의 지연이 발생합니다.
+3.  **언롤링(Unrolling) 주의**:
+    - 16바이트 단일 루프만으로도 Apple M1/Snapdragon 8급의 OoO 엔진은 이미 충분한 처리량을 뽑아냅니다. 
+    - 32B/64B 수동 언롤링은 코드 크기만 키우고(I-cache 압박) 실질 이득은 미미하거나 오히려 마이너스가 될 수 있습니다 (Phase 56-2 참조).
+4.  **Snapdragon 8 Gen 2 특이점**:
+    - 이 칩셋은 **SVE2**를 지원합니다. NEON(16B 고정)의 한계를 넘으려면 SVE 가변 길이 벡터 기능을 연구해 보세요.
+    - Snapdragon은 Apple 대비 메모리 레이턴시가 미묘하게 다르므로, `__builtin_prefetch` 거리를 튜닝하는 것이 유효한 카드가 될 수 있습니다.

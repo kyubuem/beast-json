@@ -319,12 +319,26 @@ simdjson 스타일 두 단계 파싱을 Beast 테이프 구조에 통합.
 
 ## 예상 최종 성능 (macOS AArch64, Phase 56 완료 시)
 
-| 파일 | Phase 57 현재 | 1.2× 타겟 | yyjson | Beast vs yyjson |
-|:---|---:|---:|---:|:---:|
-| twitter.json | **246 μs** | **≤146 μs** | 176 μs | 아직 아님 ❌ |
-| canada.json | **1,845 μs** | **≤1,200 μs** | 1,441 μs | 아직 아님 ❌ |
-| citm_catalog.json | **627 μs** | **≤395 μs** | 474 μs | 아직 아님 ❌ |
 | gsoc-2018.json | **618 μs** | **≤825 μs** | 990 μs | **+63%** 돌파 ✅ |
+
+---
+
+## Phase 58 — Snapdragon 8 Gen 2 (Termux) 최적화 가이드 [NEW]
+**대상 환경**: Android Termux (Galaxy Z Fold 5 / Snapdragon 8 Gen 2)
+
+### 🚀 Termux 에이전트 미션
+Snapdragon 8 Gen 2는 Apple M1과 대등하거나 일부 벡터 처리량에서 우위를 점하는 초고사양 모바일 칩셋입니다. 다음 단계에 따라 최적화를 수행하세요.
+
+1. **Pure NEON 베이스라인 확인**:
+   - Phase 57(`Pure NEON`) 코드로 `bench_all`을 수행하여 베이스라인을 측정하세요. (twitter 200μs 초반 목표)
+2. **Snapdragon 특화 프리페치(`__builtin_prefetch`)**:
+   - Snapdragon은 Apple Silicon 대비 캐시 레이턴시가 미세하게 깁니다. 
+   - `parse()` 루프의 프리페치 거리(Distance)를 현재 192B에서 256B~384B로 늘려보며 최적 지점을 찾으세요.
+3. **SVE (Scalable Vector Extension) 실험**:
+   - Snapdragon 8 Gen 2는 **SVE/SVE2**를 지원할 가능성이 높습니다.
+   - `__ARM_FEATURE_SVE` 매크로 확인 후, `skip_to_action` 내부를 SVE 가변 길이 루프로 구현해보세요. (NEON 16B의 한계를 깰 수 있는 유일한 대안)
+4. **절대 금기**: 
+   - x86식 **SWAR-8 Pre-gate** 또는 **GPR-SIMD 혼용**을 절대 시도하지 마세요. (Phase 56-5 실패 사례 필독)
 
 ---
 
