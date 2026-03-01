@@ -5809,10 +5809,12 @@ class Parser {
       if (BEAST_LIKELY(am != 0)) {
         p_ += BEAST_CTZ(am) >> 3;
         return *p_;
-      }
-      p_ += 8;
-    }
 #elif BEAST_HAS_NEON
+    // ── Phase 57: Global AArch64 NEON Loop ──────────────────────────────────
+    // SWAR pre-gates are strictly avoided on AArch64 because vector setup
+    // (vld1q) and max-reduce (vmaxvq) have significantly lower latency and
+    // higher throughput than scalar GPR dependencies on both Apple Silicon
+    // and Generic ARM cores.
     while (BEAST_LIKELY(p_ + 16 <= end_)) {
       uint8x16_t v = vld1q_u8(reinterpret_cast<const uint8_t *>(p_));
       uint8x16_t mask = vcgtq_u8(v, vdupq_n_u8(0x20));
@@ -5862,70 +5864,70 @@ class Parser {
     }
 #endif
 
-    // Scalar tail
-    while (p_ < end_) {
-      c = static_cast<unsigned char>(*p_);
-      if (c > 0x20)
-        return static_cast<char>(c);
-      ++p_;
-    }
-    return 0;
-  }
+        // Scalar tail
+        while (p_ < end_) {
+          c = static_cast<unsigned char>(*p_);
+          if (c > 0x20)
+            return static_cast<char>(c);
+          ++p_;
+        }
+        return 0;
+      }
 
-  // ── Phase 31: Contextual SIMD Gate String Scanner ─────────────
-  //
-  // Theory: Phase 30 reverted NEON because it added startup overhead on
-  // short strings. Root fix: an 8B SWAR gate runs first. Short strings
-  // (≤8 chars, ≈36% of twitter.json) exit immediately at ZERO SIMD cost.
-  // Only when the string is confirmed > 8 chars do we enter the SIMD loop.
-  //
-  // Architecture dispatch order:
-  //   aarch64 (NEON 16B)  ← PRIMARY   — M1 / ARMv8+
-  //   x86_64  (SSE2 16B)  ← SECONDARY — Nehalem+, all modern x86
-  //   generic (SWAR-16)   ← FALLBACK
-  BEAST_INLINE const char *scan_string_end(const char *p) noexcept {
-    constexpr uint64_t K = 0x0101010101010101ULL;
-    constexpr uint64_t H = 0x8080808080808080ULL;
-    const uint64_t qm = K * static_cast<uint8_t>('"');
-    const uint64_t bsm = K * static_cast<uint8_t>('\\');
+      // ── Phase 31: Contextual SIMD Gate String Scanner ─────────────
+      //
+      // Theory: Phase 30 reverted NEON because it added startup overhead on
+      // short strings. Root fix: an 8B SWAR gate runs first. Short strings
+      // (≤8 chars, ≈36% of twitter.json) exit immediately at ZERO SIMD cost.
+      // Only when the string is confirmed > 8 chars do we enter the SIMD loop.
+      //
+      // Architecture dispatch order:
+      //   aarch64 (NEON 16B)  ← PRIMARY   — M1 / ARMv8+
+      //   x86_64  (SSE2 16B)  ← SECONDARY — Nehalem+, all modern x86
+      //   generic (SWAR-16)   ← FALLBACK
+      BEAST_INLINE const char *scan_string_end(const char *p) noexcept {
+        constexpr uint64_t K = 0x0101010101010101ULL;
+        constexpr uint64_t H = 0x8080808080808080ULL;
+        const uint64_t qm = K * static_cast<uint8_t>('"');
+        const uint64_t bsm = K * static_cast<uint8_t>('\\');
 
-    // ── Stage 1: 8B SWAR gate ──────────────────────────────────────
-    // Short strings (≤8 chars) exit here with zero SIMD overhead.
-    // Backslash-early strings also exit early (benefit escape-heavy JSON).
+        // ── Stage 1: 8B SWAR gate ──────────────────────────────────────
+        // Short strings (≤8 chars) exit here with zero SIMD overhead.
+        // Backslash-early strings also exit early (benefit escape-heavy JSON).
 #if !BEAST_HAS_NEON
-    if (BEAST_LIKELY(p + 8 <= end_)) {
-      uint64_t v0;
-      std::memcpy(&v0, p, 8);
-      uint64_t hq0 = v0 ^ qm;
-      hq0 = (hq0 - K) & ~hq0 & H;
-      uint64_t hb0 = v0 ^ bsm;
-      hb0 = (hb0 - K) & ~hb0 & H;
-      if (BEAST_UNLIKELY(hq0 | hb0))
-        return p + (BEAST_CTZ(hq0 | hb0) >> 3);
-      p += 8; // string confirmed > 8 chars: advance to SIMD
-    }
+        if (BEAST_LIKELY(p + 8 <= end_)) {
+          uint64_t v0;
+          std::memcpy(&v0, p, 8);
+          uint64_t hq0 = v0 ^ qm;
+          hq0 = (hq0 - K) & ~hq0 & H;
+          uint64_t hb0 = v0 ^ bsm;
+          hb0 = (hb0 - K) & ~hb0 & H;
+          if (BEAST_UNLIKELY(hq0 | hb0))
+            return p + (BEAST_CTZ(hq0 | hb0) >> 3);
+          p += 8; // string confirmed > 8 chars: advance to SIMD
+        }
 #endif
 
-    // ── Stage 2: SIMD loop (string > 8 chars confirmed) ───────────
+        // ── Stage 2: SIMD loop (string > 8 chars confirmed) ───────────
 
 #if BEAST_HAS_NEON
-    // aarch64 PRIMARY: NEON 16B. Pinpoint via scalar fallback loop.
-    {
-      const uint8x16_t vq = vdupq_n_u8('"');
-      const uint8x16_t vbs = vdupq_n_u8('\\');
-      while (BEAST_LIKELY(p + 16 <= end_)) {
-        uint8x16_t v = vld1q_u8(reinterpret_cast<const uint8_t *>(p));
-        uint8x16_t m = vorrq_u8(vceqq_u8(v, vq), vceqq_u8(v, vbs));
-        if (BEAST_UNLIKELY(vmaxvq_u32(vreinterpretq_u32_u8(m)) != 0)) {
-          // Pinpoint: AArch64 strongly prefers scalar loop over cross-register
-          // extraction latency.
-          while (*p != '"' && *p != '\\')
-            ++p;
-          return p;
+        // aarch64 PRIMARY: NEON 16B. Pinpoint via scalar fallback loop.
+        {
+          const uint8x16_t vq = vdupq_n_u8('"');
+          const uint8x16_t vbs = vdupq_n_u8('\\');
+          while (BEAST_LIKELY(p + 16 <= end_)) {
+            uint8x16_t v = vld1q_u8(reinterpret_cast<const uint8_t *>(p));
+            uint8x16_t m = vorrq_u8(vceqq_u8(v, vq), vceqq_u8(v, vbs));
+            if (BEAST_UNLIKELY(vmaxvq_u32(vreinterpretq_u32_u8(m)) != 0)) {
+              // Pinpoint: AArch64 strongly prefers scalar loop over
+              // cross-register extraction latency.
+              while (*p != '"' && *p != '\\')
+                ++p;
+              return p;
+            }
+            p += 16;
+          }
         }
-        p += 16;
-      }
-    }
 #elif BEAST_HAS_AVX2
     // x86_64 AVX2/AVX-512: SIMD string scanner.
     // Phase 34: AVX2 32B. Phase 42: AVX-512 64B outer loop (when available).
@@ -6013,241 +6015,293 @@ class Parser {
     }
 #endif
 
-    // ── Tail: 8B SWAR + scalar ─────────────────────────────────────
-    if (p + 8 <= end_) {
-      uint64_t v;
-      std::memcpy(&v, p, 8);
-      uint64_t hq = v ^ qm;
-      hq = (hq - K) & ~hq & H;
-      uint64_t hb = v ^ bsm;
-      hb = (hb - K) & ~hb & H;
-      uint64_t m = hq | hb;
-      if (BEAST_UNLIKELY(m))
-        return p + (BEAST_CTZ(m) >> 3);
-      p += 8;
-    }
-    while (p < end_ && *p != '"' && *p != '\\')
-      ++p;
-    return p;
-  }
-
-  BEAST_INLINE const char *skip_string(const char *p) noexcept {
-    while (p < end_) {
-      p = scan_string_end(p);
-      if (p >= end_)
-        return end_;
-      if (*p == '"')
+        // ── Tail: 8B SWAR + scalar ─────────────────────────────────────
+        if (p + 8 <= end_) {
+          uint64_t v;
+          std::memcpy(&v, p, 8);
+          uint64_t hq = v ^ qm;
+          hq = (hq - K) & ~hq & H;
+          uint64_t hb = v ^ bsm;
+          hb = (hb - K) & ~hb & H;
+          uint64_t m = hq | hb;
+          if (BEAST_UNLIKELY(m))
+            return p + (BEAST_CTZ(m) >> 3);
+          p += 8;
+        }
+        while (p < end_ && *p != '"' && *p != '\\')
+          ++p;
         return p;
-      p += 2;
-    }
-    return p;
-  }
+      }
 
-  // ── Phase 41: skip_string_from32 ─────────────────────────────────────────
-  // Like skip_string(s+32) but skips the SWAR-8 gate in scan_string_end.
-  // Called when bytes [s, s+32) are already confirmed clean by kActString's
-  // Phase 36 AVX2 inline scan. Saves ~11 scalar instructions per call by
-  // using AVX2 directly at p = s+32 (no 8-byte prologue).
-  // For strings 32-63 chars: 1 AVX2 op total vs SWAR-8+AVX2 (17 instructions).
-  BEAST_INLINE const char *skip_string_from32(const char *s) noexcept {
-    const char *p = s + 32;
+      BEAST_INLINE const char *skip_string(const char *p) noexcept {
+        while (p < end_) {
+          p = scan_string_end(p);
+          if (p >= end_)
+            return end_;
+          if (*p == '"')
+            return p;
+          p += 2;
+        }
+        return p;
+      }
+
+      // ── Phase 41: skip_string_from32
+      // ───────────────────────────────────────── Like skip_string(s+32) but
+      // skips the SWAR-8 gate in scan_string_end. Called when bytes [s, s+32)
+      // are already confirmed clean by kActString's Phase 36 AVX2 inline scan.
+      // Saves ~11 scalar instructions per call by using AVX2 directly at p =
+      // s+32 (no 8-byte prologue). For strings 32-63 chars: 1 AVX2 op total vs
+      // SWAR-8+AVX2 (17 instructions).
+      BEAST_INLINE const char *skip_string_from32(const char *s) noexcept {
+        const char *p = s + 32;
 #if BEAST_HAS_AVX2
-    const __m256i vq = _mm256_set1_epi8('"');
-    const __m256i vbs = _mm256_set1_epi8('\\');
-    while (BEAST_LIKELY(p + 32 <= end_)) {
-      __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p));
-      uint32_t mask =
-          static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_or_si256(
-              _mm256_cmpeq_epi8(v, vq), _mm256_cmpeq_epi8(v, vbs))));
-      if (BEAST_LIKELY(mask != 0)) {
-        p += __builtin_ctz(mask);
-        if (BEAST_LIKELY(*p == '"'))
-          return p;
-        p += 2; // skip escape sequence (backslash + next byte)
-        continue;
-      }
-      p += 32;
-    }
-    // ── Tail: SSE2 16B (handles remaining <32B) ──────────────────────────
-    {
-      const __m128i vq128 = _mm_set1_epi8('"');
-      const __m128i vbs128 = _mm_set1_epi8('\\');
-      while (p + 16 <= end_) {
-        __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i *>(p));
-        int mask = _mm_movemask_epi8(
-            _mm_or_si128(_mm_cmpeq_epi8(v, vq128), _mm_cmpeq_epi8(v, vbs128)));
-        if (mask) {
-          p += __builtin_ctz(mask);
-          if (*p == '"')
-            return p;
-          p += 2;
-          break;
+        const __m256i vq = _mm256_set1_epi8('"');
+        const __m256i vbs = _mm256_set1_epi8('\\');
+        while (BEAST_LIKELY(p + 32 <= end_)) {
+          __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p));
+          uint32_t mask =
+              static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_or_si256(
+                  _mm256_cmpeq_epi8(v, vq), _mm256_cmpeq_epi8(v, vbs))));
+          if (BEAST_LIKELY(mask != 0)) {
+            p += __builtin_ctz(mask);
+            if (BEAST_LIKELY(*p == '"'))
+              return p;
+            p += 2; // skip escape sequence (backslash + next byte)
+            continue;
+          }
+          p += 32;
         }
-        p += 16;
-      }
-    }
+        // ── Tail: SSE2 16B (handles remaining <32B) ──────────────────────────
+        {
+          const __m128i vq128 = _mm_set1_epi8('"');
+          const __m128i vbs128 = _mm_set1_epi8('\\');
+          while (p + 16 <= end_) {
+            __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i *>(p));
+            int mask = _mm_movemask_epi8(_mm_or_si128(
+                _mm_cmpeq_epi8(v, vq128), _mm_cmpeq_epi8(v, vbs128)));
+            if (mask) {
+              p += __builtin_ctz(mask);
+              if (*p == '"')
+                return p;
+              p += 2;
+              break;
+            }
+            p += 16;
+          }
+        }
 #endif
-    // SWAR-8 + scalar tail (platform-agnostic, handles last <16B)
-    while (p < end_) {
-      p = scan_string_end(p);
-      if (p >= end_)
-        return end_;
-      if (*p == '"')
-        return p;
-      p += 2;
-    }
-    return p;
-  }
-
-  // ── Phase 43: skip_string_from64 ─────────────────────────────────────────
-  // Like skip_string_from32 but starts 64B further (s+64).
-  // Called when bytes [s, s+64) are confirmed clean by an AVX-512 inline scan.
-  // For strings 64-127 chars: 1 AVX-512 op total vs full scan_string_end().
-#if BEAST_HAS_AVX512
-  BEAST_INLINE const char *skip_string_from64(const char *s) noexcept {
-    const char *p = s + 64;
-    {
-      const __m512i vq512 = _mm512_set1_epi8('"');
-      const __m512i vbs512 = _mm512_set1_epi8('\\');
-      while (BEAST_LIKELY(p + 64 <= end_)) {
-        __m512i v = _mm512_loadu_si512(reinterpret_cast<const __m512i *>(p));
-        uint64_t mask = _mm512_cmpeq_epi8_mask(v, vq512) |
-                        _mm512_cmpeq_epi8_mask(v, vbs512);
-        if (BEAST_LIKELY(mask != 0)) {
-          p += __builtin_ctzll(mask);
-          if (BEAST_LIKELY(*p == '"'))
-            return p;
-          p += 2; // skip escape sequence
-          continue;
-        }
-        p += 64;
-      }
-    }
-    // AVX2 32B tail (handles remaining <64B)
-    {
-      const __m256i vq = _mm256_set1_epi8('"');
-      const __m256i vbs = _mm256_set1_epi8('\\');
-      while (BEAST_LIKELY(p + 32 <= end_)) {
-        __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p));
-        uint32_t mask =
-            static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_or_si256(
-                _mm256_cmpeq_epi8(v, vq), _mm256_cmpeq_epi8(v, vbs))));
-        if (BEAST_LIKELY(mask != 0)) {
-          p += __builtin_ctz(mask);
-          if (BEAST_LIKELY(*p == '"'))
-            return p;
-          p += 2;
-          continue;
-        }
-        p += 32;
-      }
-    }
-    // SSE2 16B tail
-    {
-      const __m128i vq128 = _mm_set1_epi8('"');
-      const __m128i vbs128 = _mm_set1_epi8('\\');
-      while (p + 16 <= end_) {
-        __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i *>(p));
-        int mask = _mm_movemask_epi8(
-            _mm_or_si128(_mm_cmpeq_epi8(v, vq128), _mm_cmpeq_epi8(v, vbs128)));
-        if (mask) {
-          p += __builtin_ctz(mask);
+        // SWAR-8 + scalar tail (platform-agnostic, handles last <16B)
+        while (p < end_) {
+          p = scan_string_end(p);
+          if (p >= end_)
+            return end_;
           if (*p == '"')
             return p;
           p += 2;
-          break;
         }
-        p += 16;
-      }
-    }
-    // Scalar tail (platform-agnostic, handles last <16B)
-    while (p < end_) {
-      p = scan_string_end(p);
-      if (p >= end_)
-        return end_;
-      if (*p == '"')
         return p;
-      p += 2;
-    }
-    return p;
-  }
+      }
+
+      // ── Phase 43: skip_string_from64
+      // ───────────────────────────────────────── Like skip_string_from32 but
+      // starts 64B further (s+64). Called when bytes [s, s+64) are confirmed
+      // clean by an AVX-512 inline scan. For strings 64-127 chars: 1 AVX-512 op
+      // total vs full scan_string_end().
+#if BEAST_HAS_AVX512
+      BEAST_INLINE const char *skip_string_from64(const char *s) noexcept {
+        const char *p = s + 64;
+        {
+          const __m512i vq512 = _mm512_set1_epi8('"');
+          const __m512i vbs512 = _mm512_set1_epi8('\\');
+          while (BEAST_LIKELY(p + 64 <= end_)) {
+            __m512i v =
+                _mm512_loadu_si512(reinterpret_cast<const __m512i *>(p));
+            uint64_t mask = _mm512_cmpeq_epi8_mask(v, vq512) |
+                            _mm512_cmpeq_epi8_mask(v, vbs512);
+            if (BEAST_LIKELY(mask != 0)) {
+              p += __builtin_ctzll(mask);
+              if (BEAST_LIKELY(*p == '"'))
+                return p;
+              p += 2; // skip escape sequence
+              continue;
+            }
+            p += 64;
+          }
+        }
+        // AVX2 32B tail (handles remaining <64B)
+        {
+          const __m256i vq = _mm256_set1_epi8('"');
+          const __m256i vbs = _mm256_set1_epi8('\\');
+          while (BEAST_LIKELY(p + 32 <= end_)) {
+            __m256i v =
+                _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p));
+            uint32_t mask =
+                static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_or_si256(
+                    _mm256_cmpeq_epi8(v, vq), _mm256_cmpeq_epi8(v, vbs))));
+            if (BEAST_LIKELY(mask != 0)) {
+              p += __builtin_ctz(mask);
+              if (BEAST_LIKELY(*p == '"'))
+                return p;
+              p += 2;
+              continue;
+            }
+            p += 32;
+          }
+        }
+        // SSE2 16B tail
+        {
+          const __m128i vq128 = _mm_set1_epi8('"');
+          const __m128i vbs128 = _mm_set1_epi8('\\');
+          while (p + 16 <= end_) {
+            __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i *>(p));
+            int mask = _mm_movemask_epi8(_mm_or_si128(
+                _mm_cmpeq_epi8(v, vq128), _mm_cmpeq_epi8(v, vbs128)));
+            if (mask) {
+              p += __builtin_ctz(mask);
+              if (*p == '"')
+                return p;
+              p += 2;
+              break;
+            }
+            p += 16;
+          }
+        }
+        // Scalar tail (platform-agnostic, handles last <16B)
+        while (p < end_) {
+          p = scan_string_end(p);
+          if (p >= end_)
+            return end_;
+          if (*p == '"')
+            return p;
+          p += 2;
+        }
+        return p;
+      }
 #endif // BEAST_HAS_AVX512
 
-  // Fused key scanner: scan string end, then consume ':' immediately.
-  // For object keys: after closing '"', the next structural char is always ':'.
-  // If the char after '"' is already ':', consume it and return the next char.
-  // If there's whitespace between '"' and ':', do a normal SWAR skip.
-  // Returns the char that follows the ':' (the start of the value, or 0 on
-  // error). Also sets p_ to the position of that char.
-  //
-  // Phase B1 upgrade: SWAR-24 fast path (same as main switch case '"':) covers
-  // ≤24-byte keys with no backslash, accounting for 90%+ of twitter.json keys.
-  BEAST_INLINE char scan_key_colon_next(const char *s,
-                                        const char **key_end_out) noexcept {
-    // s is the char after the opening '"' of the key.
-    const char *e;
-    constexpr uint64_t K = 0x0101010101010101ULL;
-    constexpr uint64_t H = 0x8080808080808080ULL;
-    const uint64_t qm = K * static_cast<uint8_t>('"');
-    const uint64_t bsm = K * static_cast<uint8_t>('\\');
+      // Fused key scanner: scan string end, then consume ':' immediately.
+      // For object keys: after closing '"', the next structural char is always
+      // ':'. If the char after '"' is already ':', consume it and return the
+      // next char. If there's whitespace between '"' and ':', do a normal SWAR
+      // skip. Returns the char that follows the ':' (the start of the value, or
+      // 0 on error). Also sets p_ to the position of that char.
+      //
+      // Phase B1 upgrade: SWAR-24 fast path (same as main switch case '"':)
+      // covers ≤24-byte keys with no backslash, accounting for 90%+ of
+      // twitter.json keys.
+      BEAST_INLINE char scan_key_colon_next(const char *s,
+                                            const char **key_end_out) noexcept {
+        // s is the char after the opening '"' of the key.
+        const char *e;
+        constexpr uint64_t K = 0x0101010101010101ULL;
+        constexpr uint64_t H = 0x8080808080808080ULL;
+        const uint64_t qm = K * static_cast<uint8_t>('"');
+        const uint64_t bsm = K * static_cast<uint8_t>('\\');
 
 #if BEAST_HAS_AVX2
 #if BEAST_HAS_AVX512
-    // ── Phase 43: AVX-512 64B one-shot key scan ─────────────────────────────
-    // Handles keys ≤63 chars in one 512-bit operation.
-    if (BEAST_LIKELY(s + 64 <= end_)) {
-      const __m512i _vq512 = _mm512_set1_epi8('"');
-      const __m512i _vbs512 = _mm512_set1_epi8('\\');
-      __m512i _v512 = _mm512_loadu_si512(reinterpret_cast<const __m512i *>(s));
-      uint64_t _mask512 = _mm512_cmpeq_epi8_mask(_v512, _vq512) |
-                          _mm512_cmpeq_epi8_mask(_v512, _vbs512);
-      if (BEAST_LIKELY(_mask512 != 0)) {
-        e = s + __builtin_ctzll(_mask512);
-        if (BEAST_LIKELY(*e == '"')) {
+        // ── Phase 43: AVX-512 64B one-shot key scan
+        // ───────────────────────────── Handles keys ≤63 chars in one 512-bit
+        // operation.
+        if (BEAST_LIKELY(s + 64 <= end_)) {
+          const __m512i _vq512 = _mm512_set1_epi8('"');
+          const __m512i _vbs512 = _mm512_set1_epi8('\\');
+          __m512i _v512 =
+              _mm512_loadu_si512(reinterpret_cast<const __m512i *>(s));
+          uint64_t _mask512 = _mm512_cmpeq_epi8_mask(_v512, _vq512) |
+                              _mm512_cmpeq_epi8_mask(_v512, _vbs512);
+          if (BEAST_LIKELY(_mask512 != 0)) {
+            e = s + __builtin_ctzll(_mask512);
+            if (BEAST_LIKELY(*e == '"')) {
+              goto skn_found;
+            }
+            goto skn_slow; // backslash → full scanner
+          }
+          // mask==0: bytes [s, s+64) clean → skip_string_from64
+          e = skip_string_from64(s);
+          if (BEAST_UNLIKELY(e >= end_ || *e != '"'))
+            return 0;
           goto skn_found;
         }
-        goto skn_slow; // backslash → full scanner
-      }
-      // mask==0: bytes [s, s+64) clean → skip_string_from64
-      e = skip_string_from64(s);
-      if (BEAST_UNLIKELY(e >= end_ || *e != '"'))
-        return 0;
-      goto skn_found;
-    }
-    // s+64 > end_: fall through to AVX2 32B
+        // s+64 > end_: fall through to AVX2 32B
 #endif
-    // ── Phase 36: AVX2 32B key scan ─────────────────────────────────────────
-    // Handles keys ≤31 chars in one 256-bit operation.
-    // mask==0 or backslash → goto skn_slow directly (no SWAR-24 redundancy).
-    if (BEAST_LIKELY(s + 32 <= end_)) {
-      const __m256i _vq = _mm256_set1_epi8('"');
-      const __m256i _vbs = _mm256_set1_epi8('\\');
-      __m256i _v = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(s));
-      uint32_t _mask =
-          static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_or_si256(
-              _mm256_cmpeq_epi8(_v, _vq), _mm256_cmpeq_epi8(_v, _vbs))));
-      if (BEAST_LIKELY(_mask != 0)) {
-        e = s + __builtin_ctz(_mask);
-        if (BEAST_LIKELY(*e == '"')) {
+        // ── Phase 36: AVX2 32B key scan
+        // ───────────────────────────────────────── Handles keys ≤31 chars in
+        // one 256-bit operation. mask==0 or backslash → goto skn_slow directly
+        // (no SWAR-24 redundancy).
+        if (BEAST_LIKELY(s + 32 <= end_)) {
+          const __m256i _vq = _mm256_set1_epi8('"');
+          const __m256i _vbs = _mm256_set1_epi8('\\');
+          __m256i _v = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(s));
+          uint32_t _mask =
+              static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_or_si256(
+                  _mm256_cmpeq_epi8(_v, _vq), _mm256_cmpeq_epi8(_v, _vbs))));
+          if (BEAST_LIKELY(_mask != 0)) {
+            e = s + __builtin_ctz(_mask);
+            if (BEAST_LIKELY(*e == '"')) {
+              goto skn_found;
+            }
+            goto skn_slow; // backslash → full scanner
+          }
+          // ── Phase 41: mask==0 — bytes [s, s+32) are clean ────────────────
+          // skip_string_from32 starts AVX2 at s+32 directly, skipping
+          // scan_string_end's SWAR-8 gate (~11 instructions saved per call).
+          e = skip_string_from32(s);
+          if (BEAST_UNLIKELY(e >= end_ || *e != '"'))
+            return 0;
           goto skn_found;
         }
-        goto skn_slow; // backslash → full scanner
+        // ── Phase 45: near end of buffer on AVX2+ → skn_slow directly
+        // ────────── SWAR-24 is dead code on AVX2/AVX-512 machines (only
+        // reached for keys within the last 31B of input, i.e. essentially never
+        // on real files). Removing it shrinks the function → better L1 I-cache
+        // utilization.
+        goto skn_slow;
+#elif BEAST_HAS_NEON
+    // ── Phase 57: Global AArch64 NEON Priority Scanner ──────────────────────
+    // NEON vectorization outperforms scalar SWAR-24 globally across all AArch64
+    // (Apple M-Series, Graviton, Cortex) due to wide vector pipelines.
+    //
+    // Cycle Latency & ILP Analysis vs SWAR:
+    // 1. SWAR GPR: ldr(8B) -> eor -> sub -> bic -> and
+    //    Dependencies: 4 serial Integer ALU ops. Critical path: ~4-5 cycles/8B.
+    // 2. NEON SIMD: vld1q(16B) -> vceqq -> vmaxvq
+    //    Dependencies: 2 Vector ALU ops. Critical path: ~5-6 cycles/16B.
+    //
+    // Conclusion: NEON processes 2x data (16B vs 8B) with a perfectly parallel
+    // issue queue without choking the branch predictor with scalar pre-gates.
+    if (BEAST_LIKELY(s + 32 <= end_)) {
+      const uint8x16_t vq = vdupq_n_u8('"');
+      const uint8x16_t vbs = vdupq_n_u8('\\');
+
+      uint8x16_t v1 = vld1q_u8(reinterpret_cast<const uint8_t *>(s));
+      uint8x16_t m1 = vorrq_u8(vceqq_u8(v1, vq), vceqq_u8(v1, vbs));
+      if (BEAST_LIKELY(vmaxvq_u32(vreinterpretq_u32_u8(m1)) != 0)) {
+        e = s;
+        while (*e != '"' && *e != '\\')
+          ++e;
+        if (BEAST_LIKELY(*e == '"'))
+          goto skn_found;
+        goto skn_slow;
       }
-      // ── Phase 41: mask==0 — bytes [s, s+32) are clean ────────────────
-      // skip_string_from32 starts AVX2 at s+32 directly, skipping
-      // scan_string_end's SWAR-8 gate (~11 instructions saved per call).
-      e = skip_string_from32(s);
-      if (BEAST_UNLIKELY(e >= end_ || *e != '"'))
-        return 0;
-      goto skn_found;
+
+      uint8x16_t v2 = vld1q_u8(reinterpret_cast<const uint8_t *>(s + 16));
+      uint8x16_t m2 = vorrq_u8(vceqq_u8(v2, vq), vceqq_u8(v2, vbs));
+      if (BEAST_LIKELY(vmaxvq_u32(vreinterpretq_u32_u8(m2)) != 0)) {
+        e = s + 16;
+        while (*e != '"' && *e != '\\')
+          ++e;
+        if (BEAST_LIKELY(*e == '"'))
+          goto skn_found;
+        goto skn_slow;
+      }
+      goto skn_slow;
     }
-    // ── Phase 45: near end of buffer on AVX2+ → skn_slow directly ──────────
-    // SWAR-24 is dead code on AVX2/AVX-512 machines (only reached for keys
-    // within the last 31B of input, i.e. essentially never on real files).
-    // Removing it shrinks the function → better L1 I-cache utilization.
     goto skn_slow;
 #else
-    // ── SWAR-24 (non-AVX2 machines only) ────────────────────────────────────
+    // ── SWAR-24 (Apple Silicon M-Series / non-AVX2 fallback) ────────────────
+    // Phase 56-5 finding: On Apple Silicon, this scalar SWAR path is faster
+    // than NEON for short keys due to massive OoO windows and fast predictors.
     // Phase D2: load v0 first; exit immediately for ≤8-char keys (most common
     // twitter.json keys: "id", "text", "user", "lang" etc.) before loading
     // v1/v2.
@@ -6288,527 +6342,538 @@ class Parser {
       // Backslash found → fall through to full scan
     }
 #endif // BEAST_HAS_AVX2
-  skn_slow:
-    e = skip_string(s);
-    if (BEAST_UNLIKELY(e >= end_ || *e != '"'))
-      return 0; // malformed
-  skn_found:
-    if (key_end_out)
-      *key_end_out = e;
-    push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
-         static_cast<uint32_t>(s - data_));
-    p_ = e + 1; // advance past closing '"'
+      skn_slow:
+        e = skip_string(s);
+        if (BEAST_UNLIKELY(e >= end_ || *e != '"'))
+          return 0; // malformed
+      skn_found:
+        if (key_end_out)
+          *key_end_out = e;
+        push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
+             static_cast<uint32_t>(s - data_));
+        p_ = e + 1; // advance past closing '"'
 
-    // Now: consume ':' and skip whitespace to the value start.
-    // Common case: p_ is already on ':' (no space between key and colon)
-    if (BEAST_LIKELY(p_ < end_ && *p_ == ':')) {
-      ++p_;
-      // peek at value start
-      if (BEAST_LIKELY(p_ < end_)) {
-        unsigned char nc = static_cast<unsigned char>(*p_);
-        if (BEAST_LIKELY(nc > 0x20))
-          return static_cast<char>(nc);
+        // Now: consume ':' and skip whitespace to the value start.
+        // Common case: p_ is already on ':' (no space between key and colon)
+        if (BEAST_LIKELY(p_ < end_ && *p_ == ':')) {
+          ++p_;
+          // peek at value start
+          if (BEAST_LIKELY(p_ < end_)) {
+            unsigned char nc = static_cast<unsigned char>(*p_);
+            if (BEAST_LIKELY(nc > 0x20))
+              return static_cast<char>(nc);
+            return skip_to_action();
+          }
+          return 0;
+        }
+        // Rare: whitespace between key and colon, or missing colon
+        char ch = skip_to_action();
+        if (ch != ':')
+          return ch; // let outer loop handle it
+        ++p_;
         return skip_to_action();
       }
-      return 0;
-    }
-    // Rare: whitespace between key and colon, or missing colon
-    char ch = skip_to_action();
-    if (ch != ':')
-      return ch; // let outer loop handle it
-    ++p_;
-    return skip_to_action();
-  }
 
-  // ── Phase 19 Technique 8: tape push via local register pointer ─
-  // tape_head_ is kept in a CPU register across the parse() body.
-  // No pointer chain: doc_->tape.head is only synced at the very end.
-  // push(): for every token EXCEPT ObjectEnd/ArrayEnd.
-  // Computes separator flag from current parse context, stores in meta bits
-  // 23-16 so dump() needs no bit-stack at all.
-  //   sep = 0  → no separator  (root, first array element, first object key)
-  //   sep = 1  → comma         (non-first array element or object key)
-  //   sep = 2  → colon         (object value, always)
-  BEAST_INLINE void push(TapeNodeType t, uint16_t l, uint32_t o) noexcept {
-    // Phase 48: prefetch tape write slot 8 TapeNodes (128B) ahead — store hint.
-    // Hides tape-arena write latency; significant gain on large files (canada).
-    __builtin_prefetch(tape_head_ + 8, 1, 1);
-    const uint64_t mask = depth_mask_; // precomputed: no variable shift
-    uint8_t sep = 0;
-    if (mask) { // depths 1..64: bit-stack path
-      // Use bool casts to avoid bitwise-AND/NOT surprises
-      // (e.g. mask=2, !2=1: 2&1=0, not what we want for logical AND)
-      const bool in_obj = !!(obj_bits_ & mask);
-      const bool is_key = !!(kv_key_bits_ & mask);
-      const bool has_el = !!(has_elem_bits_ & mask);
-      // value-position in object → colon(2); else comma-or-none
-      const bool is_val = in_obj & !is_key;
-      sep = is_val ? uint8_t(2) : uint8_t(has_el);
-      // Toggle key↔value tracking (only meaningful in objects)
-      kv_key_bits_ ^= (in_obj ? mask : uint64_t(0));
-      has_elem_bits_ |= mask;
-    } else if (BEAST_UNLIKELY(depth_ > 0)) { // depth > 64: overflow path
-      uint8_t &s = presep_overflow_[depth_ - kPresepDepth];
-      if (s & 1) { // in object
-        if (s & 2) {
-          sep = (s & 4) ? 0x01u : 0u;
-          s = (s & ~2u) | 4u;
-        } // key
-        else {
-          sep = 0x02u;
-          s |= (2u | 4u);
-        } // val
-      } else {
-        sep = (s & 4) ? 0x01u : 0u; // array
-        s |= 4;
-      }
-    }
-    TapeNode *n = tape_head_++;
-    n->meta = (static_cast<uint32_t>(t) << 24) |
-              (static_cast<uint32_t>(sep) << 16) | static_cast<uint32_t>(l);
-    n->offset = o;
-  }
-
-  // push_end(): for ObjectEnd / ArrayEnd — always sep=0, no state update.
-  BEAST_INLINE void push_end(TapeNodeType t, uint32_t o) noexcept {
-    TapeNode *n = tape_head_++;
-    n->meta = static_cast<uint32_t>(t) << 24; // sep=0, len=0
-    n->offset = o;
-  }
-
-  BEAST_INLINE uint32_t tape_size() const noexcept {
-    return static_cast<uint32_t>(tape_head_ - doc_->tape.base);
-  }
-
-public:
-  explicit Parser(DocumentView *doc)
-      : p_(doc->data()), end_(doc->data() + doc->size()), data_(doc->data()),
-        doc_(doc),
-        tape_head_(doc->tape.base) // initialize local head from arena base
-  {}
-
-  // ── Phase 19: main parse loop ──────────────────────────────
-  // Key changes vs Phase 18:
-  //   1. char c = skip_to_action()  → switch(c) avoids re-read of *p_
-  //   2. tape_head_ is local → no doc_->tape.size() pointer chain
-  //   3. NEON 16-byte WS skip in skip_to_action() path
-  [[gnu::hot, gnu::flatten]] bool parse() {
-    // skip_to_action() returns the first action char AND advances p_.
-    // We keep 'c' as the dispatch value — no *p_ re-read needed.
-    char c = skip_to_action();
-    if (BEAST_UNLIKELY(c == 0 || p_ >= end_)) {
-      doc_->tape.head = tape_head_; // sync
-      return false;
-    }
-
-    while (p_ < end_) {
-      // Phase 48: prefetch input 3 cache lines (192B) ahead — read, L2 hint.
-      // Hides DRAM latency for the next iteration's LUT + data loads.
-      __builtin_prefetch(p_ + 192, 0, 1);
-      // Phase 32: LUT dispatch — 11 ActionId cases vs 17 raw char cases.
-      // kActionLut[c] maps every byte to an ActionId in one L1 cache access.
-      switch (static_cast<ActionId>(kActionLut[static_cast<uint8_t>(c)])) {
-
-      case kActObjOpen: {
-        push(TapeNodeType::ObjectStart, 0, static_cast<uint32_t>(p_ - data_));
-        // Phase E: setup new depth's presep state.
-        // Depths 1..kPresepDepth: use 64-bit bit-stacks (depth_mask_).
-        // Depths >kPresepDepth:   use presep_overflow_[] byte array.
-        if (BEAST_LIKELY(depth_ < kPresepDepth)) {
-          const uint64_t nm = depth_mask_ ? depth_mask_ << 1 : uint64_t(1);
-          obj_bits_ |= nm;
-          kv_key_bits_ |= nm;
-          has_elem_bits_ &= ~nm;
-          depth_mask_ = nm;
-        } else {
-          depth_mask_ = 0; // signal: overflow active in push()
-          presep_overflow_[depth_ + 1 - kPresepDepth] = 0b011u;
-        }
-        ++depth_;
-        ++p_;
-        if (BEAST_LIKELY(p_ < end_)) {
-          unsigned char fc = static_cast<unsigned char>(*p_);
-          if (BEAST_LIKELY(fc > 0x20)) {
-            c = static_cast<char>(fc);
-            continue;
+      // ── Phase 19 Technique 8: tape push via local register pointer ─
+      // tape_head_ is kept in a CPU register across the parse() body.
+      // No pointer chain: doc_->tape.head is only synced at the very end.
+      // push(): for every token EXCEPT ObjectEnd/ArrayEnd.
+      // Computes separator flag from current parse context, stores in meta bits
+      // 23-16 so dump() needs no bit-stack at all.
+      //   sep = 0  → no separator  (root, first array element, first object
+      //   key) sep = 1  → comma         (non-first array element or object key)
+      //   sep = 2  → colon         (object value, always)
+      BEAST_INLINE void push(TapeNodeType t, uint16_t l, uint32_t o) noexcept {
+        // Phase 48: prefetch tape write slot 8 TapeNodes (128B) ahead — store
+        // hint. Hides tape-arena write latency; significant gain on large files
+        // (canada).
+        __builtin_prefetch(tape_head_ + 8, 1, 1);
+        const uint64_t mask = depth_mask_; // precomputed: no variable shift
+        uint8_t sep = 0;
+        if (mask) { // depths 1..64: bit-stack path
+          // Use bool casts to avoid bitwise-AND/NOT surprises
+          // (e.g. mask=2, !2=1: 2&1=0, not what we want for logical AND)
+          const bool in_obj = !!(obj_bits_ & mask);
+          const bool is_key = !!(kv_key_bits_ & mask);
+          const bool has_el = !!(has_elem_bits_ & mask);
+          // value-position in object → colon(2); else comma-or-none
+          const bool is_val = in_obj & !is_key;
+          sep = is_val ? uint8_t(2) : uint8_t(has_el);
+          // Toggle key↔value tracking (only meaningful in objects)
+          kv_key_bits_ ^= (in_obj ? mask : uint64_t(0));
+          has_elem_bits_ |= mask;
+        } else if (BEAST_UNLIKELY(depth_ > 0)) { // depth > 64: overflow path
+          uint8_t &s = presep_overflow_[depth_ - kPresepDepth];
+          if (s & 1) { // in object
+            if (s & 2) {
+              sep = (s & 4) ? 0x01u : 0u;
+              s = (s & ~2u) | 4u;
+            } // key
+            else {
+              sep = 0x02u;
+              s |= (2u | 4u);
+            } // val
+          } else {
+            sep = (s & 4) ? 0x01u : 0u; // array
+            s |= 4;
           }
         }
-        break;
+        TapeNode *n = tape_head_++;
+        n->meta = (static_cast<uint32_t>(t) << 24) |
+                  (static_cast<uint32_t>(sep) << 16) | static_cast<uint32_t>(l);
+        n->offset = o;
       }
-      case kActArrOpen: {
-        push(TapeNodeType::ArrayStart, 0, static_cast<uint32_t>(p_ - data_));
-        if (BEAST_LIKELY(depth_ < kPresepDepth)) {
-          const uint64_t nm = depth_mask_ ? depth_mask_ << 1 : uint64_t(1);
-          obj_bits_ &= ~nm;
-          has_elem_bits_ &= ~nm;
-          depth_mask_ = nm;
-        } else {
-          depth_mask_ = 0;
-          presep_overflow_[depth_ + 1 - kPresepDepth] = 0b000u;
-        }
-        ++depth_;
-        ++p_;
-        if (BEAST_LIKELY(p_ < end_)) {
-          unsigned char fc = static_cast<unsigned char>(*p_);
-          if (BEAST_LIKELY(fc > 0x20)) {
-            c = static_cast<char>(fc);
-            continue;
-          }
-        }
-        break;
+
+      // push_end(): for ObjectEnd / ArrayEnd — always sep=0, no state update.
+      BEAST_INLINE void push_end(TapeNodeType t, uint32_t o) noexcept {
+        TapeNode *n = tape_head_++;
+        n->meta = static_cast<uint32_t>(t) << 24; // sep=0, len=0
+        n->offset = o;
       }
-      case kActClose: {
-        if (BEAST_UNLIKELY(depth_ == 0))
-          goto fail;
-        --depth_;
-        // Restore depth_mask_ for the now-current depth.
-        // Common: was already in bit-stack region → just shift right.
-        // Rare: crossing back from overflow → recompute from depth_.
-        if (BEAST_LIKELY(depth_mask_ != 0))
-          depth_mask_ >>= 1;
-        else if (depth_ > 0 && depth_ <= kPresepDepth)
-          depth_mask_ = uint64_t(1) << (depth_ - 1); // restore, rare
-        push_end(c == '}' ? TapeNodeType::ObjectEnd : TapeNodeType::ArrayEnd,
+
+      BEAST_INLINE uint32_t tape_size() const noexcept {
+        return static_cast<uint32_t>(tape_head_ - doc_->tape.base);
+      }
+
+    public:
+      explicit Parser(DocumentView * doc)
+          : p_(doc->data()), end_(doc->data() + doc->size()),
+            data_(doc->data()), doc_(doc),
+            tape_head_(doc->tape.base) // initialize local head from arena base
+      {}
+
+      // ── Phase 19: main parse loop ──────────────────────────────
+      // Key changes vs Phase 18:
+      //   1. char c = skip_to_action()  → switch(c) avoids re-read of *p_
+      //   2. tape_head_ is local → no doc_->tape.size() pointer chain
+      //   3. NEON 16-byte WS skip in skip_to_action() path
+      [[gnu::hot, gnu::flatten]] bool parse() {
+        // skip_to_action() returns the first action char AND advances p_.
+        // We keep 'c' as the dispatch value — no *p_ re-read needed.
+        char c = skip_to_action();
+        if (BEAST_UNLIKELY(c == 0 || p_ >= end_)) {
+          doc_->tape.head = tape_head_; // sync
+          return false;
+        }
+
+        while (p_ < end_) {
+          // Phase 48: prefetch input 3 cache lines (192B) ahead — read, L2
+          // hint. Hides DRAM latency for the next iteration's LUT + data loads.
+          __builtin_prefetch(p_ + 192, 0, 1);
+          // Phase 32: LUT dispatch — 11 ActionId cases vs 17 raw char cases.
+          // kActionLut[c] maps every byte to an ActionId in one L1 cache
+          // access.
+          switch (static_cast<ActionId>(kActionLut[static_cast<uint8_t>(c)])) {
+
+          case kActObjOpen: {
+            push(TapeNodeType::ObjectStart, 0,
                  static_cast<uint32_t>(p_ - data_));
-        ++p_;
-        break;
-      }
-      case kActString: {
-        const char *s = p_ + 1, *e;
-        constexpr uint64_t K = 0x0101010101010101ULL;
-        constexpr uint64_t H = 0x8080808080808080ULL;
-        const uint64_t qm = K * static_cast<uint8_t>('"');
-        const uint64_t bsm = K * static_cast<uint8_t>('\\');
+            // Phase E: setup new depth's presep state.
+            // Depths 1..kPresepDepth: use 64-bit bit-stacks (depth_mask_).
+            // Depths >kPresepDepth:   use presep_overflow_[] byte array.
+            if (BEAST_LIKELY(depth_ < kPresepDepth)) {
+              const uint64_t nm = depth_mask_ ? depth_mask_ << 1 : uint64_t(1);
+              obj_bits_ |= nm;
+              kv_key_bits_ |= nm;
+              has_elem_bits_ &= ~nm;
+              depth_mask_ = nm;
+            } else {
+              depth_mask_ = 0; // signal: overflow active in push()
+              presep_overflow_[depth_ + 1 - kPresepDepth] = 0b011u;
+            }
+            ++depth_;
+            ++p_;
+            if (BEAST_LIKELY(p_ < end_)) {
+              unsigned char fc = static_cast<unsigned char>(*p_);
+              if (BEAST_LIKELY(fc > 0x20)) {
+                c = static_cast<char>(fc);
+                continue;
+              }
+            }
+            break;
+          }
+          case kActArrOpen: {
+            push(TapeNodeType::ArrayStart, 0,
+                 static_cast<uint32_t>(p_ - data_));
+            if (BEAST_LIKELY(depth_ < kPresepDepth)) {
+              const uint64_t nm = depth_mask_ ? depth_mask_ << 1 : uint64_t(1);
+              obj_bits_ &= ~nm;
+              has_elem_bits_ &= ~nm;
+              depth_mask_ = nm;
+            } else {
+              depth_mask_ = 0;
+              presep_overflow_[depth_ + 1 - kPresepDepth] = 0b000u;
+            }
+            ++depth_;
+            ++p_;
+            if (BEAST_LIKELY(p_ < end_)) {
+              unsigned char fc = static_cast<unsigned char>(*p_);
+              if (BEAST_LIKELY(fc > 0x20)) {
+                c = static_cast<char>(fc);
+                continue;
+              }
+            }
+            break;
+          }
+          case kActClose: {
+            if (BEAST_UNLIKELY(depth_ == 0))
+              goto fail;
+            --depth_;
+            // Restore depth_mask_ for the now-current depth.
+            // Common: was already in bit-stack region → just shift right.
+            // Rare: crossing back from overflow → recompute from depth_.
+            if (BEAST_LIKELY(depth_mask_ != 0))
+              depth_mask_ >>= 1;
+            else if (depth_ > 0 && depth_ <= kPresepDepth)
+              depth_mask_ = uint64_t(1) << (depth_ - 1); // restore, rare
+            push_end(c == '}' ? TapeNodeType::ObjectEnd
+                              : TapeNodeType::ArrayEnd,
+                     static_cast<uint32_t>(p_ - data_));
+            ++p_;
+            break;
+          }
+          case kActString: {
+            const char *s = p_ + 1, *e;
+            constexpr uint64_t K = 0x0101010101010101ULL;
+            constexpr uint64_t H = 0x8080808080808080ULL;
+            const uint64_t qm = K * static_cast<uint8_t>('"');
+            const uint64_t bsm = K * static_cast<uint8_t>('\\');
 #if BEAST_HAS_AVX2
 #if BEAST_HAS_AVX512
-        // ── Phase 43: AVX-512 64B one-shot string scan ──────────────────────
-        // One 512-bit load handles ≤63-char strings in a single zmm op.
-        // Expected gain: citm (long keys) −5~10%, twitter moderate.
-        if (BEAST_LIKELY(s + 64 <= end_)) {
-          const __m512i _vq512 = _mm512_set1_epi8('"');
-          const __m512i _vbs512 = _mm512_set1_epi8('\\');
-          __m512i _v512 =
-              _mm512_loadu_si512(reinterpret_cast<const __m512i *>(s));
-          uint64_t _mask512 = _mm512_cmpeq_epi8_mask(_v512, _vq512) |
-                              _mm512_cmpeq_epi8_mask(_v512, _vbs512);
-          if (BEAST_LIKELY(_mask512 != 0)) {
-            e = s + __builtin_ctzll(_mask512);
-            if (BEAST_LIKELY(*e == '"')) {
-              push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
-                   static_cast<uint32_t>(s - data_));
-              p_ = e + 1;
-              goto str_done;
-            }
-            goto str_slow; // backslash first → full scanner
-          }
-          // mask==0: bytes [s, s+64) clean → skip_string_from64
-          e = skip_string_from64(s);
-          if (BEAST_UNLIKELY(e >= end_ || *e != '"'))
-            goto fail;
-          push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
-               static_cast<uint32_t>(s - data_));
-          p_ = e + 1;
-          goto str_done;
-        }
-        // s+64 > end_: fall through to AVX2 32B
-#endif
-        // ── Phase 36: AVX2 32B inline string scan ─────────────────────────
-        // One 256-bit load handles strings up to 31 chars in 1 SIMD op.
-        // twitter.json: 84% of strings ≤24 chars — major hot-path speedup.
-        // mask==0 or backslash → goto str_slow directly (no SWAR-24
-        // redundancy).
-        if (BEAST_LIKELY(s + 32 <= end_)) {
-          const __m256i _vq = _mm256_set1_epi8('"');
-          const __m256i _vbs = _mm256_set1_epi8('\\');
-          __m256i _v = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(s));
-          uint32_t _mask =
-              static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_or_si256(
-                  _mm256_cmpeq_epi8(_v, _vq), _mm256_cmpeq_epi8(_v, _vbs))));
-          if (BEAST_LIKELY(_mask != 0)) {
-            e = s + __builtin_ctz(_mask);
-            if (BEAST_LIKELY(*e == '"')) {
-              push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
-                   static_cast<uint32_t>(s - data_));
-              p_ = e + 1;
-              goto str_done;
-            }
-            goto str_slow; // backslash first → full scanner
-          }
-          // ── Phase 41: mask==0 — bytes [s, s+32) are clean ──────────────
-          // skip_string_from32 starts AVX2 at s+32 directly, skipping
-          // scan_string_end's SWAR-8 gate (~11 instructions saved per call).
-          e = skip_string_from32(s);
-          if (BEAST_UNLIKELY(e >= end_ || *e != '"'))
-            goto fail;
-          push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
-               static_cast<uint32_t>(s - data_));
-          p_ = e + 1;
-          goto str_done;
-        }
-        // near end of buffer: fall through to SWAR-24
-#endif
-        // SWAR cascaded: load v0 first, early exit for ≤8-char strings
-        // (Phase D2: covers 36% of twitter.json strings without loading v1/v2).
-        // twitter.json coverage: ≤8 (36%), ≤16 (64%), ≤24 (84%)
-        if (BEAST_LIKELY(s + 24 <= end_)) {
-          uint64_t v0;
-          std::memcpy(&v0, s, 8);
-          uint64_t hq0 = v0 ^ qm;
-          hq0 = (hq0 - K) & ~hq0 & H;
-          uint64_t hb0 = v0 ^ bsm;
-          hb0 = (hb0 - K) & ~hb0 & H;
-          if (BEAST_LIKELY(!hb0)) {
-            if (hq0) { // ≤8-char string, no backslash
-              e = s + (BEAST_CTZ(hq0) >> 3);
-              push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
-                   static_cast<uint32_t>(s - data_));
-              p_ = e + 1;
-              goto str_done;
-            }
-            // 9-24 chars: load v1 and v2
-            uint64_t v1, v2;
-            std::memcpy(&v1, s + 8, 8);
-            std::memcpy(&v2, s + 16, 8);
-            uint64_t hq1 = v1 ^ qm;
-            hq1 = (hq1 - K) & ~hq1 & H;
-            uint64_t hb1 = v1 ^ bsm;
-            hb1 = (hb1 - K) & ~hb1 & H;
-            uint64_t hq2 = v2 ^ qm;
-            hq2 = (hq2 - K) & ~hq2 & H;
-            uint64_t hb2 = v2 ^ bsm;
-            hb2 = (hb2 - K) & ~hb2 & H;
-            if (BEAST_LIKELY(!(hb1 | hb2))) {
-              if (hq1) {
-                e = s + 8 + (BEAST_CTZ(hq1) >> 3);
-              } else if (hq2) {
-                e = s + 16 + (BEAST_CTZ(hq2) >> 3);
-              } else {
-                goto str_slow;
+            // ── Phase 43: AVX-512 64B one-shot string scan
+            // ────────────────────── One 512-bit load handles ≤63-char strings
+            // in a single zmm op. Expected gain: citm (long keys) −5~10%,
+            // twitter moderate.
+            if (BEAST_LIKELY(s + 64 <= end_)) {
+              const __m512i _vq512 = _mm512_set1_epi8('"');
+              const __m512i _vbs512 = _mm512_set1_epi8('\\');
+              __m512i _v512 =
+                  _mm512_loadu_si512(reinterpret_cast<const __m512i *>(s));
+              uint64_t _mask512 = _mm512_cmpeq_epi8_mask(_v512, _vq512) |
+                                  _mm512_cmpeq_epi8_mask(_v512, _vbs512);
+              if (BEAST_LIKELY(_mask512 != 0)) {
+                e = s + __builtin_ctzll(_mask512);
+                if (BEAST_LIKELY(*e == '"')) {
+                  push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
+                       static_cast<uint32_t>(s - data_));
+                  p_ = e + 1;
+                  goto str_done;
+                }
+                goto str_slow; // backslash first → full scanner
               }
+              // mask==0: bytes [s, s+64) clean → skip_string_from64
+              e = skip_string_from64(s);
+              if (BEAST_UNLIKELY(e >= end_ || *e != '"'))
+                goto fail;
               push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
                    static_cast<uint32_t>(s - data_));
               p_ = e + 1;
               goto str_done;
             }
-          }
-        } else if (s + 8 <= end_) {
-          uint64_t v;
-          std::memcpy(&v, s, 8);
-          uint64_t hq = v ^ qm;
-          hq = (hq - K) & ~hq & H;
-          uint64_t hb = v ^ bsm;
-          hb = (hb - K) & ~hb & H;
-          if (BEAST_LIKELY(hq && !hb)) {
-            e = s + (BEAST_CTZ(hq) >> 3);
+            // s+64 > end_: fall through to AVX2 32B
+#endif
+            // ── Phase 36: AVX2 32B inline string scan
+            // ───────────────────────── One 256-bit load handles strings up to
+            // 31 chars in 1 SIMD op. twitter.json: 84% of strings ≤24 chars —
+            // major hot-path speedup. mask==0 or backslash → goto str_slow
+            // directly (no SWAR-24 redundancy).
+            if (BEAST_LIKELY(s + 32 <= end_)) {
+              const __m256i _vq = _mm256_set1_epi8('"');
+              const __m256i _vbs = _mm256_set1_epi8('\\');
+              __m256i _v =
+                  _mm256_loadu_si256(reinterpret_cast<const __m256i *>(s));
+              uint32_t _mask = static_cast<uint32_t>(_mm256_movemask_epi8(
+                  _mm256_or_si256(_mm256_cmpeq_epi8(_v, _vq),
+                                  _mm256_cmpeq_epi8(_v, _vbs))));
+              if (BEAST_LIKELY(_mask != 0)) {
+                e = s + __builtin_ctz(_mask);
+                if (BEAST_LIKELY(*e == '"')) {
+                  push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
+                       static_cast<uint32_t>(s - data_));
+                  p_ = e + 1;
+                  goto str_done;
+                }
+                goto str_slow; // backslash first → full scanner
+              }
+              // ── Phase 41: mask==0 — bytes [s, s+32) are clean ──────────────
+              // skip_string_from32 starts AVX2 at s+32 directly, skipping
+              // scan_string_end's SWAR-8 gate (~11 instructions saved per
+              // call).
+              e = skip_string_from32(s);
+              if (BEAST_UNLIKELY(e >= end_ || *e != '"'))
+                goto fail;
+              push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
+                   static_cast<uint32_t>(s - data_));
+              p_ = e + 1;
+              goto str_done;
+            }
+            // near end of buffer: fall through to SWAR-24
+#endif
+            // SWAR cascaded: load v0 first, early exit for ≤8-char strings
+            // (Phase D2: covers 36% of twitter.json strings without loading
+            // v1/v2). twitter.json coverage: ≤8 (36%), ≤16 (64%), ≤24 (84%)
+            if (BEAST_LIKELY(s + 24 <= end_)) {
+              uint64_t v0;
+              std::memcpy(&v0, s, 8);
+              uint64_t hq0 = v0 ^ qm;
+              hq0 = (hq0 - K) & ~hq0 & H;
+              uint64_t hb0 = v0 ^ bsm;
+              hb0 = (hb0 - K) & ~hb0 & H;
+              if (BEAST_LIKELY(!hb0)) {
+                if (hq0) { // ≤8-char string, no backslash
+                  e = s + (BEAST_CTZ(hq0) >> 3);
+                  push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
+                       static_cast<uint32_t>(s - data_));
+                  p_ = e + 1;
+                  goto str_done;
+                }
+                // 9-24 chars: load v1 and v2
+                uint64_t v1, v2;
+                std::memcpy(&v1, s + 8, 8);
+                std::memcpy(&v2, s + 16, 8);
+                uint64_t hq1 = v1 ^ qm;
+                hq1 = (hq1 - K) & ~hq1 & H;
+                uint64_t hb1 = v1 ^ bsm;
+                hb1 = (hb1 - K) & ~hb1 & H;
+                uint64_t hq2 = v2 ^ qm;
+                hq2 = (hq2 - K) & ~hq2 & H;
+                uint64_t hb2 = v2 ^ bsm;
+                hb2 = (hb2 - K) & ~hb2 & H;
+                if (BEAST_LIKELY(!(hb1 | hb2))) {
+                  if (hq1) {
+                    e = s + 8 + (BEAST_CTZ(hq1) >> 3);
+                  } else if (hq2) {
+                    e = s + 16 + (BEAST_CTZ(hq2) >> 3);
+                  } else {
+                    goto str_slow;
+                  }
+                  push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
+                       static_cast<uint32_t>(s - data_));
+                  p_ = e + 1;
+                  goto str_done;
+                }
+              }
+            } else if (s + 8 <= end_) {
+              uint64_t v;
+              std::memcpy(&v, s, 8);
+              uint64_t hq = v ^ qm;
+              hq = (hq - K) & ~hq & H;
+              uint64_t hb = v ^ bsm;
+              hb = (hb - K) & ~hb & H;
+              if (BEAST_LIKELY(hq && !hb)) {
+                e = s + (BEAST_CTZ(hq) >> 3);
+                push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
+                     static_cast<uint32_t>(s - data_));
+                p_ = e + 1;
+                goto str_done;
+              }
+            }
+          str_slow:
+            // Strings >24 bytes or containing backslash — full SWAR-16 scanner
+            e = skip_string(s);
+            if (BEAST_UNLIKELY(e >= end_ || *e != '"'))
+              goto fail;
             push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
                  static_cast<uint32_t>(s - data_));
             p_ = e + 1;
-            goto str_done;
-          }
-        }
-      str_slow:
-        // Strings >24 bytes or containing backslash — full SWAR-16 scanner
-        e = skip_string(s);
-        if (BEAST_UNLIKELY(e >= end_ || *e != '"'))
-          goto fail;
-        push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
-             static_cast<uint32_t>(s - data_));
-        p_ = e + 1;
 
-      str_done:
-        // ── Phase 26 + B1: String Double Pump with fused key scanner ──
-        // Strings are almost always followed by ':', ',', '}', or ']'.
-        if (BEAST_LIKELY(p_ < end_)) {
-          unsigned char nc = static_cast<unsigned char>(*p_);
-          if (nc <= 0x20) {
-            c = skip_to_action();
-            if (BEAST_UNLIKELY(p_ >= end_))
-              goto done;
-            nc = static_cast<unsigned char>(c);
-          }
-          if (BEAST_LIKELY(nc == ':')) {
-            // After a key: consume ':' and find value start.
-            ++p_;
-            c = skip_to_action();
-            if (BEAST_UNLIKELY(p_ >= end_))
-              goto done;
-            continue; // bypass loop bottom, straight to value
-          }
-          if (nc == ',') {
-            // After a value: consume ',' and find next token.
-            ++p_;
-            // ── Phase B1: fused val→sep→key scanner ───────────────────
-            // If inside an object (depth ≤ 64), the next token is a key.
-            // Fuse: skip WS + scan key + consume ':' + skip WS in one shot,
-            // eliminating one switch dispatch and one extra skip_to_action().
-            if (BEAST_LIKELY(depth_ > 0 && depth_ <= 64 &&
-                             (obj_bits_ >> (depth_ - 1)) & 1)) {
-              // In object: expect next key string
-              if (BEAST_LIKELY(p_ < end_)) {
-                unsigned char fc = static_cast<unsigned char>(*p_);
-                if (fc <= 0x20) {
-                  fc = static_cast<unsigned char>(skip_to_action());
-                  if (BEAST_UNLIKELY(p_ >= end_))
-                    goto done;
+          str_done:
+            // ── Phase 26 + B1: String Double Pump with fused key scanner ──
+            // Strings are almost always followed by ':', ',', '}', or ']'.
+            if (BEAST_LIKELY(p_ < end_)) {
+              unsigned char nc = static_cast<unsigned char>(*p_);
+              if (nc <= 0x20) {
+                c = skip_to_action();
+                if (BEAST_UNLIKELY(p_ >= end_))
+                  goto done;
+                nc = static_cast<unsigned char>(c);
+              }
+              if (BEAST_LIKELY(nc == ':')) {
+                // After a key: consume ':' and find value start.
+                ++p_;
+                c = skip_to_action();
+                if (BEAST_UNLIKELY(p_ >= end_))
+                  goto done;
+                continue; // bypass loop bottom, straight to value
+              }
+              if (nc == ',') {
+                // After a value: consume ',' and find next token.
+                ++p_;
+                // ── Phase B1: fused val→sep→key scanner ───────────────────
+                // If inside an object (depth ≤ 64), the next token is a key.
+                // Fuse: skip WS + scan key + consume ':' + skip WS in one shot,
+                // eliminating one switch dispatch and one extra
+                // skip_to_action().
+                if (BEAST_LIKELY(depth_ > 0 && depth_ <= 64 &&
+                                 (obj_bits_ >> (depth_ - 1)) & 1)) {
+                  // In object: expect next key string
+                  if (BEAST_LIKELY(p_ < end_)) {
+                    unsigned char fc = static_cast<unsigned char>(*p_);
+                    if (fc <= 0x20) {
+                      fc = static_cast<unsigned char>(skip_to_action());
+                      if (BEAST_UNLIKELY(p_ >= end_))
+                        goto done;
+                    }
+                    if (BEAST_LIKELY(fc == '"')) {
+                      // Fused key scan: SWAR-24 + push + ':' consume + WS skip
+                      char vc = scan_key_colon_next(p_ + 1, nullptr);
+                      if (BEAST_UNLIKELY(vc == 0))
+                        goto fail;
+                      if (BEAST_UNLIKELY(p_ >= end_))
+                        goto done;
+                      c = vc;
+                      continue; // directly to value — no switch for key!
+                    }
+                    // fc != '"': end of object or malformed; handle normally
+                    c = static_cast<char>(fc);
+                    continue;
+                  }
+                  goto done;
                 }
-                if (BEAST_LIKELY(fc == '"')) {
-                  // Fused key scan: SWAR-24 + push + ':' consume + WS skip
-                  char vc = scan_key_colon_next(p_ + 1, nullptr);
-                  if (BEAST_UNLIKELY(vc == 0))
-                    goto fail;
-                  if (BEAST_UNLIKELY(p_ >= end_))
-                    goto done;
-                  c = vc;
-                  continue; // directly to value — no switch for key!
-                }
-                // fc != '"': end of object or malformed; handle normally
-                c = static_cast<char>(fc);
+                // Not in object (in array, or depth > 64): find next element
+                c = skip_to_action();
+                if (BEAST_UNLIKELY(p_ >= end_))
+                  goto done;
+                continue; // bypass loop bottom, straight to next token!
+              }
+              if (BEAST_UNLIKELY(nc == ']' || nc == '}')) {
+                if (BEAST_UNLIKELY(depth_ == 0))
+                  goto fail;
+                --depth_;
+                if (BEAST_LIKELY(depth_ < kPresepDepth))
+                  depth_mask_ >>= 1;
+                push_end(nc == '}' ? TapeNodeType::ObjectEnd
+                                   : TapeNodeType::ArrayEnd,
+                         static_cast<uint32_t>(p_ - data_));
+                ++p_;
+                c = skip_to_action();
+                if (BEAST_UNLIKELY(p_ >= end_))
+                  goto done;
                 continue;
               }
-              goto done;
             }
-            // Not in object (in array, or depth > 64): find next element
-            c = skip_to_action();
-            if (BEAST_UNLIKELY(p_ >= end_))
-              goto done;
-            continue; // bypass loop bottom, straight to next token!
+            break;
           }
-          if (BEAST_UNLIKELY(nc == ']' || nc == '}')) {
-            if (BEAST_UNLIKELY(depth_ == 0))
+          case kActTrue:
+            if (BEAST_LIKELY(p_ + 4 <= end_ && !std::memcmp(p_, "true", 4))) {
+              push(TapeNodeType::BooleanTrue, 4,
+                   static_cast<uint32_t>(p_ - data_));
+              p_ += 4;
+            } else
               goto fail;
-            --depth_;
-            if (BEAST_LIKELY(depth_ < kPresepDepth))
-              depth_mask_ >>= 1;
-            push_end(nc == '}' ? TapeNodeType::ObjectEnd
-                               : TapeNodeType::ArrayEnd,
-                     static_cast<uint32_t>(p_ - data_));
-            ++p_;
-            c = skip_to_action();
-            if (BEAST_UNLIKELY(p_ >= end_))
-              goto done;
-            continue;
-          }
-        }
-        break;
-      }
-      case kActTrue:
-        if (BEAST_LIKELY(p_ + 4 <= end_ && !std::memcmp(p_, "true", 4))) {
-          push(TapeNodeType::BooleanTrue, 4, static_cast<uint32_t>(p_ - data_));
-          p_ += 4;
-        } else
-          goto fail;
-        goto bool_null_done;
-      case kActFalse:
-        if (BEAST_LIKELY(p_ + 5 <= end_ && !std::memcmp(p_, "false", 5))) {
-          push(TapeNodeType::BooleanFalse, 5,
-               static_cast<uint32_t>(p_ - data_));
-          p_ += 5;
-        } else
-          goto fail;
-        goto bool_null_done;
-      case kActNull:
-        if (BEAST_LIKELY(p_ + 4 <= end_ && !std::memcmp(p_, "null", 4))) {
-          push(TapeNodeType::Null, 4, static_cast<uint32_t>(p_ - data_));
-          p_ += 4;
-        } else
-          goto fail;
-      bool_null_done:
-        // ── Phase 44: Double-pump bool/null with fused key scanner ──────
-        // true/false/null are values; always followed by ',', ']', or '}'.
-        // Mirrors the Phase B1 number fusion: avoid re-entering switch top,
-        // and in object context fuse the next key scan after ','.
-        if (BEAST_LIKELY(p_ < end_)) {
-          unsigned char nc = static_cast<unsigned char>(*p_);
-          if (nc <= 0x20) {
-            c = skip_to_action();
-            if (BEAST_UNLIKELY(p_ >= end_))
-              goto done;
-            nc = static_cast<unsigned char>(c);
-          }
-          if (BEAST_LIKELY(nc == ',')) {
-            ++p_;
-            if (BEAST_LIKELY(depth_ > 0 && depth_ <= 64 &&
-                             (obj_bits_ >> (depth_ - 1)) & 1)) {
-              if (BEAST_LIKELY(p_ < end_)) {
-                unsigned char fc = static_cast<unsigned char>(*p_);
-                if (fc <= 0x20) {
-                  fc = static_cast<unsigned char>(skip_to_action());
-                  if (BEAST_UNLIKELY(p_ >= end_))
-                    goto done;
+            goto bool_null_done;
+          case kActFalse:
+            if (BEAST_LIKELY(p_ + 5 <= end_ && !std::memcmp(p_, "false", 5))) {
+              push(TapeNodeType::BooleanFalse, 5,
+                   static_cast<uint32_t>(p_ - data_));
+              p_ += 5;
+            } else
+              goto fail;
+            goto bool_null_done;
+          case kActNull:
+            if (BEAST_LIKELY(p_ + 4 <= end_ && !std::memcmp(p_, "null", 4))) {
+              push(TapeNodeType::Null, 4, static_cast<uint32_t>(p_ - data_));
+              p_ += 4;
+            } else
+              goto fail;
+          bool_null_done:
+            // ── Phase 44: Double-pump bool/null with fused key scanner ──────
+            // true/false/null are values; always followed by ',', ']', or '}'.
+            // Mirrors the Phase B1 number fusion: avoid re-entering switch top,
+            // and in object context fuse the next key scan after ','.
+            if (BEAST_LIKELY(p_ < end_)) {
+              unsigned char nc = static_cast<unsigned char>(*p_);
+              if (nc <= 0x20) {
+                c = skip_to_action();
+                if (BEAST_UNLIKELY(p_ >= end_))
+                  goto done;
+                nc = static_cast<unsigned char>(c);
+              }
+              if (BEAST_LIKELY(nc == ',')) {
+                ++p_;
+                if (BEAST_LIKELY(depth_ > 0 && depth_ <= 64 &&
+                                 (obj_bits_ >> (depth_ - 1)) & 1)) {
+                  if (BEAST_LIKELY(p_ < end_)) {
+                    unsigned char fc = static_cast<unsigned char>(*p_);
+                    if (fc <= 0x20) {
+                      fc = static_cast<unsigned char>(skip_to_action());
+                      if (BEAST_UNLIKELY(p_ >= end_))
+                        goto done;
+                    }
+                    if (BEAST_LIKELY(fc == '"')) {
+                      char vc = scan_key_colon_next(p_ + 1, nullptr);
+                      if (BEAST_UNLIKELY(vc == 0))
+                        goto fail;
+                      if (BEAST_UNLIKELY(p_ >= end_))
+                        goto done;
+                      c = vc;
+                      continue;
+                    }
+                    c = static_cast<char>(fc);
+                    continue;
+                  }
+                  goto done;
                 }
-                if (BEAST_LIKELY(fc == '"')) {
-                  char vc = scan_key_colon_next(p_ + 1, nullptr);
-                  if (BEAST_UNLIKELY(vc == 0))
-                    goto fail;
-                  if (BEAST_UNLIKELY(p_ >= end_))
-                    goto done;
-                  c = vc;
-                  continue;
-                }
-                c = static_cast<char>(fc);
+                c = skip_to_action();
+                if (BEAST_UNLIKELY(p_ >= end_))
+                  goto done;
                 continue;
               }
-              goto done;
+              if (BEAST_LIKELY(nc == ']' || nc == '}')) {
+                if (BEAST_UNLIKELY(depth_ == 0))
+                  goto fail;
+                --depth_;
+                if (BEAST_LIKELY(depth_ < kPresepDepth))
+                  depth_mask_ >>= 1;
+                push_end(nc == '}' ? TapeNodeType::ObjectEnd
+                                   : TapeNodeType::ArrayEnd,
+                         static_cast<uint32_t>(p_ - data_));
+                ++p_;
+                c = skip_to_action();
+                if (BEAST_UNLIKELY(p_ >= end_))
+                  goto done;
+                continue;
+              }
             }
-            c = skip_to_action();
-            if (BEAST_UNLIKELY(p_ >= end_))
-              goto done;
-            continue;
-          }
-          if (BEAST_LIKELY(nc == ']' || nc == '}')) {
-            if (BEAST_UNLIKELY(depth_ == 0))
-              goto fail;
-            --depth_;
-            if (BEAST_LIKELY(depth_ < kPresepDepth))
-              depth_mask_ >>= 1;
-            push_end(nc == '}' ? TapeNodeType::ObjectEnd
-                               : TapeNodeType::ArrayEnd,
-                     static_cast<uint32_t>(p_ - data_));
+            break;
+          case kActColon:
+          case kActComma:
             ++p_;
-            c = skip_to_action();
-            if (BEAST_UNLIKELY(p_ >= end_))
-              goto done;
-            continue;
-          }
-        }
-        break;
-      case kActColon:
-      case kActComma:
-        ++p_;
-        break;
-      // Numbers: SWAR-8 digit scanner
-      case kActNumber: {
-        const char *s = p_;
-        if (*p_ == '-')
-          ++p_;
-        while (p_ + 8 <= end_) {
-          uint64_t v;
-          std::memcpy(&v, p_, 8);
-          uint64_t shifted = v - 0x3030303030303030ULL;
-          uint64_t nondigit = (shifted | ((shifted & 0x7F7F7F7F7F7F7F7FULL) +
-                                          0x7676767676767676ULL)) &
-                              0x8080808080808080ULL;
-          if (nondigit) {
-            p_ += BEAST_CTZ(nondigit) >> 3;
-            goto num_done;
-          }
-          p_ += 8;
-        }
-        while (p_ < end_ && static_cast<unsigned>(*p_ - '0') < 10u)
-          ++p_;
-      num_done:;
-        bool flt = false;
-        if (BEAST_UNLIKELY(p_ < end_ &&
-                           (*p_ == '.' || *p_ == 'e' || *p_ == 'E'))) {
-          flt = true;
-          ++p_;
-          if (p_ < end_ && (*p_ == '+' || *p_ == '-'))
-            ++p_;
-          // ── Phase 33: SWAR-8 float digit scanner (fractional part) ──
-          // canada.json has 2.32M floats: scalar was 1 byte/iter.
-          // SWAR-8 processes 8 digits in a single 64-bit operation.
-          // Architecture-agnostic pure SWAR — fully inlined, zero call
-          // overhead.
+            break;
+          // Numbers: SWAR-8 digit scanner
+          case kActNumber: {
+            const char *s = p_;
+            if (*p_ == '-')
+              ++p_;
+            while (p_ + 8 <= end_) {
+              uint64_t v;
+              std::memcpy(&v, p_, 8);
+              uint64_t shifted = v - 0x3030303030303030ULL;
+              uint64_t nondigit =
+                  (shifted | ((shifted & 0x7F7F7F7F7F7F7F7FULL) +
+                              0x7676767676767676ULL)) &
+                  0x8080808080808080ULL;
+              if (nondigit) {
+                p_ += BEAST_CTZ(nondigit) >> 3;
+                goto num_done;
+              }
+              p_ += 8;
+            }
+            while (p_ < end_ && static_cast<unsigned>(*p_ - '0') < 10u)
+              ++p_;
+          num_done:;
+            bool flt = false;
+            if (BEAST_UNLIKELY(p_ < end_ &&
+                               (*p_ == '.' || *p_ == 'e' || *p_ == 'E'))) {
+              flt = true;
+              ++p_;
+              if (p_ < end_ && (*p_ == '+' || *p_ == '-'))
+                ++p_;
+              // ── Phase 33: SWAR-8 float digit scanner (fractional part) ──
+              // canada.json has 2.32M floats: scalar was 1 byte/iter.
+              // SWAR-8 processes 8 digits in a single 64-bit operation.
+              // Architecture-agnostic pure SWAR — fully inlined, zero call
+              // overhead.
 #define BEAST_SWAR_SKIP_DIGITS()                                               \
   do {                                                                         \
     while (p_ + 8 <= end_) {                                                   \
@@ -6827,381 +6892,386 @@ public:
     while (p_ < end_ && static_cast<unsigned>(*p_ - '0') < 10u)                \
       ++p_;                                                                    \
   } while (0)
-          BEAST_SWAR_SKIP_DIGITS(); // fractional digits
-          if (p_ < end_ && (*p_ == 'e' || *p_ == 'E')) {
-            ++p_;
-            if (p_ < end_ && (*p_ == '+' || *p_ == '-'))
-              ++p_;
-            BEAST_SWAR_SKIP_DIGITS(); // exponent digits
-          }
-#undef BEAST_SWAR_SKIP_DIGITS
-        }
-        push(flt ? TapeNodeType::NumberRaw : TapeNodeType::Integer,
-             static_cast<uint16_t>(p_ - s), static_cast<uint32_t>(s - data_));
-
-        // ── Phase 25 + B1: Double-pump Number Parsing with fused key scanner ─
-        // Numbers are values. They are ALWAYS followed by ',' or ']' or '}'.
-        // Instead of falling back to the top of the switch loop, we peek at the
-        // next char. If it's ',' in an object, fuse the next key scan.
-        if (BEAST_LIKELY(p_ < end_)) {
-          unsigned char nc = static_cast<unsigned char>(*p_);
-          if (nc <= 0x20) {
-            c = skip_to_action();
-            if (BEAST_UNLIKELY(p_ >= end_))
-              goto done;
-            nc = static_cast<unsigned char>(c);
-          }
-          if (BEAST_LIKELY(nc == ',')) {
-            ++p_;
-            // Phase B1: fused key scan after ',' in object context
-            if (BEAST_LIKELY(depth_ > 0 && depth_ <= 64 &&
-                             (obj_bits_ >> (depth_ - 1)) & 1)) {
-              if (BEAST_LIKELY(p_ < end_)) {
-                unsigned char fc = static_cast<unsigned char>(*p_);
-                if (fc <= 0x20) {
-                  fc = static_cast<unsigned char>(skip_to_action());
-                  if (BEAST_UNLIKELY(p_ >= end_))
-                    goto done;
-                }
-                if (BEAST_LIKELY(fc == '"')) {
-                  char vc = scan_key_colon_next(p_ + 1, nullptr);
-                  if (BEAST_UNLIKELY(vc == 0))
-                    goto fail;
-                  if (BEAST_UNLIKELY(p_ >= end_))
-                    goto done;
-                  c = vc;
-                  continue; // directly to value
-                }
-                c = static_cast<char>(fc);
-                continue;
+              BEAST_SWAR_SKIP_DIGITS(); // fractional digits
+              if (p_ < end_ && (*p_ == 'e' || *p_ == 'E')) {
+                ++p_;
+                if (p_ < end_ && (*p_ == '+' || *p_ == '-'))
+                  ++p_;
+                BEAST_SWAR_SKIP_DIGITS(); // exponent digits
               }
-              goto done;
+#undef BEAST_SWAR_SKIP_DIGITS
             }
-            c = skip_to_action();
-            if (BEAST_UNLIKELY(p_ >= end_))
-              goto done;
-            continue; // bypass loop bottom separator logic, go straight to next
-                      // token
-          }
-          if (BEAST_LIKELY(nc == ']' || nc == '}')) {
-            if (BEAST_UNLIKELY(depth_ == 0))
-              goto fail;
-            --depth_;
-            if (BEAST_LIKELY(depth_ < kPresepDepth))
-              depth_mask_ >>= 1;
-            push_end(nc == '}' ? TapeNodeType::ObjectEnd
-                               : TapeNodeType::ArrayEnd,
-                     static_cast<uint32_t>(p_ - data_));
-            ++p_;
-            c = skip_to_action();
-            if (BEAST_UNLIKELY(p_ >= end_))
-              goto done;
-            continue; // End handled inline!
-          }
-        }
-        break;
-      }
-      default:
-        goto fail;
-      } // switch
+            push(flt ? TapeNodeType::NumberRaw : TapeNodeType::Integer,
+                 static_cast<uint16_t>(p_ - s),
+                 static_cast<uint32_t>(s - data_));
 
-      // ── Phase 19b: Inline separator + peek-next optimization ─────────
-      // After each token, consume ':' or ',' inline (no switch iteration).
-      // After the separator, try a direct *p_ peek before calling
-      // skip_to_action. For JSON like "key":value or value,"next", the char
-      // after sep is > 0x20.
-      c = skip_to_action();
-      if (BEAST_UNLIKELY(p_ >= end_))
-        break;
-      if (BEAST_LIKELY(c == ':' || c == ',')) {
-        ++p_; // consume separator
-        if (BEAST_UNLIKELY(p_ >= end_))
-          break;
-        // Peek: if next char is already an action byte, skip skip_to_action()
-        unsigned char nc = static_cast<unsigned char>(*p_);
-        if (BEAST_LIKELY(nc > 0x20)) {
-          c = static_cast<char>(nc); // direct dispatch, zero function call
-        } else {
-          c = skip_to_action(); // whitespace present, do SWAR skip
+            // ── Phase 25 + B1: Double-pump Number Parsing with fused key
+            // scanner ─ Numbers are values. They are ALWAYS followed by ',' or
+            // ']' or '}'. Instead of falling back to the top of the switch
+            // loop, we peek at the next char. If it's ',' in an object, fuse
+            // the next key scan.
+            if (BEAST_LIKELY(p_ < end_)) {
+              unsigned char nc = static_cast<unsigned char>(*p_);
+              if (nc <= 0x20) {
+                c = skip_to_action();
+                if (BEAST_UNLIKELY(p_ >= end_))
+                  goto done;
+                nc = static_cast<unsigned char>(c);
+              }
+              if (BEAST_LIKELY(nc == ',')) {
+                ++p_;
+                // Phase B1: fused key scan after ',' in object context
+                if (BEAST_LIKELY(depth_ > 0 && depth_ <= 64 &&
+                                 (obj_bits_ >> (depth_ - 1)) & 1)) {
+                  if (BEAST_LIKELY(p_ < end_)) {
+                    unsigned char fc = static_cast<unsigned char>(*p_);
+                    if (fc <= 0x20) {
+                      fc = static_cast<unsigned char>(skip_to_action());
+                      if (BEAST_UNLIKELY(p_ >= end_))
+                        goto done;
+                    }
+                    if (BEAST_LIKELY(fc == '"')) {
+                      char vc = scan_key_colon_next(p_ + 1, nullptr);
+                      if (BEAST_UNLIKELY(vc == 0))
+                        goto fail;
+                      if (BEAST_UNLIKELY(p_ >= end_))
+                        goto done;
+                      c = vc;
+                      continue; // directly to value
+                    }
+                    c = static_cast<char>(fc);
+                    continue;
+                  }
+                  goto done;
+                }
+                c = skip_to_action();
+                if (BEAST_UNLIKELY(p_ >= end_))
+                  goto done;
+                continue; // bypass loop bottom separator logic, go straight to
+                          // next token
+              }
+              if (BEAST_LIKELY(nc == ']' || nc == '}')) {
+                if (BEAST_UNLIKELY(depth_ == 0))
+                  goto fail;
+                --depth_;
+                if (BEAST_LIKELY(depth_ < kPresepDepth))
+                  depth_mask_ >>= 1;
+                push_end(nc == '}' ? TapeNodeType::ObjectEnd
+                                   : TapeNodeType::ArrayEnd,
+                         static_cast<uint32_t>(p_ - data_));
+                ++p_;
+                c = skip_to_action();
+                if (BEAST_UNLIKELY(p_ >= end_))
+                  goto done;
+                continue; // End handled inline!
+              }
+            }
+            break;
+          }
+          default:
+            goto fail;
+          } // switch
+
+          // ── Phase 19b: Inline separator + peek-next optimization ─────────
+          // After each token, consume ':' or ',' inline (no switch iteration).
+          // After the separator, try a direct *p_ peek before calling
+          // skip_to_action. For JSON like "key":value or value,"next", the char
+          // after sep is > 0x20.
+          c = skip_to_action();
           if (BEAST_UNLIKELY(p_ >= end_))
             break;
-        }
+          if (BEAST_LIKELY(c == ':' || c == ',')) {
+            ++p_; // consume separator
+            if (BEAST_UNLIKELY(p_ >= end_))
+              break;
+            // Peek: if next char is already an action byte, skip
+            // skip_to_action()
+            unsigned char nc = static_cast<unsigned char>(*p_);
+            if (BEAST_LIKELY(nc > 0x20)) {
+              c = static_cast<char>(nc); // direct dispatch, zero function call
+            } else {
+              c = skip_to_action(); // whitespace present, do SWAR skip
+              if (BEAST_UNLIKELY(p_ >= end_))
+                break;
+            }
+          }
+
+        } // while
+
+      done:
+        doc_->tape.head = tape_head_; // sync local head back to arena
+        return depth_ == 0;
+
+      fail:
+        doc_->tape.head = tape_head_;
+        return false;
       }
-
-    } // while
-
-  done:
-    doc_->tape.head = tape_head_; // sync local head back to arena
-    return depth_ == 0;
-
-  fail:
-    doc_->tape.head = tape_head_;
-    return false;
-  }
 
 #if BEAST_HAS_AVX512 || BEAST_HAS_NEON
-  // ── Phase 50: Stage 2 — index-based parse loop ───────────────────────
-  //
-  // Key differences from parse():
-  //   • No skip_to_action() calls — structural positions pre-computed by Stage
-  //   1 • String length = O(1) lookup: close_offset - open_offset - 1 • No
-  //   double-pump logic needed — sequential index traversal suffices • Same
-  //   push() / push_end() / depth bit-stack as parse() for correctness
-  //
-  // Stage 1 guarantees:
-  //   • Every '"' in the index is a real (unescaped) quote
-  //   • After each opening '"', the VERY NEXT index entry is the closing '"'
-  //   • structural chars inside strings are excluded from the index
-  //   • value starts (digit/'-'/'t'/'f'/'n') are marked via vstart
-  [[gnu::hot]] bool parse_staged(const Stage1Index &s1) noexcept {
-    const uint32_t *pos = s1.positions;
-    const uint32_t n = s1.count;
+      // ── Phase 50: Stage 2 — index-based parse loop ───────────────────────
+      //
+      // Key differences from parse():
+      //   • No skip_to_action() calls — structural positions pre-computed by
+      //   Stage 1 • String length = O(1) lookup: close_offset - open_offset - 1
+      //   • No double-pump logic needed — sequential index traversal suffices •
+      //   Same push() / push_end() / depth bit-stack as parse() for correctness
+      //
+      // Stage 1 guarantees:
+      //   • Every '"' in the index is a real (unescaped) quote
+      //   • After each opening '"', the VERY NEXT index entry is the closing
+      //   '"' • structural chars inside strings are excluded from the index •
+      //   value starts (digit/'-'/'t'/'f'/'n') are marked via vstart
+      [[gnu::hot]] bool parse_staged(const Stage1Index &s1) noexcept {
+        const uint32_t *pos = s1.positions;
+        const uint32_t n = s1.count;
 
-    if (BEAST_UNLIKELY(n == 0)) {
-      doc_->tape.head = tape_head_;
-      return false; // empty / all-whitespace JSON is invalid
-    }
-
-    // last_off tracks the byte offset just past the end of the last consumed
-    // atom.  After the for-loop we scan [last_off, end_) for stray non-
-    // whitespace, which catches things like "nulls" or "true garbage".
-    uint32_t last_off = 0;
-
-    for (uint32_t i = 0; i < n;) {
-      const uint32_t off = pos[i++];
-      const char c = data_[off];
-
-      switch (static_cast<ActionId>(kActionLut[static_cast<uint8_t>(c)])) {
-
-      case kActObjOpen: {
-        push(TapeNodeType::ObjectStart, 0, off);
-        if (BEAST_LIKELY(depth_ < kPresepDepth)) {
-          const uint64_t nm = depth_mask_ ? depth_mask_ << 1 : uint64_t(1);
-          obj_bits_ |= nm;
-          kv_key_bits_ |= nm;
-          has_elem_bits_ &= ~nm;
-          depth_mask_ = nm;
-        } else {
-          depth_mask_ = 0;
-          presep_overflow_[depth_ + 1 - kPresepDepth] = 0b011u;
+        if (BEAST_UNLIKELY(n == 0)) {
+          doc_->tape.head = tape_head_;
+          return false; // empty / all-whitespace JSON is invalid
         }
-        ++depth_;
-        last_off = off + 1;
-        break;
-      }
 
-      case kActArrOpen: {
-        push(TapeNodeType::ArrayStart, 0, off);
-        if (BEAST_LIKELY(depth_ < kPresepDepth)) {
-          const uint64_t nm = depth_mask_ ? depth_mask_ << 1 : uint64_t(1);
-          obj_bits_ &= ~nm;
-          has_elem_bits_ &= ~nm;
-          depth_mask_ = nm;
-        } else {
-          depth_mask_ = 0;
-          presep_overflow_[depth_ + 1 - kPresepDepth] = 0b000u;
-        }
-        ++depth_;
-        last_off = off + 1;
-        break;
-      }
+        // last_off tracks the byte offset just past the end of the last
+        // consumed atom.  After the for-loop we scan [last_off, end_) for stray
+        // non- whitespace, which catches things like "nulls" or "true garbage".
+        uint32_t last_off = 0;
 
-      case kActClose: {
-        if (BEAST_UNLIKELY(depth_ == 0))
-          goto s2_fail;
-        --depth_;
-        if (BEAST_LIKELY(depth_mask_ != 0))
-          depth_mask_ >>= 1;
-        else if (depth_ > 0 && depth_ <= kPresepDepth)
-          depth_mask_ = uint64_t(1) << (depth_ - 1);
-        push_end(c == '}' ? TapeNodeType::ObjectEnd : TapeNodeType::ArrayEnd,
-                 off);
-        last_off = off + 1;
-        break;
-      }
+        for (uint32_t i = 0; i < n;) {
+          const uint32_t off = pos[i++];
+          const char c = data_[off];
 
-      case kActString: {
-        // Stage 1 guarantees: pos[i] is the closing '"' of this string.
-        if (BEAST_UNLIKELY(i >= n))
-          goto s2_fail;
-        const uint32_t close_off = pos[i++]; // consume closing '"'
-        push(TapeNodeType::StringRaw,
-             static_cast<uint16_t>(close_off - off - 1),
-             off + 1); // offset = first char inside string
-        last_off = close_off + 1;
-        break;
-      }
+          switch (static_cast<ActionId>(kActionLut[static_cast<uint8_t>(c)])) {
 
-        // Phase 53: kActColon / kActComma are no longer emitted by
-        // stage1_scan_avx512. push() bit-stacks handle key↔value alternation
-        // internally.
-
-      case kActNumber: {
-        // Scan integer/float from data_[off]; push raw token.
-        const char *s = data_ + off;
-        const char *pn = s;
-        if (*pn == '-')
-          ++pn;
-        // SWAR-8 integer digit scan
-        while (pn + 8 <= end_) {
-          uint64_t v;
-          std::memcpy(&v, pn, 8);
-          uint64_t shifted = v - 0x3030303030303030ULL;
-          uint64_t nondigit = (shifted | ((shifted & 0x7F7F7F7F7F7F7F7FULL) +
-                                          0x7676767676767676ULL)) &
-                              0x8080808080808080ULL;
-          if (nondigit) {
-            pn += BEAST_CTZ(nondigit) >> 3;
-            goto s2_num_done;
-          }
-          pn += 8;
-        }
-        while (pn < end_ && static_cast<unsigned>(*pn - '0') < 10u)
-          ++pn;
-      s2_num_done:;
-        bool flt = false;
-        if (BEAST_UNLIKELY(pn < end_ &&
-                           (*pn == '.' || *pn == 'e' || *pn == 'E'))) {
-          flt = true;
-          ++pn;
-          if (pn < end_ && (*pn == '+' || *pn == '-'))
-            ++pn;
-          // SWAR-8 fractional digit scan
-          while (pn + 8 <= end_) {
-            uint64_t _v;
-            std::memcpy(&_v, pn, 8);
-            uint64_t _s = _v - 0x3030303030303030ULL;
-            uint64_t _nd =
-                (_s | ((_s & 0x7F7F7F7F7F7F7F7FULL) + 0x7676767676767676ULL)) &
-                0x8080808080808080ULL;
-            if (_nd) {
-              pn += BEAST_CTZ(_nd) >> 3;
-              break;
+          case kActObjOpen: {
+            push(TapeNodeType::ObjectStart, 0, off);
+            if (BEAST_LIKELY(depth_ < kPresepDepth)) {
+              const uint64_t nm = depth_mask_ ? depth_mask_ << 1 : uint64_t(1);
+              obj_bits_ |= nm;
+              kv_key_bits_ |= nm;
+              has_elem_bits_ &= ~nm;
+              depth_mask_ = nm;
+            } else {
+              depth_mask_ = 0;
+              presep_overflow_[depth_ + 1 - kPresepDepth] = 0b011u;
             }
-            pn += 8;
+            ++depth_;
+            last_off = off + 1;
+            break;
           }
-          while (pn < end_ && static_cast<unsigned>(*pn - '0') < 10u)
-            ++pn;
-          if (pn < end_ && (*pn == 'e' || *pn == 'E')) {
-            ++pn;
-            if (pn < end_ && (*pn == '+' || *pn == '-'))
+
+          case kActArrOpen: {
+            push(TapeNodeType::ArrayStart, 0, off);
+            if (BEAST_LIKELY(depth_ < kPresepDepth)) {
+              const uint64_t nm = depth_mask_ ? depth_mask_ << 1 : uint64_t(1);
+              obj_bits_ &= ~nm;
+              has_elem_bits_ &= ~nm;
+              depth_mask_ = nm;
+            } else {
+              depth_mask_ = 0;
+              presep_overflow_[depth_ + 1 - kPresepDepth] = 0b000u;
+            }
+            ++depth_;
+            last_off = off + 1;
+            break;
+          }
+
+          case kActClose: {
+            if (BEAST_UNLIKELY(depth_ == 0))
+              goto s2_fail;
+            --depth_;
+            if (BEAST_LIKELY(depth_mask_ != 0))
+              depth_mask_ >>= 1;
+            else if (depth_ > 0 && depth_ <= kPresepDepth)
+              depth_mask_ = uint64_t(1) << (depth_ - 1);
+            push_end(c == '}' ? TapeNodeType::ObjectEnd
+                              : TapeNodeType::ArrayEnd,
+                     off);
+            last_off = off + 1;
+            break;
+          }
+
+          case kActString: {
+            // Stage 1 guarantees: pos[i] is the closing '"' of this string.
+            if (BEAST_UNLIKELY(i >= n))
+              goto s2_fail;
+            const uint32_t close_off = pos[i++]; // consume closing '"'
+            push(TapeNodeType::StringRaw,
+                 static_cast<uint16_t>(close_off - off - 1),
+                 off + 1); // offset = first char inside string
+            last_off = close_off + 1;
+            break;
+          }
+
+            // Phase 53: kActColon / kActComma are no longer emitted by
+            // stage1_scan_avx512. push() bit-stacks handle key↔value
+            // alternation internally.
+
+          case kActNumber: {
+            // Scan integer/float from data_[off]; push raw token.
+            const char *s = data_ + off;
+            const char *pn = s;
+            if (*pn == '-')
               ++pn;
+            // SWAR-8 integer digit scan
             while (pn + 8 <= end_) {
-              uint64_t _v;
-              std::memcpy(&_v, pn, 8);
-              uint64_t _s = _v - 0x3030303030303030ULL;
-              uint64_t _nd = (_s | ((_s & 0x7F7F7F7F7F7F7F7FULL) +
-                                    0x7676767676767676ULL)) &
-                             0x8080808080808080ULL;
-              if (_nd) {
-                pn += BEAST_CTZ(_nd) >> 3;
-                break;
+              uint64_t v;
+              std::memcpy(&v, pn, 8);
+              uint64_t shifted = v - 0x3030303030303030ULL;
+              uint64_t nondigit =
+                  (shifted | ((shifted & 0x7F7F7F7F7F7F7F7FULL) +
+                              0x7676767676767676ULL)) &
+                  0x8080808080808080ULL;
+              if (nondigit) {
+                pn += BEAST_CTZ(nondigit) >> 3;
+                goto s2_num_done;
               }
               pn += 8;
             }
             while (pn < end_ && static_cast<unsigned>(*pn - '0') < 10u)
               ++pn;
+          s2_num_done:;
+            bool flt = false;
+            if (BEAST_UNLIKELY(pn < end_ &&
+                               (*pn == '.' || *pn == 'e' || *pn == 'E'))) {
+              flt = true;
+              ++pn;
+              if (pn < end_ && (*pn == '+' || *pn == '-'))
+                ++pn;
+              // SWAR-8 fractional digit scan
+              while (pn + 8 <= end_) {
+                uint64_t _v;
+                std::memcpy(&_v, pn, 8);
+                uint64_t _s = _v - 0x3030303030303030ULL;
+                uint64_t _nd = (_s | ((_s & 0x7F7F7F7F7F7F7F7FULL) +
+                                      0x7676767676767676ULL)) &
+                               0x8080808080808080ULL;
+                if (_nd) {
+                  pn += BEAST_CTZ(_nd) >> 3;
+                  break;
+                }
+                pn += 8;
+              }
+              while (pn < end_ && static_cast<unsigned>(*pn - '0') < 10u)
+                ++pn;
+              if (pn < end_ && (*pn == 'e' || *pn == 'E')) {
+                ++pn;
+                if (pn < end_ && (*pn == '+' || *pn == '-'))
+                  ++pn;
+                while (pn + 8 <= end_) {
+                  uint64_t _v;
+                  std::memcpy(&_v, pn, 8);
+                  uint64_t _s = _v - 0x3030303030303030ULL;
+                  uint64_t _nd = (_s | ((_s & 0x7F7F7F7F7F7F7F7FULL) +
+                                        0x7676767676767676ULL)) &
+                                 0x8080808080808080ULL;
+                  if (_nd) {
+                    pn += BEAST_CTZ(_nd) >> 3;
+                    break;
+                  }
+                  pn += 8;
+                }
+                while (pn < end_ && static_cast<unsigned>(*pn - '0') < 10u)
+                  ++pn;
+              }
+            }
+            push(flt ? TapeNodeType::NumberRaw : TapeNodeType::Integer,
+                 static_cast<uint16_t>(pn - s), off);
+            last_off = static_cast<uint32_t>(pn - data_);
+            break;
+          }
+
+          case kActTrue:
+            if (BEAST_UNLIKELY(off + 4 > static_cast<uint32_t>(end_ - data_) ||
+                               std::memcmp(data_ + off, "true", 4)))
+              goto s2_fail;
+            push(TapeNodeType::BooleanTrue, 4, off);
+            last_off = off + 4;
+            break;
+
+          case kActFalse:
+            if (BEAST_UNLIKELY(off + 5 > static_cast<uint32_t>(end_ - data_) ||
+                               std::memcmp(data_ + off, "false", 5)))
+              goto s2_fail;
+            push(TapeNodeType::BooleanFalse, 5, off);
+            last_off = off + 5;
+            break;
+
+          case kActNull:
+            if (BEAST_UNLIKELY(off + 4 > static_cast<uint32_t>(end_ - data_) ||
+                               std::memcmp(data_ + off, "null", 4)))
+              goto s2_fail;
+            push(TapeNodeType::Null, 4, off);
+            last_off = off + 4;
+            break;
+
+          default:
+            goto s2_fail;
+          } // switch
+        } // for
+
+        // Trailing non-whitespace check: catch inputs like "nulls" where Stage
+        // 1 only marks the value start ('n') but not the trailing junk ('s').
+        {
+          const char *tail = data_ + last_off;
+          while (tail < end_) {
+            if (static_cast<unsigned char>(*tail) > 0x20)
+              goto s2_fail;
+            ++tail;
           }
         }
-        push(flt ? TapeNodeType::NumberRaw : TapeNodeType::Integer,
-             static_cast<uint16_t>(pn - s), off);
-        last_off = static_cast<uint32_t>(pn - data_);
-        break;
+
+        doc_->tape.head = tape_head_;
+        return depth_ == 0;
+
+      s2_fail:
+        doc_->tape.head = tape_head_;
+        return false;
       }
-
-      case kActTrue:
-        if (BEAST_UNLIKELY(off + 4 > static_cast<uint32_t>(end_ - data_) ||
-                           std::memcmp(data_ + off, "true", 4)))
-          goto s2_fail;
-        push(TapeNodeType::BooleanTrue, 4, off);
-        last_off = off + 4;
-        break;
-
-      case kActFalse:
-        if (BEAST_UNLIKELY(off + 5 > static_cast<uint32_t>(end_ - data_) ||
-                           std::memcmp(data_ + off, "false", 5)))
-          goto s2_fail;
-        push(TapeNodeType::BooleanFalse, 5, off);
-        last_off = off + 5;
-        break;
-
-      case kActNull:
-        if (BEAST_UNLIKELY(off + 4 > static_cast<uint32_t>(end_ - data_) ||
-                           std::memcmp(data_ + off, "null", 4)))
-          goto s2_fail;
-        push(TapeNodeType::Null, 4, off);
-        last_off = off + 4;
-        break;
-
-      default:
-        goto s2_fail;
-      } // switch
-    } // for
-
-    // Trailing non-whitespace check: catch inputs like "nulls" where Stage 1
-    // only marks the value start ('n') but not the trailing junk ('s').
-    {
-      const char *tail = data_ + last_off;
-      while (tail < end_) {
-        if (static_cast<unsigned char>(*tail) > 0x20)
-          goto s2_fail;
-        ++tail;
-      }
-    }
-
-    doc_->tape.head = tape_head_;
-    return depth_ == 0;
-
-  s2_fail:
-    doc_->tape.head = tape_head_;
-    return false;
-  }
 #endif // BEAST_HAS_AVX512
-};
+    };
 
-// ─────────────────────────────────────────────────────────────
-// Public API
-// ─────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────
+    // Public API
+    // ─────────────────────────────────────────────────────────────
 
-inline Value parse_reuse(DocumentView &doc, std::string_view json) {
-  doc.source = json;
-  // Worst-case tape nodes == json.size() (e.g. "[[[...]]]" produces one node
-  // per character). Use json.size() + 64 as a guaranteed upper bound.
-  const size_t needed = json.size() + 64;
-  if (BEAST_UNLIKELY(!doc.tape.base ||
-                     static_cast<size_t>(doc.tape.cap - doc.tape.base) <
-                         needed)) {
-    doc.tape.reserve(needed);
-  } else {
-    doc.tape.reset(); // hot path: head = base (1 instruction)
-  }
+    inline Value parse_reuse(DocumentView & doc, std::string_view json) {
+      doc.source = json;
+      // Worst-case tape nodes == json.size() (e.g. "[[[...]]]" produces one
+      // node per character). Use json.size() + 64 as a guaranteed upper bound.
+      const size_t needed = json.size() + 64;
+      if (BEAST_UNLIKELY(!doc.tape.base ||
+                         static_cast<size_t>(doc.tape.cap - doc.tape.base) <
+                             needed)) {
+        doc.tape.reserve(needed);
+      } else {
+        doc.tape.reset(); // hot path: head = base (1 instruction)
+      }
 #if BEAST_HAS_AVX512
-  // Phase 50: Stage 1+2 is beneficial when the positions array fits in
-  // L2/L3 cache and the JSON is string-heavy (e.g. twitter.json, citm.json).
-  // Large number-heavy files (canada.json, gsoc-2018.json) have too many
-  // positions (~1M+) causing L3 pressure: Stage 1 overhead exceeds savings.
-  // Threshold: 2 MB — includes twitter(617KB) and citm(1.65MB); excludes
-  // canada(2.15MB) and gsoc(3.3MB).
-  static constexpr size_t kStage12MaxSize = 2 * 1024 * 1024; // 2 MB
-  if (BEAST_LIKELY(json.size() <= kStage12MaxSize)) {
-    stage1_scan_avx512(json.data(), json.size(), doc.idx);
-    if (!Parser(&doc).parse_staged(doc.idx)) {
-      throw std::runtime_error("Invalid JSON");
-    }
-  } else {
-    if (!Parser(&doc).parse()) {
-      throw std::runtime_error("Invalid JSON");
-    }
-  }
+      // Phase 50: Stage 1+2 is beneficial when the positions array fits in
+      // L2/L3 cache and the JSON is string-heavy (e.g. twitter.json,
+      // citm.json). Large number-heavy files (canada.json, gsoc-2018.json) have
+      // too many positions (~1M+) causing L3 pressure: Stage 1 overhead exceeds
+      // savings. Threshold: 2 MB — includes twitter(617KB) and citm(1.65MB);
+      // excludes canada(2.15MB) and gsoc(3.3MB).
+      static constexpr size_t kStage12MaxSize = 2 * 1024 * 1024; // 2 MB
+      if (BEAST_LIKELY(json.size() <= kStage12MaxSize)) {
+        stage1_scan_avx512(json.data(), json.size(), doc.idx);
+        if (!Parser(&doc).parse_staged(doc.idx)) {
+          throw std::runtime_error("Invalid JSON");
+        }
+      } else {
+        if (!Parser(&doc).parse()) {
+          throw std::runtime_error("Invalid JSON");
+        }
+      }
 #else
   if (!Parser(&doc).parse()) {
     throw std::runtime_error("Invalid JSON");
   }
 #endif
-  return Value(&doc, 0);
-}
+      return Value(&doc, 0);
+    }
 
-} // namespace lazy
+  } // namespace lazy
 } // namespace json
 } // namespace beast
 

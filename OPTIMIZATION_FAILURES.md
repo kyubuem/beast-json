@@ -189,16 +189,18 @@
 
 ---
 
-## Phase 56-5: NEON `scan_key_colon_next` (오브젝트 키 스캐너) ❌
-* **시도 내용**:
-  * 기존 AArch64 빌드에서 `scan_key_colon_next` 함수가 NEON 최적화 없이 느린 GPR `SWAR-24`로 Fallback되고 있는 것을 발견하고, 이를 보완하기 위해 32B NEON 스캐너를 추가했습니다.
-* **벤치마크 (macOS AArch64 M1 Pro)**:
-  * `twitter.json`: 253μs → 266μs (**+5.1%** 회귀)
-  * `citm_catalog.json`: 643μs → 625μs (**-2.8%** 개선)
-* **근본 원인 분析**:
-  * `twitter.json`은 2~6바이트 길이의 극단적으로 짧은 키들("id", "user", "text" 등)이 지배적입니다. 
-  * Apple Silicon 환경에서는 **매우 짧은 데이터**의 경우 단 한 번의 8바이트 메모리 로드(`memcpy`) 후 하드웨어 비트 스캔(`tzcnt`, `rbit/clz`) 로 탈출하는 GPR SWAR 패스가, 무거운 NEON 16B 레지스터 셋업 후 루프를 도는 처리량보다 **압도적으로 빠릅니다**.
-  * 반면 키 길이가 대체로 긴 `citm_catalog.json`에서는 NEON 패스가 미세한 성능 개선을 보였습니다. 
-* **최종 결론 및 가이드라인 (Phase 56 전체 실패 교훈)**:
-  * **AVX-512 vs NEON의 패러다임 차이**: x86_64 환경에서는 SIMD(AVX-512)가 스칼라 연산을 압도하지만, Apple Silicon(AArch64)에서는 **분기 예측이 가미된 짧고 단순한 스칼라 GPR 스캔이 짧은 문자열/공백 처리에서 NEON SIMD를 무조건 이깁니다**. 
-  * 앞으로 Apple Silicon 성능을 올리기 위해서는 "모든 것을 NEON으로 바꾼다"는 접근을 버리고, 오히려 **분기 예측 기반 GPR SWAR 스크리닝을 극대화**하는 방향으로 선회해야 합니다.
+## Phase 56-5: NEON `scan_key_colon_next` (오브젝트 키 스캐너) ❌ → 🟢 Phase 57에서 "전면 NEON 우세"로 판명됨 (Hypothesis Reversal)
+* **초기 시도 내용 (Phase 56)**:
+  * AArch64 빌드에서 느린 GPR `SWAR-24`를 대체하기 위해 32B NEON 스캐너를 추가했습니다.
+  * 결과: `twitter.json` 253μs → 266μs (**+5.1%** 회귀) 발생. 
+  * 초기 결론: "매우 짧은 데이터에 대해서는 Apple Silicon의 분기 예측기와 GPR SWAR 패스가 무거운 NEON 파이프라인보다 압도적으로 빠르다"고 오판하여 코드를 Revert 했습니다.
+
+* **최종 원인 분석 및 발견 (Phase 57 Hypothesis Reversal)**:
+  * Phase 57에서 "범용 AArch64(Graviton 등)는 여전히 NEON이 빠를 것이다"라는 가설을 세우고, Apple Silicon용 분기 코드(`__APPLE__`)를 우회하여 강제로 범용 NEON 경로를 태워 벤치마크했습니다.
+  * **놀랍게도 `twitter.json` 처리 속도가 266μs나 기존의 253μs가 아닌, 246μs(역대 최고 속도)로 급격히 단축되었습니다.**
+  * 추적 결과, Phase 56의 회귀 원인은 NEON 스캐너 탓이 **아니었습니다**. x86_64 AVX-512 최적화에서 차용해왔던 **`skip_to_action` 내부의 "SWAR-8 Pre-gate"** 분기문이 Apple Silicon의 파이프라인을 붕괴시키고 있었던 것입니다.
+  * SWAR 스칼라 작업(`EOR` -> `SUB` -> `BIC` -> `AND`) 자체는 레이턴시가 길며 명령어 레벨 병렬성(ILP)이 낮습니다. 반면 NEON의 `vld1q_u8` -> `vcgtq_u8` -> `vmaxvq_u32` 패턴은 AArch64에서 최단 사이클로 완벽하게 병렬 실행됩니다.
+
+* **최종 결론 및 가이드라인 (AArch64 최적화 패러다임)**:
+  * **Global NEON Priority**: AArch64 환경(Apple M-Series, AWS Graviton, 단일 Cortex 등 모든 ARM 코어)에서는 SWAR-8/SWAR-24 같은 스칼라 혼합(Pre-gate) 최적화를 **절대 금지**합니다. 
+  * "분기 예측을 돕기 위해 스칼라로 8바이트를 먼저 체크한다"는 x86의 논리는 AArch64에서 완전히 실패합니다. 벡터 레지스터 셋업 오버헤드보다, 일관된 벡터명령 파이프라인을 쭉 밀고 나가는 것(`Pure NEON`)이 무조건 가장 빠릅니다.
