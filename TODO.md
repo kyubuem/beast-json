@@ -10,6 +10,7 @@
 ## 압도 플랜 Phase 44-55
 
 📄 **Full Plan**: [OPTIMIZATION_PLAN.md](./OPTIMIZATION_PLAN.md)
+🚨 **Architecture Optimization Failures**: [OPTIMIZATION_FAILURES.md](./OPTIMIZATION_FAILURES.md) *(에이전트 필독: 각 아키텍처별로 실패한 SIMD 최적화 사례 모음)*
 
 ---
 
@@ -279,8 +280,9 @@ Beast 테이프 구조에 통합.
 
 - **모든 변경은 `ctest 81/81 PASS` 후 커밋** — 예외 없음
 - **SIMD 상수는 사용 지점에 인접 선언** — YMM/ZMM 호이스팅 금지 (Phase 40 교훈)
-- **회귀 즉시 revert** — 망설임 없이 되돌리고 원인 분석 선행
+- **회귀 즉시 revert** — 망설임 없이 되돌리고 원인 분석 선행 ([실패 기록 문서 참조](./OPTIMIZATION_FAILURES.md))
 - **Phase 46 공백 스킵**: citm -10% 미달 시 Phase 37처럼 즉시 revert
 - **Phase 50 통합 순서**: Stage 2 구조 설계 → Stage 1 인덱서 → 통합 (역순 금지)
 - **AVX-512 머신 빌드**: `-mavx2 -march=native` 필수 (`BEAST_HAS_AVX2` 활성화)
+- **aarch64 (NEON) 에이전트 수칙**: x86_64의 AVX-512(64B 단위) 최적화를 NEON(16B 단위)에서 루프 언롤링하여 모방하려고 시도하지 마세요. (Phase 49 NEON 64B 스캐너 실패 사례 참조. `vld1q_u8` 다중 로드 및 `vmaxvq_u32` 병목으로 인해 30~60% 구조적 성능 하락이 입증됨.)
 - **매 Phase는 별도 브랜치로 진행** → PR 후 merge
