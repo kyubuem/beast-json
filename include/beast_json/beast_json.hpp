@@ -5318,7 +5318,45 @@ class Parser {
     if (BEAST_LIKELY(c > 0x20))
       return static_cast<char>(c);
 
-#if BEAST_HAS_NEON
+#if BEAST_HAS_AVX512
+    // ── Phase 46: AVX-512 64B batch whitespace skip ──────────────────────────
+    // _mm512_cmpgt_epi8_mask vs 0x20 is 1 op (vs AVX2's 8 ops for 32B).
+    // 64B/iter vs SWAR-32's 32B/iter → ~2× throughput for whitespace-heavy JSON.
+    //
+    // SWAR-8 pre-gate: twitter.json has 2-8 WS bytes between tokens; absorb
+    // them here before paying any 512-bit register setup cost (Phase 37 lesson).
+    {
+      uint64_t am = swar_action_mask(load64(p_));
+      if (BEAST_LIKELY(am != 0)) {
+        p_ += BEAST_CTZ(am) >> 3;
+        return *p_;
+      }
+      p_ += 8;
+    }
+    // Still in whitespace → bulk path: AVX-512 64B/iter for long WS runs.
+    if (BEAST_LIKELY(p_ + 64 <= end_)) {
+      const __m512i ws_thresh = _mm512_set1_epi8(0x20);
+      do {
+        __m512i v = _mm512_loadu_si512(reinterpret_cast<const __m512i *>(p_));
+        uint64_t non_ws =
+            static_cast<uint64_t>(_mm512_cmpgt_epi8_mask(v, ws_thresh));
+        if (BEAST_LIKELY(non_ws)) {
+          p_ += __builtin_ctzll(non_ws);
+          return *p_;
+        }
+        p_ += 64;
+      } while (BEAST_LIKELY(p_ + 64 <= end_));
+    }
+    // <64B tail: SWAR-8 scalar walk
+    while (BEAST_LIKELY(p_ + 8 <= end_)) {
+      uint64_t am = swar_action_mask(load64(p_));
+      if (BEAST_LIKELY(am != 0)) {
+        p_ += BEAST_CTZ(am) >> 3;
+        return *p_;
+      }
+      p_ += 8;
+    }
+#elif BEAST_HAS_NEON
     while (BEAST_LIKELY(p_ + 16 <= end_)) {
       uint8x16_t v = vld1q_u8(reinterpret_cast<const uint8_t *>(p_));
       uint8x16_t mask = vcgtq_u8(v, vdupq_n_u8(0x20));
