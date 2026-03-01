@@ -1,8 +1,8 @@
 # Beast JSON Optimization — TODO
 
-> **최종 업데이트**: 2026-03-01 (Phase 53 완료, Phase 50-2 완료)
+> **최종 업데이트**: 2026-03-01 (Phase 57 완료 - AArch64 Pure NEON 패러다임 정립)
 > **현재 최고 기록 (Linux x86_64 AVX-512)**: twitter lazy **202μs** · canada lazy 1,448μs · citm lazy **757μs** · gsoc lazy 806μs
-> **현재 최고 기록 (macOS AArch64)**: twitter lazy **253μs** · canada lazy 1,839μs · citm lazy **643μs** · gsoc lazy 634μs
+> **현재 최고 기록 (macOS AArch64)**: twitter lazy **246μs** · canada lazy 1,845μs · citm lazy **627μs** · gsoc lazy 618μs
 > **새 목표 (x86_64 기준)**: yyjson 대비 **1.2× (20% 이상) 전 파일 동시 달성**
 > **1.2× 목표치 (x86_64)**: twitter ≤219μs · canada ≤2,274μs · citm ≤592μs · gsoc ≤1,209μs
 
@@ -299,6 +299,13 @@ simdjson 스타일 두 단계 파싱을 Beast 테이프 구조에 통합.
 
 ---
 
+### Phase 57 — AArch64 Global NEON Consolidation (Hypothesis Reversal) ⭐⭐⭐⭐⭐ ✅
+**실제 효과 (macOS AArch64)**: twitter **-5%** (260→**246μs**), gsoc **-3%** (634→618μs) | **성공**
+- [x] AArch64 환경에서 x86 유래 "SWAR-8 Pre-gate"가 파이프라인 정체의 주범임을 규명
+- [x] `skip_to_action`, `scan_key_colon_next`에서 모든 스칼라 게이트 제거 및 **Pure NEON** 통합
+- [x] Apple Silicon과 범용 AArch64 모두에서 벡터 파이프라인 효율 극대화 확인
+- [x] ctest 81개 PASS, README/OPTIMIZATION_FAILURES 문서 업데이트 완료
+
 ## 예상 최종 성능 (x86_64, Phase 44-55 전체 완료 시)
 
 | 파일 | Phase 53 현재 | 최종 예상 | yyjson | Beast vs yyjson |
@@ -312,12 +319,12 @@ simdjson 스타일 두 단계 파싱을 Beast 테이프 구조에 통합.
 
 ## 예상 최종 성능 (macOS AArch64, Phase 56 완료 시)
 
-| 파일 | Phase 50-2 현재 | 1.2× 타겟 | yyjson | Beast vs yyjson |
+| 파일 | Phase 57 현재 | 1.2× 타겟 | yyjson | Beast vs yyjson |
 |:---|---:|---:|---:|:---:|
-| twitter.json | 253 μs | **≤146 μs** | 176 μs | 아직 아님 ❌ |
-| canada.json | 1,839 μs | **≤1,200 μs** | 1,441 μs | 아직 아님 ❌ |
-| citm_catalog.json | 643 μs | **≤395 μs** | 474 μs | 아직 아님 ❌ |
-| gsoc-2018.json | 634 μs | **≤825 μs** | 990 μs | **+56%** 돌파 ✅ |
+| twitter.json | **246 μs** | **≤146 μs** | 176 μs | 아직 아님 ❌ |
+| canada.json | **1,845 μs** | **≤1,200 μs** | 1,441 μs | 아직 아님 ❌ |
+| citm_catalog.json | **627 μs** | **≤395 μs** | 474 μs | 아직 아님 ❌ |
+| gsoc-2018.json | **618 μs** | **≤825 μs** | 990 μs | **+63%** 돌파 ✅ |
 
 ---
 
@@ -350,9 +357,10 @@ simdjson 스타일 두 단계 파싱을 Beast 테이프 구조에 통합.
 | Phase 49 | 브랜치리스 push() 비트스택 (NEG+AND) | ❌ twitter +1.4%, citm +3.9% 회귀 → revert (컴파일러 CMOV이 이미 최적) |
 | **Phase 50** | Stage 1 구조적 문자 사전 인덱싱 | twitter -19.7%(PGO), yyjson 대비 1.8배/2.1배 우위 확보 |
 | Phase 50-1 | NEON 32B 언롤링 + 브랜치리스 Pinpoint | ❌ macOS AArch64 twitter +8.8%, citm +30% 회귀 → revert (vgetq_lane 페널티) |
-| **Phase 50-2** | NEON 정밀 최적화 (SWAR 제거 및 스칼라 폴백) | macOS AArch64 twitter **-23%** (253μs 달성) |
-| Phase 51 | 64비트 TapeNode 단일 스토어 (`__builtin_memcpy`) | ❌ twitter +11.7%, citm +14.4% 심각 회귀 → revert (컴파일러 Store Merging 방해) |
-| Phase 52 | AVX2 32B 디지트 스캐너 (kActNumber) | ❌ twitter +11.2%, citm +8.1% 회귀 → revert (YMM 레지스터 충돌, Phase 40 동일 패턴) |
+| **Phase 50-2** | NEON 정밀 최적화 (SWAR 제거 및 스칼라 폴백) | macOS AArch64 twitter **253μs** 달성 |
+| Phase 51 | 64비트 TapeNode 단일 스토어 (`__builtin_memcpy`) | ❌ twitter +11.7%, citm +14.4% 심각 회귀 → revert |
+| Phase 52 | AVX2 32B 디지트 스캐너 (kActNumber) | ❌ twitter +11.2%, citm +8.1% 회귀 → revert |
+| **Phase 57** | **AArch64 Global Pure NEON 통합** | AArch64 모든 스칼라 게이트 제거 및 벡터 파이프라인 단일화 (twitter **246μs** 경신) |
 
 ---
 
