@@ -5733,24 +5733,18 @@ class Parser {
   DocumentView *doc_;
   size_t depth_ = 0;
 
-  // Phase B1: context bit-stack.
-  // Bit i is set iff depth i is an ObjectStart (0 = ArrayStart).
-  // Supports up to 64 nesting levels (practical JSON: twitter.json ≤10).
-  uint64_t obj_bits_ = 0;
-
-  // Phase E: pre-separator bit-stacks.
-  // Computed during parsing so dump() needs no bit-stack at all.
-  //   kv_key_bits_  — bit i: next push at depth i is an object KEY
-  //   has_elem_bits_ — bit i: depth i has ≥1 element already pushed
-  //   depth_mask_   — precomputed 1ULL << (depth_-1) (0 at root)
-  //                   maintained incrementally to eliminate variable shifts.
-  uint64_t kv_key_bits_ = 0;
-  uint64_t has_elem_bits_ = 0;
-  uint64_t depth_mask_ = 0; // = 1ULL << (depth_-1), updated on depth changes
-  // Overflow state for depths >= 64 (each byte: bit0=in_obj, bit1=is_key,
-  // bit2=has_elem)
-  static constexpr size_t kPresepDepth = 64;
-  uint8_t presep_overflow_[1024] = {};
+  // Phase 60-A: compact per-depth context state.
+  // Replaces 3×64-bit bit-stacks + overflow array with one byte per depth.
+  //   bit0 = is_key  (next push is an object key)
+  //   bit1 = in_obj  (current depth is an object, not array)
+  //   bit2 = has_elem (≥1 element already pushed at this depth)
+  //
+  // cur_state_ is register-resident throughout parse() — no memory access per
+  // push(). cstate_stack_[d] saves/restores the parent depth's state on
+  // open/close bracket events (infrequent: ~8% of tokens in twitter.json).
+  // Supports up to depth 1087 (same as old bit-stack + overflow).
+  uint8_t cur_state_ = 0;
+  uint8_t cstate_stack_[1088] = {};
 
   // Phase 19 Technique 8: local tape_head_ register variable.
   // Kept as a field but initialized from doc_->tape.base in parse().
@@ -6388,35 +6382,22 @@ class Parser {
         // hint. Hides tape-arena write latency; significant gain on large files
         // (canada).
         __builtin_prefetch(tape_head_ + 16, 1, 1);
-        const uint64_t mask = depth_mask_; // precomputed: no variable shift
         uint8_t sep = 0;
-        if (mask) { // depths 1..64: bit-stack path
-          // Use bool casts to avoid bitwise-AND/NOT surprises
-          // (e.g. mask=2, !2=1: 2&1=0, not what we want for logical AND)
-          const bool in_obj = !!(obj_bits_ & mask);
-          const bool is_key = !!(kv_key_bits_ & mask);
-          const bool has_el = !!(has_elem_bits_ & mask);
+        if (BEAST_LIKELY(depth_ > 0)) {
+          // Phase 60-A: cur_state_ is register-resident (no memory load).
+          // bit0=is_key, bit1=in_obj, bit2=has_elem
+          const uint8_t cs = cur_state_;
+          const bool in_obj = (cs >> 1) & 1;
+          const bool is_key = cs & 1;
+          const bool has_el = (cs >> 2) & 1;
           // value-position in object → colon(2); else comma-or-none
           const bool is_val = in_obj & !is_key;
           sep = is_val ? uint8_t(2) : uint8_t(has_el);
-          // Toggle key↔value tracking (only meaningful in objects)
-          kv_key_bits_ ^= (in_obj ? mask : uint64_t(0));
-          has_elem_bits_ |= mask;
-        } else if (BEAST_UNLIKELY(depth_ > 0)) { // depth > 64: overflow path
-          uint8_t &s = presep_overflow_[depth_ - kPresepDepth];
-          if (s & 1) { // in object
-            if (s & 2) {
-              sep = (s & 4) ? 0x01u : 0u;
-              s = (s & ~2u) | 4u;
-            } // key
-            else {
-              sep = 0x02u;
-              s |= (2u | 4u);
-            } // val
-          } else {
-            sep = (s & 4) ? 0x01u : 0u; // array
-            s |= 4;
-          }
+          // Update: toggle is_key if in_obj; always set has_elem.
+          // new_is_key = is_key ^ in_obj = (cs ^ (cs>>1)) & 1
+          cur_state_ = (cs & 0b010u) |
+                       static_cast<uint8_t>((cs ^ (cs >> 1)) & 1u) |
+                       0b100u;
         }
         TapeNode *n = tape_head_++;
         n->meta = (static_cast<uint32_t>(t) << 24) |
@@ -6468,19 +6449,10 @@ class Parser {
           case kActObjOpen: {
             push(TapeNodeType::ObjectStart, 0,
                  static_cast<uint32_t>(p_ - data_));
-            // Phase E: setup new depth's presep state.
-            // Depths 1..kPresepDepth: use 64-bit bit-stacks (depth_mask_).
-            // Depths >kPresepDepth:   use presep_overflow_[] byte array.
-            if (BEAST_LIKELY(depth_ < kPresepDepth)) {
-              const uint64_t nm = depth_mask_ ? depth_mask_ << 1 : uint64_t(1);
-              obj_bits_ |= nm;
-              kv_key_bits_ |= nm;
-              has_elem_bits_ &= ~nm;
-              depth_mask_ = nm;
-            } else {
-              depth_mask_ = 0; // signal: overflow active in push()
-              presep_overflow_[depth_ + 1 - kPresepDepth] = 0b011u;
-            }
+            // Phase 60-A: save parent state, init new object context.
+            // cstate_stack_[depth_] saves cur_state_ for restore on close.
+            cstate_stack_[depth_] = cur_state_;
+            cur_state_ = 0b011u; // in_obj=1, is_key=1, has_elem=0
             ++depth_;
             ++p_;
             if (BEAST_LIKELY(p_ < end_)) {
@@ -6495,15 +6467,9 @@ class Parser {
           case kActArrOpen: {
             push(TapeNodeType::ArrayStart, 0,
                  static_cast<uint32_t>(p_ - data_));
-            if (BEAST_LIKELY(depth_ < kPresepDepth)) {
-              const uint64_t nm = depth_mask_ ? depth_mask_ << 1 : uint64_t(1);
-              obj_bits_ &= ~nm;
-              has_elem_bits_ &= ~nm;
-              depth_mask_ = nm;
-            } else {
-              depth_mask_ = 0;
-              presep_overflow_[depth_ + 1 - kPresepDepth] = 0b000u;
-            }
+            // Phase 60-A: save parent state, init new array context.
+            cstate_stack_[depth_] = cur_state_;
+            cur_state_ = 0b000u; // in_obj=0, is_key=0, has_elem=0
             ++depth_;
             ++p_;
             if (BEAST_LIKELY(p_ < end_)) {
@@ -6519,13 +6485,8 @@ class Parser {
             if (BEAST_UNLIKELY(depth_ == 0))
               goto fail;
             --depth_;
-            // Restore depth_mask_ for the now-current depth.
-            // Common: was already in bit-stack region → just shift right.
-            // Rare: crossing back from overflow → recompute from depth_.
-            if (BEAST_LIKELY(depth_mask_ != 0))
-              depth_mask_ >>= 1;
-            else if (depth_ > 0 && depth_ <= kPresepDepth)
-              depth_mask_ = uint64_t(1) << (depth_ - 1); // restore, rare
+            // Phase 60-A: restore parent depth's state (no mask arithmetic).
+            cur_state_ = cstate_stack_[depth_];
             push_end(c == '}' ? TapeNodeType::ObjectEnd
                               : TapeNodeType::ArrayEnd,
                      static_cast<uint32_t>(p_ - data_));
@@ -6704,8 +6665,8 @@ class Parser {
                 // Fuse: skip WS + scan key + consume ':' + skip WS in one shot,
                 // eliminating one switch dispatch and one extra
                 // skip_to_action().
-                if (BEAST_LIKELY(depth_ > 0 && depth_ <= 64 &&
-                                 (obj_bits_ >> (depth_ - 1)) & 1)) {
+                // Phase 60-A: in_obj = bit1 of cur_state_ (register-resident)
+                if (BEAST_LIKELY(depth_ > 0 && (cur_state_ & 0b010u))) {
                   // In object: expect next key string
                   if (BEAST_LIKELY(p_ < end_)) {
                     unsigned char fc = static_cast<unsigned char>(*p_);
@@ -6730,7 +6691,7 @@ class Parser {
                   }
                   goto done;
                 }
-                // Not in object (in array, or depth > 64): find next element
+                // Not in object (in array): find next element
                 c = skip_to_action();
                 if (BEAST_UNLIKELY(p_ >= end_))
                   goto done;
@@ -6740,8 +6701,8 @@ class Parser {
                 if (BEAST_UNLIKELY(depth_ == 0))
                   goto fail;
                 --depth_;
-                if (BEAST_LIKELY(depth_ < kPresepDepth))
-                  depth_mask_ >>= 1;
+                // Phase 60-A: restore parent state (no mask arithmetic needed)
+                cur_state_ = cstate_stack_[depth_];
                 push_end(nc == '}' ? TapeNodeType::ObjectEnd
                                    : TapeNodeType::ArrayEnd,
                          static_cast<uint32_t>(p_ - data_));
@@ -6791,8 +6752,8 @@ class Parser {
               }
               if (BEAST_LIKELY(nc == ',')) {
                 ++p_;
-                if (BEAST_LIKELY(depth_ > 0 && depth_ <= 64 &&
-                                 (obj_bits_ >> (depth_ - 1)) & 1)) {
+                // Phase 60-A: in_obj = bit1 of cur_state_
+                if (BEAST_LIKELY(depth_ > 0 && (cur_state_ & 0b010u))) {
                   if (BEAST_LIKELY(p_ < end_)) {
                     unsigned char fc = static_cast<unsigned char>(*p_);
                     if (fc <= 0x20) {
@@ -6823,8 +6784,8 @@ class Parser {
                 if (BEAST_UNLIKELY(depth_ == 0))
                   goto fail;
                 --depth_;
-                if (BEAST_LIKELY(depth_ < kPresepDepth))
-                  depth_mask_ >>= 1;
+                // Phase 60-A: restore parent state
+                cur_state_ = cstate_stack_[depth_];
                 push_end(nc == '}' ? TapeNodeType::ObjectEnd
                                    : TapeNodeType::ArrayEnd,
                          static_cast<uint32_t>(p_ - data_));
@@ -6920,9 +6881,8 @@ class Parser {
               }
               if (BEAST_LIKELY(nc == ',')) {
                 ++p_;
-                // Phase B1: fused key scan after ',' in object context
-                if (BEAST_LIKELY(depth_ > 0 && depth_ <= 64 &&
-                                 (obj_bits_ >> (depth_ - 1)) & 1)) {
+                // Phase B1 + 60-A: fused key scan; in_obj = bit1 of cur_state_
+                if (BEAST_LIKELY(depth_ > 0 && (cur_state_ & 0b010u))) {
                   if (BEAST_LIKELY(p_ < end_)) {
                     unsigned char fc = static_cast<unsigned char>(*p_);
                     if (fc <= 0x20) {
@@ -6954,8 +6914,8 @@ class Parser {
                 if (BEAST_UNLIKELY(depth_ == 0))
                   goto fail;
                 --depth_;
-                if (BEAST_LIKELY(depth_ < kPresepDepth))
-                  depth_mask_ >>= 1;
+                // Phase 60-A: restore parent state
+                cur_state_ = cstate_stack_[depth_];
                 push_end(nc == '}' ? TapeNodeType::ObjectEnd
                                    : TapeNodeType::ArrayEnd,
                          static_cast<uint32_t>(p_ - data_));
@@ -7014,7 +6974,7 @@ class Parser {
       //   • No skip_to_action() calls — structural positions pre-computed by
       //   Stage 1 • String length = O(1) lookup: close_offset - open_offset - 1
       //   • No double-pump logic needed — sequential index traversal suffices •
-      //   Same push() / push_end() / depth bit-stack as parse() for correctness
+      //   Same push() / push_end() / cur_state_ as parse() for correctness
       //
       // Stage 1 guarantees:
       //   • Every '"' in the index is a real (unescaped) quote
@@ -7043,16 +7003,9 @@ class Parser {
 
           case kActObjOpen: {
             push(TapeNodeType::ObjectStart, 0, off);
-            if (BEAST_LIKELY(depth_ < kPresepDepth)) {
-              const uint64_t nm = depth_mask_ ? depth_mask_ << 1 : uint64_t(1);
-              obj_bits_ |= nm;
-              kv_key_bits_ |= nm;
-              has_elem_bits_ &= ~nm;
-              depth_mask_ = nm;
-            } else {
-              depth_mask_ = 0;
-              presep_overflow_[depth_ + 1 - kPresepDepth] = 0b011u;
-            }
+            // Phase 60-A: save parent state, init new object context.
+            cstate_stack_[depth_] = cur_state_;
+            cur_state_ = 0b011u; // in_obj=1, is_key=1, has_elem=0
             ++depth_;
             last_off = off + 1;
             break;
@@ -7060,15 +7013,9 @@ class Parser {
 
           case kActArrOpen: {
             push(TapeNodeType::ArrayStart, 0, off);
-            if (BEAST_LIKELY(depth_ < kPresepDepth)) {
-              const uint64_t nm = depth_mask_ ? depth_mask_ << 1 : uint64_t(1);
-              obj_bits_ &= ~nm;
-              has_elem_bits_ &= ~nm;
-              depth_mask_ = nm;
-            } else {
-              depth_mask_ = 0;
-              presep_overflow_[depth_ + 1 - kPresepDepth] = 0b000u;
-            }
+            // Phase 60-A: save parent state, init new array context.
+            cstate_stack_[depth_] = cur_state_;
+            cur_state_ = 0b000u; // in_obj=0, is_key=0, has_elem=0
             ++depth_;
             last_off = off + 1;
             break;
@@ -7078,10 +7025,8 @@ class Parser {
             if (BEAST_UNLIKELY(depth_ == 0))
               goto s2_fail;
             --depth_;
-            if (BEAST_LIKELY(depth_mask_ != 0))
-              depth_mask_ >>= 1;
-            else if (depth_ > 0 && depth_ <= kPresepDepth)
-              depth_mask_ = uint64_t(1) << (depth_ - 1);
+            // Phase 60-A: restore parent state (no mask arithmetic needed).
+            cur_state_ = cstate_stack_[depth_];
             push_end(c == '}' ? TapeNodeType::ObjectEnd
                               : TapeNodeType::ArrayEnd,
                      off);
@@ -7102,8 +7047,8 @@ class Parser {
           }
 
             // Phase 53: kActColon / kActComma are no longer emitted by
-            // stage1_scan_avx512. push() bit-stacks handle key↔value
-            // alternation internally.
+            // stage1_scan_avx512. push() cur_state_ handles key↔value
+            // alternation internally (Phase 60-A).
 
           case kActNumber: {
             // Scan integer/float from data_[off]; push raw token.
