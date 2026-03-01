@@ -207,12 +207,43 @@
 
 ---
 
+## Phase 60-B: scalar while pre-scan in scan_key_colon_next ❌
+
+* **시도 내용 (2026-03-01)**:
+  * `scan_key_colon_next()` 내 `#elif BEAST_HAS_NEON` 블록 앞에 8바이트 스칼라 while 루프를 추가하여 ≤7자 키("id", "text", "user" 등 twitter.json 36%)를 NEON 없이 처리.
+  * Phase 56-5와의 차별화 주장: "NEON에 데이터 의존성 없음 — 결과가 goto로만 연결되며 벡터 파이프라인에 GPR 값이 흘러들지 않음."
+  ```cpp
+  // 시도 코드
+  e = s;
+  while (e < s + 8 && *e != '"' && *e != '\\') ++e;
+  if (e < s + 8) { goto skn_found or skn_slow; }
+  // 이후 기존 NEON 블록 실행
+  ```
+* **벤치마크 결과 (Cortex-X3 pinned, 500 iter)**:
+  * baseline (Pure NEON): **243.7 μs**
+  * Phase 60-B (8B scalar pre): **257.5 μs** → **+5.6% 회귀** ❌
+  * revert 후: 245 μs 복원 확인
+
+* **근본 원인 분析**:
+  1. **분기 경쟁 비용**: 스칼라 while 루프(`while (e < s+8 && ...)`)의 8회 반복이 Cortex-X3 정수 파이프라인을 점유. OoO 엔진이 NEON과 병행 실행을 시도하지만, 스칼라 루프의 루프백 분기(8개)가 분기 예측기 슬롯을 소모하여 NEON의 vld1q/vceqq IPC 감소.
+  2. **브랜치 미예측 페널티**: 36% 케이스(≤7자 키)에서 스칼라가 일찍 종료("goto skn_found"). CPU는 "not found in 8B → fall through to NEON"을 기본 예측하므로, 36% 케이스에서 ~15사이클 미예측 패널티 발생. Phase 56-5의 실패 원인과 동일.
+  3. **Pure NEON 파이프라인 단절**: NEON이 스칼라 while 결과(e 포인터)에 분기 의존성을 가짐. Cortex-X3의 OoO 윈도우가 576 ROB가 아닌 ~200 ROB이므로 분기 해소 전까지 NEON 스페큘레이션이 불완전.
+
+* **결론**: "GPR→SIMD 데이터 의존성 없음"이라는 주장은 이론적으로 맞지만, 분기 의존성(branch dependency) 자체가 NEON 파이프라인을 저해한다. AArch64에서는 NEON과 scalar를 ANY 형태로 혼합하는 hot path 패턴이 Pure NEON보다 느리다. 임계값(8B/16B) 무관하게 동일한 결과 예상.
+
+* **가이드라인 업데이트**:
+  * **AArch64 에이전트**: `scan_key_colon_next`의 NEON 블록 앞에 어떤 형태의 스칼라 루프도 추가하지 마세요 — SWAR이든 `while`이든 결과는 동일합니다. "데이터 의존성 없음"이라도 분기 의존성이 NEON 스페큘레이션을 저해합니다.
+
+---
+
 ## 🛡️ AArch64 최적화 에이전트 수칙 (Survival Guide)
 
 Termux나 Apple Silicon 환경에서 작업할 차기 에이전트는 아래 수칙을 반드시 준수해야 합니다.
 
-1.  **GPR-SIMD 교차 오염 금지**: 
-    - `load64`로 읽어서 비트를 계산한 뒤 그 결과를 바탕으로 SIMD 루프를 결정하는 방식은 파이프라인 버블을 만듭니다. 
+1.  **GPR-SIMD 교차 오염 금지 (Phase 56-5, Phase 60-B 교훈)**:
+    - `load64`로 읽어서 비트를 계산한 뒤 그 결과를 바탕으로 SIMD 루프를 결정하는 방식은 파이프라인 버블을 만듭니다.
+    - **`while` 루프도 마찬가지**: SWAR-8이 아닌 단순 `while (*e != '"') ++e` 형태의 스칼라 루프도 NEON 앞에 추가하면 동일한 +5~6% 회귀가 발생합니다 (Phase 60-B).
+    - "GPR→SIMD 데이터 의존성 없음"이라도 분기 의존성이 NEON 스페큘레이션을 저해합니다.
     - 특히 `skip_to_action`이나 `scan_key_colon_next` 같은 초고속 핫 패스에서는 **처음부터 100% 벡터 명령**만 사용하세요.
 2.  **분기 예측기(Branch Predictor) 신뢰**:
     - AArch64의 분기 예측기는 매우 강력합니다. 16바이트 벡터 검사 후 일치하는 바이트를 찾기 위해 수행하는 `while` 루프(스칼라)는 페널티가 거의 없습니다. 

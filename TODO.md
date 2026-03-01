@@ -467,30 +467,20 @@ sep = (in_obj & !is_key) ? 2 : (has_elem_prev ? 1 : 0);
 
 ---
 
-### Phase 60-B — AArch64 Short-Key Scalar Fast Path ⭐⭐⭐
-**목표**: M1 twitter 218 → ~204 μs (-7%) | **난이도**: 낮음
+### Phase 60-B — AArch64 Short-Key Scalar Fast Path ❌ REVERTED
+**목표**: M1 twitter 218 → ~204 μs (-7%) | **실제**: **+5.6% 회귀** → revert
 
-**근거**:
-- twitter.json 키 분포: 36%가 ≤8자 ("id", "text", "user", "lang", "url" 등)
-- 현재 NEON 경로: vld1q + 2×vceqq + vorrq + vmaxvq = ~12 cycles (≤8자 키도 동일)
-- 순수 스칼라 `while (*e != '"' && *e != '\\') ++e;` 루프: ≤8자 = ~6-8 cycles
-- NEON보다 4-6 cycles 절약, **GPR→SIMD 의존성 없음** (Phase 57 실패와 다른 패턴)
+**실험 결과 (Cortex-X3 pinned, 500 iter)**:
+- baseline (Pure NEON): 243.7 μs
+- 8B scalar while pre-scan: **257.5 μs** (+5.6%) ❌
 
-**Phase 57 실패와의 차이점**: Phase 56-5는 SWAR-8을 NEON 진입 여부 판단에 사용했고, 이것이 GPR→SIMD 직렬 의존성을 만들었다. 본 Phase는 단순 `while` 루프로 SIMD 파이프라인과 완전히 독립 실행된다.
+**실패 원인**:
+- "GPR→SIMD 데이터 의존성 없음"이라는 가설은 맞지만, **분기 의존성**이 NEON 스페큘레이션을 저해
+- 36% 케이스(≤7자 키)에서 "goto skn_found" 분기 미예측 → ~15사이클 패널티
+- SWAR-8 게이트와 근본적으로 동일한 결과 — AArch64에서는 임계값 무관하게 실패
+- [OPTIMIZATION_FAILURES.md](./OPTIMIZATION_FAILURES.md) Phase 60-B 항목 참조
 
-- [ ] `scan_key_colon_next()` 내부에 길이-우선 분기 추가:
-  ```
-  // Fast path for short keys (≤16 bytes, no NEON setup overhead)
-  const char *e = s;
-  while (e < s + 16 && *e != '"' && *e != '\\') ++e;
-  if (e < s + 16) goto skn_found_or_escape;
-  // Slow path: NEON 16B blocks for longer keys
-  ```
-- [ ] 분기점 8B vs 16B A/B 테스트 (twitter 36% ≤8자, 84% ≤24자 분포)
-- [ ] Phase 57 회귀 재현 여부 확인 (vmaxvq와 별개 파이프라인 여부 검증)
-- [ ] ctest 81개 PASS, Snapdragon + M1 양쪽 실측
-
-**주의**: 이 최적화는 Snapdragon에서도 개선될 수 있음 (AArch64 분기 예측기 강력).
+**결론**: Pure NEON 패러다임은 절대적. `scan_key_colon_next`에 어떤 형태의 스칼라 루프도 추가 금지.
 
 ---
 
