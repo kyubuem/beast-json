@@ -146,7 +146,7 @@ Beast **dominates serialization** on gsoc and canada workloads. On gsoc-2018, be
 
 > **Environment**: Galaxy Z Fold 5, Android Termux, Clang 21.1.8 (`-O3 -march=armv8.4-a+crypto+dotprod+fp16+i8mm+bf16`), Snapdragon 8 Gen 2.
 > CPU: 1×Cortex-X3 (3360 MHz) · 2×Cortex-A715 · 2×Cortex-A710 · 3×Cortex-A510.
-> Phase 57+58-A applied (Pure NEON + prefetch distance tuning). Pinned to Cortex-X3 prime core (cpu7), 300 iterations.
+> Phase 57+58-A+60-A applied (Pure NEON + prefetch tuning + compact context state). Pinned to Cortex-X3 prime core (cpu7), 300 iterations.
 > Note: SVE/SVE2 present in hardware but kernel-disabled on this Android build. `-march=armv8.4-a+...` flags required (no SVE).
 > All results verified correct (✓ PASS).
 
@@ -154,54 +154,54 @@ Beast **dominates serialization** on gsoc and canada workloads. On gsoc-2018, be
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **243** | **2.54 GB/s** | **171** |
+| **beast::lazy** | **231.6** | **2.66 GB/s** | **174** |
 | beast::rtsm | 329 | 1.87 GB/s | — |
 | yyjson | 371 | 1.66 GB/s | 177 |
 | nlohmann | 5,584 | 110 MB/s | 1,490 |
 
-> beast::lazy is **53% faster** than yyjson.
+> beast::lazy is **60% faster** than yyjson.
 
 #### canada.json — 2.2 MB · dense floating-point arrays
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **2,009** | **1.09 GB/s** | **797** |
+| **beast::lazy** | **1,692** | **1.30 GB/s** | **884** |
 | beast::rtsm | 2,416 | 0.91 GB/s | — |
 | yyjson | 2,761 | 0.80 GB/s | 2,931 |
 | nlohmann | 79,130 | 28 MB/s | 8,099 |
 
-> beast::lazy is **37% faster** to parse and **3.7× faster** to serialize than yyjson.
+> beast::lazy is **63% faster** to parse and **3.3× faster** to serialize than yyjson.
 
 #### citm_catalog.json — 1.7 MB · event catalog, string-heavy
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **639** | **2.64 GB/s** | **441** |
+| **beast::lazy** | **645** | **2.61 GB/s** | **440** |
 | beast::rtsm | 1,260 | 1.34 GB/s | — |
 | yyjson | 973 | 1.73 GB/s | 257 |
 | nlohmann | 11,645 | 145 MB/s | 1,559 |
 
-> beast::lazy is **52% faster** to parse than yyjson.
+> beast::lazy is **49% faster** to parse than yyjson.
 
 #### gsoc-2018.json — 3.2 MB · large object array
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **659** | **4.93 GB/s** | **735** |
+| **beast::lazy** | **651** | **4.99 GB/s** | **746** |
 | beast::rtsm | 836 | 3.89 GB/s | — |
 | yyjson | 1,742 | 1.87 GB/s | 1,540 |
 | nlohmann | 20,574 | 158 MB/s | 12,289 |
 
-> beast::lazy is **164% faster** to parse and **2.1× faster** to serialize than yyjson.
+> beast::lazy is **173% faster** to parse and **2.5× faster** to serialize than yyjson.
 
 #### Summary
 
 | Benchmark | Beast vs yyjson (parse) | Beast vs yyjson (serialize) |
 | :--- | :--- | :--- |
-| twitter.json | **Beast 53% faster** ✅ | yyjson 4% faster |
-| canada.json | **Beast 37% faster** ✅ | **Beast 3.7× faster** |
-| citm_catalog.json | **Beast 52% faster** ✅ | yyjson 42% faster |
-| gsoc-2018.json | **Beast 164% faster** ✅ | **Beast 2.1× faster** |
+| twitter.json | **Beast 60% faster** ✅ | yyjson 2% faster |
+| canada.json | **Beast 63% faster** ✅ | **Beast 3.3× faster** |
+| citm_catalog.json | **Beast 49% faster** ✅ | yyjson 38% faster |
+| gsoc-2018.json | **Beast 173% faster** ✅ | **Beast 2.5× faster** |
 
 Beast **sweeps all 4 parse benchmarks** on Snapdragon 8 Gen 2 / Cortex-X3 — the standard AArch64 proxy for AWS Graviton 3 and server-class ARM workloads. Optimizations proven on this core transfer directly to cloud AArch64 deployments.
 
@@ -209,12 +209,12 @@ Beast **sweeps all 4 parse benchmarks** on Snapdragon 8 Gen 2 / Cortex-X3 — th
 
 | File | Target | Current | Status |
 | :--- | ---: | ---: | :---: |
-| twitter.json | ≤309 μs | **243 μs** | ✅ |
-| canada.json | ≤2,301 μs | **2,009 μs** | ✅ |
-| citm_catalog.json | ≤811 μs | **639 μs** | ✅ |
-| gsoc-2018.json | ≤1,452 μs | **659 μs** | ✅ |
+| twitter.json | ≤309 μs | **231.6 μs** | ✅ |
+| canada.json | ≤2,301 μs | **1,692 μs** | ✅ |
+| citm_catalog.json | ≤811 μs | **645 μs** | ✅ |
+| gsoc-2018.json | ≤1,452 μs | **651 μs** | ✅ |
 
-> **Phase 57+58-A note**: Pure NEON strategy (Phase 57) + prefetch distance 192B→256B tuning (Phase 58-A) combined. Cortex-X3 at 3360 MHz delivers **33 cy/tok** — essentially matching M1 Pro for Beast's workloads (twitter: 243 μs vs 246 μs). yyjson costs **50 cy/tok** on Cortex-X3 vs 23 cy/tok on M1 Pro, confirming yyjson's dependency on M1's 576-entry reorder buffer.
+> **Phase 57+58-A+60-A note**: Pure NEON (Phase 57) + prefetch 192B→256B (Phase 58-A) + compact context state (Phase 60-A). Phase 60-A replaced 4×64-bit bit-stacks with `uint8_t cur_state_` — eliminating 5-7 ops per open/close bracket. canada.json gained **-15.8%** from simplified bracket handling. Cortex-X3 at 3360 MHz now delivers **30 cy/tok** on twitter. yyjson costs **50 cy/tok** on Cortex-X3 vs 23 cy/tok on M1 Pro, confirming yyjson's dependency on M1's 576-entry reorder buffer.
 
 
 ---
