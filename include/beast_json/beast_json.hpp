@@ -6336,8 +6336,7 @@ public:
           // ── Phase 33: SWAR-8 float digit scanner (fractional part) ──
           // canada.json has 2.32M floats: scalar was 1 byte/iter.
           // SWAR-8 processes 8 digits in a single 64-bit operation.
-          // Architecture-agnostic pure SWAR — fully inlined, zero call
-          // overhead.
+          // Architecture-agnostic pure SWAR — fully inlined, zero call overhead.
 #define BEAST_SWAR_SKIP_DIGITS()                                               \
   do {                                                                         \
     while (p_ + 8 <= end_) {                                                   \
