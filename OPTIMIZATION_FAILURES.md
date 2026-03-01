@@ -36,6 +36,18 @@
 * **가이드라인 (에이전트 수칙)**:
   * **AArch64 에이전트**: SIMD "마스킹" 기반의 Two-Phase 처리 (미리 구조적 문자의 인덱스를 뽑고 나중에 파싱하는 simdjson 류의 방식)는 ARM64 환경에 적합하지 않습니다. NEON에는 Native MoveMask가 없다는 점을 항상 기억하고, 단일 경로 선형 파서 최적화에 집중하세요.
 
+### ❌ [Phase 50-1 시도] NEON Single-Pass 스캐너 32B 언롤링 및 Branchless Pinpoint
+* **목표**: `skip_to_action()`과 `scan_string_end()`의 NEON 루프에서 16B 단위 처리를 32B 단위(2× `vld1q_u8`)로 언롤링하고, 발견 시 `while`문을 통한 스칼라 스캔이 아닌 `vgetq_lane_u64(_m, 0)` 추출 및 `CTZ`를 사용해 브랜치리스(Branchless)하게 오프셋을 계산.
+* **적용 대상**: `beast_json.hpp` 내 `skip_to_action()`, `scan_string_end()` 의 `#elif BEAST_HAS_NEON` 조건부 컴파일 블록.
+* **실패 결과 (성능 회귀)**: 
+  * `twitter.json`: 328μs → 357μs (**+8.8% 회귀**)
+  * `citm_catalog.json`: 645μs → 839μs (**+30% 회귀**)
+* **근본 원인 분석**:
+  1. **AArch64의 브랜치 친화성**: x86_64 환경에서 극단적으로 회피해야 할 `while` 루프(스칼라 바이트 비교)가, 오히려 AArch64에서는 거대한 패널티 없이 아주 효율적으로 동작했습니다.
+  2. **NEON Lane Extraction(vgetq_lane)의 고비용**: NEON 레지스터(`uint8x16_t` / `uint64x2_t`)에서 일반 범용 레지스터(GPR)로 `vgetq_lane_u64`를 사용해 데이터를 넘기는 과정(Cross-register file transfer)은 지연 속도(Latency)가 높습니다. `vmaxvq_u32`로 히트를 감지한 뒤 `vgetq_lane` 두 번과 `CTZ`를 호출하는 브랜치리스 코드가, 차라리 바이트 포인터 연산을 1바이트씩 N번 루프 도는 것보다 현격하게 느렸습니다.
+  3. **과도한 루프 언롤링**: 32B 언롤링은 16개 이상의 레지스터를 여유 있게 사용할 때 좋지만, 문자열 스캐닝 특성 상 16B 만에 바로 탈출조건이 만족되는 경우가 대다수입니다. 필요 없이 16B를 추가 로드(`load` / `ceq` / `orr`) 하는 작업이 오히려 16B 이내 탈출 패턴인 일반 JSON 구조를 지연시켰습니다.
+* **가이드라인 (에이전트 수칙)**:
+  * **AArch64 에이전트**: NEON 스캐너 구현 시 '히트(조건 만족)' 감지 이후 위치를 좁혀야 할 때, `vgetq_lane`을 이용해 마스크를 빼내어 `CTZ`를 돌리지 마세요. 차라리 스칼라 `while` 루프로 해당 청크(16B) 내부를 바이트 단위로 찾는 것이 AArch64에서는 압도적으로 빠릅니다. 또한 핫 패스의 문자열/공백 찾기는 16B(`vld1q_u8` 1회) 단위로 가장 기민하게 처리하는 것이 최고 효율을 냅니다.
 
 ---
 
