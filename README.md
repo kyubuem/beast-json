@@ -10,68 +10,79 @@
 
 ### Linux x86-64
 
-> **Environment**: Linux x86-64, GCC 13.3.0 `-O3 -flto -mavx2 -march=native`, 200 iterations per file, timings are per-run averages.
-> Phase 31-48 applied (Action LUT · SWAR float scanner · SSE2/AVX2/AVX-512 string gate · AVX-512 64B WS skip · SWAR-8 pre-gate · PGO-ready build · input prefetch).
+> **Environment**: Linux x86-64, GCC 13.3.0 `-O3 -flto -march=native` + PGO, 150 iterations per file, timings are per-run averages.
+> Phase 44–53 applied (Action LUT · AVX-512 string gate · AVX-512 64B WS skip · SWAR-8 pre-gate · PGO · input prefetch · Stage 1+2 two-phase parsing · positions `:,` elimination).
 > yyjson compiled with full SIMD enabled. All results verified correct (✓ PASS).
 
 #### twitter.json — 616.7 KB · social graph, mixed types
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| yyjson | 258 | 2.39 GB/s | 133 |
-| beast::rtsm | 316 | 1.95 GB/s | — |
-| **beast::lazy** | **372** | **1.65 GB/s** | **143** |
-| nlohmann | 4,959 | 124 MB/s | 1,842 |
+| **beast::lazy** | **202** | **3.06 GB/s** | **131** |
+| yyjson | 248 | 2.49 GB/s | 139 |
+| beast::rtsm | 295 | 2.09 GB/s | — |
+| nlohmann | 4,415 | 140 MB/s | 1,339 |
 
-> twitter is the most challenging benchmark due to short strings and dense key-value structure. yyjson 44% faster on parse; serialize within 8%.
+> beast::lazy is **23% faster** than yyjson on parse. Two-phase AVX-512 Stage 1+2 parsing with positions array optimizations delivers parse throughput of **3.06 GB/s**.
 
 #### canada.json — 2.2 MB · dense floating-point arrays
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **1,527** | **1.47 GB/s** | **779** |
-| beast::rtsm | 2,026 | 1.11 GB/s | — |
-| yyjson | 2,611 | 0.86 GB/s | 3,234 |
-| nlohmann | 32,297 | 68 MB/s | 8,080 |
+| **beast::lazy** | **1,448** | **1.52 GB/s** | **844** |
+| beast::rtsm | 1,978 | 1.11 GB/s | — |
+| yyjson | 2,734 | 0.80 GB/s | 3,379 |
+| nlohmann | 26,333 | 83 MB/s | 6,858 |
 
-> beast::lazy is **71% faster** to parse and **4.2× faster** to serialize than yyjson. AVX-512 64B whitespace skip delivers massive gains on coordinate-heavy JSON.
+> beast::lazy is **89% faster** to parse and **4.0× faster** to serialize than yyjson. AVX-512 64B whitespace skip delivers massive gains on coordinate-heavy JSON.
 
 #### citm_catalog.json — 1.7 MB · event catalog, string-heavy
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| yyjson | 714 | 2.42 GB/s | 258 |
-| **beast::lazy** | **939** | **1.84 GB/s** | **368** |
-| beast::rtsm | 1,043 | 1.66 GB/s | — |
-| nlohmann | 10,314 | 163 MB/s | 1,857 |
+| yyjson | 736 | 2.29 GB/s | 257 |
+| **beast::lazy** | **757** | **2.23 GB/s** | **347** |
+| beast::rtsm | 1,174 | 1.44 GB/s | — |
+| nlohmann | 9,353 | 180 MB/s | 1,313 |
 
-> yyjson 32% faster on parse. AVX-512 whitespace skip improved this file by -6% vs prior phases.
+> Beast is within **3% of yyjson** — essentially tied. Stage 1+2 two-phase parsing improved this from -32% to near-parity.
 
 #### gsoc-2018.json — 3.2 MB · large object array
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **842** | **3.95 GB/s** | **535** |
-| beast::rtsm | 1,082 | 3.08 GB/s | — |
-| yyjson | 1,640 | 1.98 GB/s | 1,387 |
-| nlohmann | 20,810 | 156 MB/s | 12,926 |
+| **beast::lazy** | **806** | **4.03 GB/s** | **514** |
+| beast::rtsm | 1,018 | 3.19 GB/s | — |
+| yyjson | 1,782 | 1.82 GB/s | 1,582 |
+| nlohmann | 14,863 | 218 MB/s | 12,231 |
 
-> beast::lazy is **95% faster** to parse and **2.6× faster** to serialize than yyjson. Parse throughput reaches **3.95 GB/s**.
+> beast::lazy is **121% faster** to parse and **3.1× faster** to serialize than yyjson. Parse throughput reaches **4.03 GB/s**.
 
 #### Summary
 
 | Benchmark | Beast vs yyjson (parse) | Beast vs yyjson (serialize) |
 | :--- | :--- | :--- |
-| twitter.json | yyjson 44% faster | yyjson 8% faster |
-| canada.json | **Beast 71% faster** | **Beast 4.2× faster** |
-| citm_catalog.json | yyjson 32% faster | yyjson 43% faster |
-| gsoc-2018.json | **Beast 95% faster** | **Beast 2.6× faster** |
+| twitter.json | **Beast 23% faster** ✅ | **Beast 6% faster** |
+| canada.json | **Beast 89% faster** ✅ | **Beast 4.0× faster** |
+| citm_catalog.json | yyjson 3% faster | yyjson 35% faster |
+| gsoc-2018.json | **Beast 121% faster** ✅ | **Beast 3.1× faster** |
 
-Beast **dominates** on float-heavy (canada) and large-object-array (gsoc) workloads. Canada parse throughput (**1.47 GB/s**) is 71% faster than yyjson; gsoc parse (**3.95 GB/s**) nearly doubles yyjson's throughput on this machine.
+Beast **beats yyjson on parse speed for 3 out of 4 files** and is near-tied on the fourth (citm). The **twitter** result (202 μs vs 248 μs) is particularly notable — a file historically dominated by yyjson now falls to Beast by 23%.
+
+#### 1.2× Goal Progress (beat yyjson by ≥20% on all 4 files)
+
+| File | Target | Current | Status |
+| :--- | ---: | ---: | :---: |
+| twitter.json | ≤219 μs | **202 μs** | ✅ |
+| canada.json | ≤2,274 μs | **1,448 μs** | ✅ |
+| citm_catalog.json | ≤592 μs | 757 μs | ⬜ |
+| gsoc-2018.json | ≤1,209 μs | **806 μs** | ✅ |
 
 ---
 
 ### macOS (Apple M1 Pro)
+
+> **Note**: macOS numbers below are from Phase 48 and have not yet been updated to reflect Phase 50–53.
 
 > **Environment**: macOS 26.3, Apple Clang 17 (`-O3 -flto`), Apple M1 Pro.
 > Phase 31-48 applied (NEON string gate · Action LUT · SWAR float scanner · AVX2 x86_64).
@@ -219,6 +230,20 @@ In the `dump()` hot loop, `nd.meta` was accessed multiple times per token — on
 Fix: read `nd.meta` into a local `const uint32_t meta` once, then derive everything from it with cheap shifts and masks. One memory read replaces three.
 
 **Effect**: twitter serialize -11% on its own; enabled further cleanup in Phase E.
+
+### Phase 50+53 — Two-Phase AVX-512 Parsing (simdjson-style)
+
+The biggest parse-speed breakthrough: a simdjson-inspired two-phase parsing pipeline, customized for Beast's tape architecture.
+
+**Stage 1** (`stage1_scan_avx512`): a single AVX-512 pass over the entire input at 64 bytes/iteration. It uses `_mm512_cmpeq_epi8_mask` to detect quotes, backslashes, and structural characters (`{}[]`), and tracks in-string state via a cross-block XOR prefix-sum (`prefix_xor`). The result is a flat `uint32_t[]` positions array — one entry per structural character, quote, or value-start byte.
+
+**Stage 2** (`parse_staged`): iterates the positions array without touching the raw input for whitespace or string-length scanning. String length becomes `O(1)`: `close_offset − open_offset − 1`. The push() bit-stacks handle key↔value alternation exactly as in single-pass mode — no separator entries needed.
+
+**Phase 53 key insight**: `,` and `:` entries were removed from the positions array entirely. The push() bit-stack already knows whether the current token is a key or value; it doesn't need explicit separator positions. Removing them shrinks the positions array by ~33% (from ~150K to ~100K entries for twitter.json), reducing L2/L3 cache pressure and Stage 2 iteration count.
+
+**Result**: twitter.json 365 μs → **202 μs** (−44.7% vs Phase 48 baseline) with PGO.
+
+A 2 MB size threshold selects the path: files ≤2 MB (twitter, citm) use Stage 1+2; larger number-heavy files (canada, gsoc) fall back to the optimized single-pass parser, where the positions array would exceed L3 capacity.
 
 ---
 
