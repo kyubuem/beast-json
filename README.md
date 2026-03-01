@@ -75,61 +75,61 @@ Beast **dominates** on float-heavy (canada) and large-object-array (gsoc) worklo
 
 > **Environment**: macOS 26.3, Apple Clang 17 (`-O3 -flto`), Apple M1 Pro.
 > Phase 31-34 applied (NEON string gate · Action LUT · SWAR float scanner · AVX2 x86_64).
-> twitter/citm/gsoc: 100 iterations. canada: 50 iterations.
+> All benchmarks: 300 iterations.
 > All results verified correct (✓ PASS).
 
 #### twitter.json — 616.7 KB · social graph, mixed types
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| yyjson | 180 | 3.43 GB/s | 103 |
-| **beast::lazy** | **264** | **2.34 GB/s** | **120** |
-| beast::rtsm | 278 | 2.22 GB/s | — |
-| nlohmann | 3,622 | 170 MB/s | 1,374 |
+| yyjson | 175 | 3.52 GB/s | 101 |
+| **beast::lazy** | **269** | **2.29 GB/s** | **116** |
+| beast::rtsm | 276 | 2.23 GB/s | — |
+| nlohmann | 3,556 | 173 MB/s | 1,355 |
 
-> Serialize is essentially **tied with yyjson** (120 vs 103 μs). Parse **-4.4%** vs Phase 30 baseline.
+> Serialize is **near yyjson** (116 vs 101 μs).
 
 #### canada.json — 2.2 MB · dense floating-point arrays
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| yyjson | 1,463 | 1.50 GB/s | 2,274 |
-| **beast::lazy** | **1,863** | **1.18 GB/s** | **881** |
-| beast::rtsm | 1,878 | 1.17 GB/s | — |
-| nlohmann | 19,423 | 113 MB/s | 6,785 |
+| yyjson | 1,439 | 1.53 GB/s | 2,204 |
+| **beast::lazy** | **1,839** | **1.20 GB/s** | **878** |
+| beast::rtsm | 1,867 | 1.18 GB/s | — |
+| nlohmann | 19,483 | 113 MB/s | 6,761 |
 
-> beast::lazy serialize is **2.6× faster** than yyjson. Parse **-7.8%** vs Phase 30 baseline (SWAR float).
+> beast::lazy serialize is **2.5× faster** than yyjson.
 
 #### citm_catalog.json — 1.7 MB · event catalog, string-heavy
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| yyjson | 474 | 3.56 GB/s | 163 |
-| **beast::lazy** | **654** | **2.58 GB/s** | **269** |
-| beast::rtsm | 1,009 | 1.67 GB/s | — |
-| nlohmann | 8,372 | 201 MB/s | 1,333 |
+| yyjson | 471 | 3.58 GB/s | 163 |
+| **beast::lazy** | **639** | **2.64 GB/s** | **263** |
+| beast::rtsm | 1,004 | 1.68 GB/s | — |
+| nlohmann | 8,235 | 205 MB/s | 1,328 |
 
 #### gsoc-2018.json — 3.2 MB · large object array
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **625** | **5.20 GB/s** | **284** |
-| beast::rtsm | 722 | 4.50 GB/s | — |
-| yyjson | 1,005 | 3.23 GB/s | 722 |
-| nlohmann | 13,591 | 239 MB/s | 11,761 |
+| **beast::lazy** | **627** | **5.19 GB/s** | **278** |
+| beast::rtsm | 719 | 4.52 GB/s | — |
+| yyjson | 1,070 | 3.04 GB/s | 700 |
+| nlohmann | 14,242 | 228 MB/s | 11,980 |
 
-> beast::lazy is **60% faster** to parse and **2.5× faster** to serialize than yyjson. Parse **-12.6%** vs Phase 30 baseline (NEON string gate).
+> beast::lazy is **71% faster** to parse and **2.5× faster** to serialize than yyjson.
 
 #### Summary
 
 | Benchmark | Beast vs yyjson (parse) | Beast vs yyjson (serialize) |
 | :--- | :--- | :--- |
-| twitter.json | yyjson 32% faster | **Tied** (±14%) |
-| canada.json | yyjson 21% faster | **Beast 2.6× faster** |
-| citm_catalog.json | yyjson 27% faster | yyjson 39% faster |
-| gsoc-2018.json | **Beast 60% faster** | **Beast 2.5× faster** |
+| twitter.json | yyjson 54% faster | yyjson 15% faster |
+| canada.json | yyjson 28% faster | **Beast 2.5× faster** |
+| citm_catalog.json | yyjson 36% faster | yyjson 62% faster |
+| gsoc-2018.json | **Beast 71% faster** | **Beast 2.5× faster** |
 
-Beast **dominates serialization** on 3 of 4 files. On the gsoc-2018 workload (large object arrays), beast now beats yyjson on parse speed by **60%**.
+Beast **dominates serialization** on gsoc and canada workloads. On the gsoc-2018 workload (large object arrays), beast beats yyjson on parse speed by **71%**.
 
 
 ---
