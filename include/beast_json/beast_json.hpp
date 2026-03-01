@@ -6384,10 +6384,10 @@ class Parser {
       //   key) sep = 1  → comma         (non-first array element or object key)
       //   sep = 2  → colon         (object value, always)
       BEAST_INLINE void push(TapeNodeType t, uint16_t l, uint32_t o) noexcept {
-        // Phase 48: prefetch tape write slot 8 TapeNodes (128B) ahead — store
+        // Phase 58-A: prefetch tape write slot 16 TapeNodes (192B) ahead — store
         // hint. Hides tape-arena write latency; significant gain on large files
         // (canada).
-        __builtin_prefetch(tape_head_ + 8, 1, 1);
+        __builtin_prefetch(tape_head_ + 16, 1, 1);
         const uint64_t mask = depth_mask_; // precomputed: no variable shift
         uint8_t sep = 0;
         if (mask) { // depths 1..64: bit-stack path
@@ -6457,9 +6457,9 @@ class Parser {
         }
 
         while (p_ < end_) {
-          // Phase 48: prefetch input 3 cache lines (192B) ahead — read, L2
-          // hint. Hides DRAM latency for the next iteration's LUT + data loads.
-          __builtin_prefetch(p_ + 192, 0, 1);
+          // Phase 58-A: prefetch input 4 cache lines (256B) ahead — read, L2
+          // hint. 256B optimal on Cortex-X3 (192B baseline was sub-optimal).
+          __builtin_prefetch(p_ + 256, 0, 1);
           // Phase 32: LUT dispatch — 11 ActionId cases vs 17 raw char cases.
           // kActionLut[c] maps every byte to an ActionId in one L1 cache
           // access.

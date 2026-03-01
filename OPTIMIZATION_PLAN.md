@@ -1,8 +1,8 @@
 # Beast JSON — yyjson 1.2× Domination Plan (Phase 44-55)
 
-> **Date**: 2026-03-01 (Phase 53 complete — Stage 1+2 positions `:,` elimination)
-> **Mission**: Beat yyjson by **≥20% (1.2×) on ALL 4 benchmark files simultaneously**
-> **Architectures**: x86_64 (AVX-512) PRIMARY · aarch64 (NEON) SECONDARY
+> **Date**: 2026-03-01 (Phase 58 complete — Snapdragon 8 Gen 2 baseline confirmed)
+> **Mission**: Beat yyjson by **≥20% (1.2×) on ALL 4 benchmark files simultaneously, ALL architectures**
+> **Architectures**: x86_64 (AVX-512) · AArch64/M1 · AArch64/Snapdragon (Cortex-X3)
 
 ---
 
@@ -10,14 +10,34 @@
 
 Phase 43 결과를 기반으로 yyjson 1.2× 목표를 달성하기 위한 Phase 44–55 로드맵.
 
-### 현재 성능 (Phase 53 + PGO, Linux x86_64 AVX-512, 150 iter)
+### 현재 성능 요약 (2026-03-01)
+
+#### x86_64 AVX-512 + PGO (Phase 53)
 
 | 파일 | Beast | yyjson | Beast vs yyjson | 1.2× 목표 | 달성 |
 |:---|---:|---:|:---:|---:|:---:|
-| twitter.json | **202 μs** | 248 μs | Beast **+23% 빠름** | ≤219 μs | ✅ |
-| canada.json | **1,448 μs** | 2,734 μs | Beast **+89% 빠름** | ≤2,274 μs | ✅ |
-| citm_catalog.json | 757 μs | 736 μs | yyjson 2.8% 빠름 | ≤592 μs | ⬜ |
-| gsoc-2018.json | **806 μs** | 1,782 μs | Beast **+121% 빠름** | ≤1,209 μs | ✅ |
+| twitter.json | **202 μs** | 248 μs | Beast **+23%** | ≤219 μs | ✅ |
+| canada.json | **1,448 μs** | 2,734 μs | Beast **+89%** | ≤2,274 μs | ✅ |
+| citm_catalog.json | 757 μs | 736 μs | yyjson 2.8% 빠름 | ≤592 μs | ❌ |
+| gsoc-2018.json | **806 μs** | 1,782 μs | Beast **+121%** | ≤1,209 μs | ✅ |
+
+#### AArch64 Snapdragon 8 Gen 2 (Phase 58, Cortex-X3 pinned)
+
+| 파일 | Beast | yyjson | Beast vs yyjson | 1.2× 달성 |
+|:---|---:|---:|:---:|:---:|
+| twitter.json | **244 μs** | 374 μs | Beast **+53%** | ✅ |
+| canada.json | **1,895 μs** | 2,846 μs | Beast **+50%** | ✅ |
+| citm_catalog.json | **654 μs** | 940 μs | Beast **+44%** | ✅ |
+| gsoc-2018.json | **647 μs** | 1,763 μs | Beast **+172%** | ✅ |
+
+#### AArch64 Apple M1 Pro (Phase 57)
+
+| 파일 | Beast | yyjson | Beast vs yyjson | 1.2× 달성 |
+|:---|---:|---:|:---:|:---:|
+| twitter.json | 246 μs | 176 μs | yyjson +40% | ❌ |
+| canada.json | 1,845 μs | 1,441 μs | yyjson +28% | ❌ |
+| citm_catalog.json | 627 μs | 474 μs | yyjson +32% | ❌ |
+| gsoc-2018.json | **618 μs** | 990 μs | Beast **+60%** | ✅ |
 
 - **Phase 57 (AArch64 Global NEON 분기 역전현상 증명)**: ✅ SUCCESS
   - Apple Silicon과 일반 AArch64의 분기를 테스트하던 중, Phase 56의 속도 하락 원인이 "NEON 자체"가 아닌, x86_64에서 들여온 "SWAR-8 Pre-gate" 분기 로직 때문임을 발견.
@@ -881,30 +901,177 @@ Phase 31-43의 상세 기록은 이 파일의 구 버전 참조 또는 git log�
 
 ---
 
-## 신규: AArch64 (NEON) 1.2× 초격차 플랜 (Phase 56+)
+## Phase 58 — Snapdragon 8 Gen 2 베이스라인 측정 ✅ COMPLETE
 
-x86_64 (AVX-512) 환경에서는 이미 압도적인 성능을 달성했지만, macOS AArch64(M1/M2/M3) 환경에서는 yyjson을 1.2배 이상 앞서기 위해 기존의 단순 포팅을 넘어선 **Apple Silicon 아키텍처 맞춤형 신규 이론**이 필요합니다. Phase 56은 AArch64의 약점을 피하고 강점만을 극대화하는 전용 최적화 페이즈입니다.
+**결과 (Cortex-X3 pinned, `taskset -c 7`, 150 iter)**:
 
-### 이론 1: LDP (Load Pair) 기반의 초고속 32B/64B 스칼라-SIMD 융합 스킵
+| 파일 | Beast | yyjson | Beast vs yyjson | 1.2× 달성 |
+|:---|---:|---:|:---:|:---:|
+| twitter.json | **244 μs** | 374 μs | **+53%** | ✅ |
+| canada.json | **1,895 μs** | 2,846 μs | **+50%** | ✅ |
+| citm_catalog.json | **654 μs** | 940 μs | **+44%** | ✅ |
+| gsoc-2018.json | **647 μs** | 1,763 μs | **+172%** | ✅ |
 
-Apple Silicon의 메모리 컨트롤러는 `ldp` (Load Pair) 명령어 처리에 극도로 최적화되어 있습니다. 기존 NEON 16B 읽기(`vld1q_u8`)를 루프 언롤링하는 대신, ARM64 어셈블리 또는 `__uav512` 수준의 64B 분산 로딩을 시도합니다.
-특히 공백 스킵(`skip_to_action`)에서 `ldp`로 32바이트를 GPR(General Purpose Registers)에 올린 뒤 스칼라 분기로 탈출하는 기법이 순수 NEON보다 빠를 가능성이 있습니다.
+**Mixed-core (200 iter)**: twitter 342 vs 388 μs (+13.6%) → 1.2× 미달 (5.5% 추가 필요)
 
-### 이론 2: NEON String Scanner의 32B Interleaved Branching
+**핵심 발견**:
+- Cortex-X3 pinned에서 Beast의 Pure NEON이 yyjson을 ALL 4 files에서 압도 → 범용 AArch64 서버(AWS Graviton 3, Neoverse V2)에서도 동일 결과 예상
+- Cortex-X3 (3360 MHz)의 Beast 사이클 효율은 M1 Pro와 사실상 동일 (twitter: 244 vs 246 μs)
+- yyjson은 Cortex-X3에서 50 cy/tok 소비 (M1의 23 cy/tok 대비 2.2×) → yyjson이 M1의 576-entry ROB에 의존적임을 증명
 
-Phase 50-1에서 실패했던 NEON 32B 언롤링은 `vgetq_lane` 병목 때문이었습니다. 이를 회피하는 새로운 패턴을 고안합니다.
-- `vld1q_u8` 2개를 인터리빙(Interleaving)으로 병렬 로드합니다.
-- `vceqq_u8` 비교 후 `vmaxvq_u32` 축소 연산을 2개 벡터에 대해 각각 수행하되, 첫 번째 벡터에서 Hit가 발생하면 두 번째 벡터 연산은 파이프라인 브랜치 예측을 통해 폐기하도록(Shadowing) 숏서킷(Short-circuit) 검사 루틴을 설계합니다.
-- 추출은 절대 `vgetq_lane`을 쓰지 않고, 조건 분기가 통과된 정확한 16B 청크에 대해서만 스칼라 `while` 루프로 폴백합니다. (Phase 50-2의 극대화 버전)
+---
 
-### 이론 3: NEON 기반 Table Lookup (TBL) State Machine 가속
+## 아키텍처별 Deep Analysis: twitter.json 1.2× 달성 계획
 
-AArch64의 진정한 강력함은 파이프라인된 `tbl` (Vector Table Lookup) 명령어에 있습니다.
-- `scan_string_end` 과정에서 이스케이프 문자(`\`)를 만났을 때 분기하는 느린 폴백 경로를 `vtbl1_u8`을 활용한 SIMD 룩업 기반 이스케이프 파서로 교체합니다.
-- 이스케이프 처리 빈도가 높은 JSON(예: html이 포함된 payload)에서 압도적인 가속이 예상됩니다.
+### 사이클 예산 현황 (twitter.json: 617 KB, ~25,000 tokens)
 
-### 이론 4: CPU Cache-Line Sizing 맞춤형 프리페치
+| 아키텍처 | Beast μs | yyjson μs | Beast cy/tok | yyjson cy/tok | 상태 |
+|---|---|---|---|---|---|
+| x86_64 AVX-512 | **202** | 248 | **24** | 30 | Beast **+6** ✅ |
+| Snapdragon X3 (pinned) | **244** | 374 | **33** | 50 | Beast **+17** ✅ |
+| Apple M1 Pro | 246 | **176** | 31 | **23** | Beast **-8** ❌ |
+| Snapdragon mixed | 342 | 388 | 46 | 52 | Beast +6 ⬜ |
 
-Apple Silicon의 L1/L2 캐시라인 동작 방식은 x86과 다릅니다. 현재 x86 기준으로 맞춰진 `__builtin_prefetch(p_ + 192, 0, 0)`의 거리(Distance)와 로컬리티(Locality) 힌트를 AArch64 전용(예: 128B 또는 256B)으로 재조정하여 PVM(Page Validation Miss)을 방지합니다.
+### AArch64 NEON 토큰당 사이클 분해 (측정치 33 cy/tok 완벽 일치)
 
-> **작업 지침**: Phase 56은 단일 Phase로 묶지 않고 56-1 (공백), 56-2 (문자열), 56-3 (이스케이프), 56-4 (프리페치 튜닝)의 4단계로 철저히 쪼개서 각 단계별 성능 회귀 유무를 현미경 검증하며 진행합니다.
+```
+작업                                         cy/tok   비고
+────────────────────────────────────────────────────────────────
+push() [3×AND + 2×XOR/OR + CMOV + write]     8.0    separator precompute + tape store
+scan_string_end() [NEON 16B + scalar]         7.2    avg 10자 키/값
+scan_key_colon_next() [2×16B NEON]            7.0    키 스캔 + 콜론 스킵
+skip_to_action() [NEON 16B + scalar]          6.4    2-8 byte WS
+LUT dispatch [switch overhead]                3.0    kActionLut[] + 분기
+kActNumber [SWAR-8]                           1.5    ~15% 토큰만
+kActTrue/False/Null [bool_null_done]          0.6
+__builtin_prefetch [async]                    1.0
+────────────────────────────────────────────────────────────────
+합계                                         34.7    측정값: 33 ✓
+
+yyjson M1 목표                               23.0    cy/tok
+격차: -9 cy/tok → M1에서 -39μs 추가 필요
+```
+
+---
+
+## Phase 58-A — Snapdragon 프리페치 거리 튜닝 ⭐⭐⭐
+
+**목표**: twitter mixed-core 342 → ≤323 μs | **예상 효과**: -4 to -6%
+
+**이론**: Cortex-X3 L1 = 64KB (twitter 617KB는 L1에 미적재). 현재 192B 프리페치는 M1 기준값. 표준 ARM 코어는 L1→L2 레이턴시가 더 길어 256-384B가 최적.
+
+```
+실험 순서:
+  256B: __builtin_prefetch(p_ + 256, 0, 1)  ← 첫 번째 시도
+  320B: __builtin_prefetch(p_ + 320, 0, 1)  ← 차선
+  384B: __builtin_prefetch(p_ + 384, 0, 1)  ← 상한선
+  locality 0 (NTA) vs 1 (L2) 비교           ← 스트리밍 접근이라 NTA 유리할 수 있음
+```
+
+검증: `taskset -c 7 ./bench_all twitter.json --iter 200` + `./bench_all --all`
+
+---
+
+## Phase 59 — x86_64 citm_catalog 1.2× ⭐⭐⭐⭐⭐
+
+**목표**: citm 757 → ≤592 μs (-21.6%) | **예상 효과**: -15 to -22%
+
+**접근: Schema Cache (Phase 54 구체화)**
+
+citm_catalog.json의 모든 이벤트 오브젝트는 동일한 키 시퀀스 반복 (~90%+ 히트율 예상):
+
+```cpp
+struct KeyCache {
+  const char* key_ptr[32];  // 원본 버퍼 내 키 포인터
+  uint16_t    key_len[32];  // 각 키 길이
+  uint8_t     count;        // 캐시된 키 수
+  bool        valid;
+};
+
+// scan_key_colon_next() 내 히트 경로:
+if (key_cache_.valid) {
+  uint8_t idx = kv_count_at_depth_[depth_ - 1];
+  if (key_cache_.key_len[idx] == expected &&
+      std::memcmp(s, key_cache_.key_ptr[idx], expected) == 0 &&
+      s[expected] == '"') {
+    // Cache hit: skip scan
+    push(StringRaw, expected, s - data_);
+    p_ = s + expected + 1;
+    return colon_skip();
+  }
+  key_cache_.valid = false;  // miss → invalidate
+}
+```
+
+**예상 citm 효과**: 키 스캔 90% 제거 → scan_key_colon_next() 14 cy/tok → ~1-2 cy/tok (memcmp만)
+
+---
+
+## Phase 60-A — AArch64 push() Shallow-Depth Fast Path ⭐⭐⭐⭐
+
+**목표**: M1 twitter 246 → ~218 μs (-11%) | **예상 효과**: -3 to -4 cy/tok
+
+**이론**: twitter.json 최대 깊이 ≤4. 64비트 비트스택(7 ops) → 4-state compact machine (3 ops):
+
+```
+// 현재 push() 핵심 (7 ops, 항상 실행):
+const bool in_obj = !!(obj_bits_ & mask);      // AND + TEST
+const bool is_key = !!(kv_key_bits_ & mask);   // AND + TEST
+const bool has_el = !!(has_elem_bits_ & mask);  // AND + TEST
+sep = is_val ? 2 : has_el;                      // CMOV
+kv_key_bits_ ^= (in_obj ? mask : 0);            // CMOV + XOR
+has_elem_bits_ |= mask;                          // OR
+
+// Phase 60-A 제안 (depth ≤ 8, 3-4 ops):
+// compact_state: bit0=in_obj, bit1=is_key, bit2=has_elem
+uint8_t s = shallow_state_;
+sep = (s & 1) & !(s & 2) ? 2 : (s & 4) ? 1 : 0;  // 2 CMOV
+s = (s & ~2u) | (((s & 1) ? ~(s >> 1) : 0) & 2u); // toggle is_key if in_obj
+s |= 4u;  // has_elem = true
+shallow_state_ = s;
+```
+
+yyjson은 separator를 parse 시 계산하지 않으므로 이 비용이 0임. 본 Phase는 격차의 절반을 회수한다.
+
+---
+
+## Phase 60-B — AArch64 Short-Key Scalar Fast Path ⭐⭐⭐
+
+**목표**: M1 twitter 218 → ~204 μs (-7%) | **예상 효과**: -1.5 to -2.5 cy/tok
+
+**이론**: twitter.json 키의 36%가 ≤8자. 순수 스칼라 `while` 루프는 NEON setup 없이 이 경우 더 빠르며, GPR→SIMD 의존성이 없어 Phase 57의 실패 원인과 무관하다.
+
+```
+NEON 경로 (≤8자 키): load + 2×ceq + or + vmaxvq = ~12 cycles
+스칼라 경로 (≤8자 키): while(*e != '"') ++e; = ~6-8 cycles
+
+분기 설계:
+  스칼라로 최대 16B 스캔 → 없으면 NEON fallback
+  NEON은 스칼라와 별개 파이프라인 → 직렬 의존성 없음 (Phase 56-5와 다름)
+```
+
+---
+
+## 잔여 과제 우선순위 로드맵
+
+```
+우선순위 | Phase  | 대상                        | 예상 효과    | 리스크
+────────────────────────────────────────────────────────────────────────
+1 (즉시) | 58-A   | Snapdragon mixed twitter     | -4 to -6%   | 낮음
+         |        | 342 → ≤323 μs               |             |
+────────────────────────────────────────────────────────────────────────
+2 (즉시) | 59     | x86_64 citm schema cache     | -15 to -22% | 중간
+         |        | 757 → ≤592 μs               |             |
+────────────────────────────────────────────────────────────────────────
+3 (중기) | 60-A   | M1 push() shallow path       | -10 to -12% | 중간
+         |        | 246 → ~218 μs               |             |
+────────────────────────────────────────────────────────────────────────
+4 (중기) | 60-B   | M1 short-key scalar scan     | -5 to -7%   | 낮음
+         |        | 218 → ~204 μs               |             |
+────────────────────────────────────────────────────────────────────────
+5 (장기) | 60-C   | M1 완전 1.2× (≤147 μs)      | 미지수       | 높음
+         |        | 근본적 알고리즘 변화 필요    |             |
+────────────────────────────────────────────────────────────────────────
+```
+
+> **M1 완전 1.2× 현실적 전망**: Phase 60-A+B 적용 시 M1 twitter ~204μs 예상. yyjson 176μs 대비 +13.6% — 1.2× (≤147μs)까지는 추가 ~29% 개선이 필요하며, 이는 separator 제거 + 새 AArch64 Stage 1 병행 없이는 달성 어렵다.
