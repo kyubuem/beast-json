@@ -52,16 +52,21 @@ JSON을 물리적으로 파싱하고 직렬화하는 절대적인 "엔진부"입
   - **필수 구현 접근자**: `as_int64()`, `as_double()`, `as_string_view()`, `as_bool()`, `operator[](std::string_view)`, `operator[](size_t)`.
 - **`beast::parse()`**: 코어의 `parse_staged()`를 감싸는 래퍼 함수.
 
-### Layer 4: Modern Error Handling (`std::optional`)
+### Layer 4: Modern Error Handling (`std::optional`) & Fluent Chaining
 기존의 복잡한 예외(Exception) 던지기나 에러 코드 반환 대신, C++17의 `std::optional`을 활용하여 **"안전하고 직관적인 에러 핸들링"** 체계를 구축합니다.
 
 - **안전한 데이터 추출 (Safe Accessors)**:
   - `std::optional<int64_t> get_int64() const` 
   - `std::optional<std::string_view> get_string() const`
   - 값이 존재하지 않거나 타입이 틀릴 경우 `std::nullopt`를 반환하여 사용자가 `if (auto val = obj["key"].get_int64())` 형태로 매우 우아하게 에러를 처리할 수 있게 합니다.
-- **예외 발생 최소화**: 코어 파싱 에러(Syntax Error)를 제외한 데이터 탐색/추출 에러는 예외(Throw) 시스템을 쓰지 않고 `optional`로 단일화하여 성능과 편의성을 극대화합니다.
 
-이 구조 전환을 통해 사용자는 "단순히 `beast::Value v = beast::parse(json);`을 썼을 뿐인데 세계에서 가장 빠르고 안전하다"는 경험을 하게 됩니다.
+- **세계 최고 수준의 사용자 편의성 (Extreme Usability)**:
+  - **1) Fluent Chaining (무예외 연속 탐색)**: `doc["users"][0]["name"]` 처럼 깊은 탐색을 할 때, 중간에 "users"가 배열이 아니거나 "name" 키가 없어도 예외(Throw)를 던지며 프로그램이 죽지 않습니다. 대신 내부적으로 `Null/Error Value` 상태를 전파하여 맨 마지막에 `.get_string().value_or("Unknown")`으로 한 번에 안전하게 폴백(Fallback)할 수 있는 Monadic 기법을 도입합니다.
+  - **2) Default Value Getters**: `doc["age"].get_int64(18)` 처럼 값이 없거나 타입이 다를 때 기본값을 즉시 반환하는 직관적인 API 제공.
+  - **3) Range-based For Loop & Structured Binding**: `for (auto [key, val] : obj.items()) { ... }` 형태로 C++17 구조적 바인딩을 완벽 지원하여 파이썬 딕셔너리를 순회하는 것과 동일한 극한의 편의성 제공.
+  - **4) JSON Pointer (Deep Access)**: `doc.at("/api/config/timeout")` 경로를 통해 깊숙한 값을 한 번에 추출.
+
+이 구조 전환을 통해 사용자는 "단순히 `beast::Value v = beast::parse(json);`을 썼을 뿐인데 세계에서 가장 빠르고, 파이썬보다 직관적이며 우아하다"는 극강의 개발자 경험(DX)을 하게 됩니다.
 
 ---
 
