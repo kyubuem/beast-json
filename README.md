@@ -21,67 +21,67 @@
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **203** | **3.04 GB/s** | **150** |
-| yyjson | 277 | 2.23 GB/s | 140 |
-| beast::rtsm | 339 | 1.82 GB/s | — |
-| nlohmann | 4,411 | 140 MB/s | 1,479 |
+| **beast::lazy** | **201** | **3.07 GB/s** | **126** |
+| yyjson | 282 | 2.19 GB/s | 133 |
+| beast::rtsm | 324 | 1.90 GB/s | — |
+| nlohmann | 4,213 | 146 MB/s | 1,200 |
 
-> beast::lazy is **36% faster** than yyjson on parse. Two-phase AVX-512 Stage 1+2 parsing with KeyLenCache delivers **3.04 GB/s** parse throughput.
+> beast::lazy is **40% faster** than yyjson on parse. Two-phase AVX-512 Stage 1+2 parsing with KeyLenCache delivers **3.07 GB/s** parse throughput.
 
 #### canada.json — 2.2 MB · dense floating-point arrays
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **1,597** | **1.38 GB/s** | **963** |
-| beast::rtsm | 2,109 | 1.04 GB/s | — |
-| yyjson | 2,946 | 0.75 GB/s | 3,840 |
-| nlohmann | 26,847 | 82 MB/s | 7,420 |
+| **beast::lazy** | **1,390** | **1.58 GB/s** | **804** |
+| beast::rtsm | 2,430 | 0.90 GB/s | — |
+| yyjson | 2,659 | 0.83 GB/s | 3,326 |
+| nlohmann | 22,678 | 97 MB/s | 6,415 |
 
-> beast::lazy is **84% faster** to parse and **4.0× faster** to serialize than yyjson. AVX-512 64B whitespace skip delivers massive gains on coordinate-heavy JSON.
+> beast::lazy is **91% faster** to parse and **4.1× faster** to serialize than yyjson. AVX-512 64B whitespace skip delivers massive gains on coordinate-heavy JSON. Canada improved further after the KeyLenCache correctness fix (false-positive cache invalidations eliminated).
 
 #### citm_catalog.json — 1.7 MB · event catalog, string-heavy
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **582** | **2.90 GB/s** | **388** |
-| yyjson | 795 | 2.12 GB/s | 248 |
-| beast::rtsm | 1,218 | 1.38 GB/s | — |
-| nlohmann | 9,248 | 182 MB/s | 1,273 |
+| **beast::lazy** | **637** | **2.65 GB/s** | **323** |
+| yyjson | 731 | 2.31 GB/s | 229 |
+| beast::rtsm | 1,147 | 1.47 GB/s | — |
+| nlohmann | 9,393 | 180 MB/s | 1,209 |
 
-> beast::lazy is **37% faster** than yyjson. **Phase 59 KeyLenCache** replaced 2,187 AVX-512 key scans with O(1) byte comparisons — citm went from near-parity (−3%) to **+37%** advantage.
+> beast::lazy is **15% faster** than yyjson. **Phase 59 KeyLenCache** replaces repeated AVX-512 key scans with O(1) byte comparisons on repeated-schema objects. The correctness guard (`s[cl+1] == ':'`) adds ~2 reads per cache check, narrowing the margin from the pre-fix ~37% to the current **+15%**.
 
 #### gsoc-2018.json — 3.2 MB · large object array
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **800** | **4.06 GB/s** | **452** |
-| beast::rtsm | 1,093 | 2.97 GB/s | — |
-| yyjson | 1,708 | 1.90 GB/s | 1,503 |
-| nlohmann | 15,345 | 212 MB/s | 11,690 |
+| **beast::lazy** | **703** | **4.62 GB/s** | **454** |
+| beast::rtsm | 983 | 3.31 GB/s | — |
+| yyjson | 1,603 | 2.03 GB/s | 1,364 |
+| nlohmann | 14,003 | 232 MB/s | 10,876 |
 
-> beast::lazy is **114% faster** to parse and **3.3× faster** to serialize than yyjson. Parse throughput reaches **4.06 GB/s**.
+> beast::lazy is **128% faster** to parse and **3.0× faster** to serialize than yyjson. Parse throughput reaches **4.62 GB/s**.
 
 #### Summary
 
 | Benchmark | Beast vs yyjson (parse) | Beast vs yyjson (serialize) |
 | :--- | :--- | :--- |
-| twitter.json | **Beast 36% faster** ✅ | Beast ~7% slower |
-| canada.json | **Beast 84% faster** ✅ | **Beast 4.0× faster** |
-| citm_catalog.json | **Beast 37% faster** ✅ | yyjson 57% faster |
-| gsoc-2018.json | **Beast 114% faster** ✅ | **Beast 3.3× faster** |
+| twitter.json | **Beast 40% faster** ✅ | Beast ~5% faster |
+| canada.json | **Beast 91% faster** ✅ | **Beast 4.1× faster** |
+| citm_catalog.json | **Beast 15% faster** | yyjson 41% faster |
+| gsoc-2018.json | **Beast 128% faster** ✅ | **Beast 3.0× faster** |
 
-Beast **beats yyjson on parse speed for all 4 files** — the first time the full 1.2× sweep has been achieved on x86_64. Phase 59 (KeyLenCache) was the decisive breakthrough, eliminating SIMD key scanning for repeated-schema objects and taking citm from near-parity to **+37%**.
+Beast **beats yyjson on parse speed for all 4 files**. twitter (+40%), canada (+91%), and gsoc (+128%) all exceed the 1.2× target comfortably. citm sits at +15% after a correctness fix to the KeyLenCache check — recovering the false-positive cache hit path that caused parse failures on M1 Pro.
 
 #### 1.2× Goal Progress (beat yyjson by ≥20% on all 4 files)
 
 | File | Target (yyjson/1.2) | Current | Status |
 | :--- | ---: | ---: | :---: |
-| twitter.json | ≤231 μs | **203 μs** | ✅ |
-| canada.json | ≤2,455 μs | **1,597 μs** | ✅ |
-| citm_catalog.json | ≤663 μs | **582 μs** | ✅ 🎉 |
-| gsoc-2018.json | ≤1,423 μs | **800 μs** | ✅ |
+| twitter.json | ≤235 μs | **201 μs** | ✅ |
+| canada.json | ≤2,216 μs | **1,390 μs** | ✅ |
+| citm_catalog.json | ≤609 μs | 637 μs | 🟡 +15% |
+| gsoc-2018.json | ≤1,336 μs | **703 μs** | ✅ |
 
-> **All 4 files beat yyjson by ≥20%** simultaneously as of Phase 59. The final holdout was citm_catalog.json — now 37% faster than yyjson thanks to schema-prediction caching.
+> citm is 15% faster than yyjson (just below the 20% bar after the KeyLenCache false-positive guard was tightened). The guard `s[cl+1] == ':'` is correctness-critical — optimizing the cache-hit path further is the next x86_64 micro-goal.
 
 ---
 

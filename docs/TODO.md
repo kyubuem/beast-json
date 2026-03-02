@@ -22,10 +22,12 @@
 
 | 파일 | Beast | yyjson | Beast vs yyjson | 1.2× 목표 | 달성 |
 |:---|---:|---:|:---:|---:|:---:|
-| twitter.json | **203 μs** | 277 μs | Beast **+36%** | ≤231 μs | ✅ |
-| canada.json | **1,597 μs** | 2,946 μs | Beast **+84%** | ≤2,455 μs | ✅ |
-| citm_catalog.json | **582 μs** | 795 μs | Beast **+37%** | ≤663 μs | ✅ 🎉 |
-| gsoc-2018.json | **800 μs** | 1,708 μs | Beast **+114%** | ≤1,423 μs | ✅ |
+| twitter.json | **201 μs** | 282 μs | Beast **+40%** | ≤235 μs | ✅ |
+| canada.json | **1,390 μs** | 2,659 μs | Beast **+91%** | ≤2,216 μs | ✅ |
+| citm_catalog.json | **637 μs** | 731 μs | Beast **+15%** | ≤609 μs | 🟡 |
+| gsoc-2018.json | **703 μs** | 1,603 μs | Beast **+128%** | ≤1,336 μs | ✅ |
+
+> **citm 주의**: KeyLenCache 버그 픽스(`s[cl+1]==':'` 조건 추가)가 캐시 히트 체크에 2개의 메모리 읽기를 추가. citm은 반복 스키마 히트가 빈번해 직접 영향을 받아 +37% → +15%로 마진 감소. canada는 false-positive 제거 효과로 1,597→1,390μs 개선.
 
 ### 완료된 x86_64 최적화 (연대순)
 
@@ -46,9 +48,13 @@
 
 ### 잠재 개선 아이디어 (선택적)
 
-- **canada 회귀 복구**: Phase 59 KeyCache overhead로 1,448→1,597μs (+10%). PGO 재생성이나 캐시 조건 최적화로 일부 회복 가능. 단, 여전히 yyjson +84% 우위.
-- **citm 직렬화**: Beast 388μs vs yyjson 248μs → yyjson 56% 빠름. Serialize 최적화 여지 있음.
-- **twitter 직렬화**: Beast 150μs vs yyjson 140μs → 거의 동률. 개선 여지 적음.
+- **citm 1.2× 재달성 (우선순위 🟡)**: `s[cl+1]==':'` 가드가 핫패스에 추가 읽기를 유발. 개선 방향:
+  - `s[cl+1]`만으로 false-positive를 충분히 걸러낼 수 있으면 `s[cl-1]!=':'` 삭제 검토
+  - 또는 캐시 히트 시 추가 읽기를 파이프라인 이전 연산으로 숨기는 방법 (prefetch)
+  - 또는 캐시 조건을 `== ':'` 단일 비교로 줄이고 나머지를 다른 가드로 대체
+- **citm 직렬화**: Beast 323μs vs yyjson 229μs → yyjson 41% 빠름. Serialize 최적화 여지 있음.
+- **canada/gsoc 직렬화**: Beast이 4×+ 더 빠름. 추가 최적화 불필요.
+- **twitter 직렬화**: Beast 126μs vs yyjson 133μs → Beast 5% 앞섬 (버그 픽스 후 개선).
 
 ---
 
