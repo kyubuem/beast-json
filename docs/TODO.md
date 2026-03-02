@@ -1,6 +1,6 @@
 # Beast JSON Optimization — TODO
 
-> **최종 업데이트**: 2026-03-02 (Phase 59+64 + 버그 픽스 — citm parse 회귀, serialize 격차 개선 계획 수립)
+> **최종 업데이트**: 2026-03-02 (Phase 65 ✅ · Phase 66/66-B/67 ❌ REVERTED — x86 serialize dump() 구조 변경 전면 동결)
 
 ---
 
@@ -193,33 +193,38 @@ std::string dump() const { std::string out; dump(out); return out; /* NRVO */ }
 
 ---
 
-### Phase 67 — Serialize: sep+quote 배치 쓰기 (중기 🟢)
+### ~~Phase 67~~ — Serialize: sep+quote 배치 쓰기 ❌ **REVERTED**
 
-**목표**: 전 파일 serialize ~5-10% 개선
+**시도**: switch 외부의 `if (sep) *w++` 를 각 case 내부로 이동 + StringRaw 케이스에서 `sep + '"'` 를 `uint16_t` 2바이트 memcpy 배치 쓰기.
 
-**현재 동작**: TapeNode 처리 시 separator(`','` 또는 `':'`)와 여는 따옴표(`'"'`)를 각각 `*w++ = c` 로 2번 쓰기.
-
-**최적화**: 연속 2바이트를 단일 16-bit store로 합침:
 ```cpp
-// Before:
-if (sep) *w++ = (sep == 2) ? ':' : ',';
-*w++ = '"';
-
-// After (Phase 67):
-if (sep) {
-    const uint16_t sq = (sep == 2)
-        ? (uint16_t)('"' << 8 | ':')   // little-endian: writes ':', '"'
-        : (uint16_t)('"' << 8 | ',');
-    std::memcpy(w, &sq, 2);
-    w += 2;
-} else {
-    *w++ = '"';
+// Phase 67 시도 (원복됨):
+case TapeNodeType::StringRaw: {
+  if (sep) {
+    const uint16_t sq = (sep == 0x02u)
+        ? static_cast<uint16_t>(':' | ('"' << 8))
+        : static_cast<uint16_t>(',' | ('"' << 8));
+    std::memcpy(w, &sq, 2); w += 2;
+  } else { *w++ = '"'; }
+  // ...
 }
+case TapeNodeType::Integer: ...
+  if (sep) *w++ = (sep == 0x02u) ? ':' : ',';
+  // ...
 ```
-+ 닫는 `'"'` 직후에 다음 노드의 separator를 미리 내다보는 방식 (look-ahead 1) 검토.
 
-**예상 효과**: store 수 감소 → branch 2개 → 1개 → citm serialize 추가 ~5% 개선
-**우선순위**: 🟢 Phase 66 이후
+**PGO 결과**:
+- citm parse: 598→715μs (yyjson 722→747μs) → 비율 0.828(+21%) → 0.957(+4.5%) **회귀**
+- citm serialize: 332→324μs (미미한 개선, parse 회귀가 압도)
+
+**실패 원인**: Phase 66/66-B 와 동일한 PGO/LTO 크로스 컨테미네이션.
+- switch 구조 변경이 GCC LTO에서 serialize 루프와 parse 코드의 공동 레이아웃을 재배치
+- parse I-cache 효율 저하 → citm parse +21% → +4.5% (1.2× 목표 미달)
+- serialize 루프는 parse 코드와 동일 LTO 단위에 있어, **switch 구조 변경 자체가 금기**
+
+**교훈**: 외부 `if (sep)` 패턴은 동결(frozen). switch 내부 구조 변경은 어떤 형태이든 parse 성능에 영향.
+
+**코드**: 완전 원복 (외부 `if (sep)` 단일 쓰기 유지, Phase 67 실패 이유 주석 추가)
 
 ---
 

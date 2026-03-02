@@ -5121,6 +5121,12 @@ public:
       const uint8_t sep = (meta >> 16) & 0xFFu;
 
       // Write pre-computed separator (branch-free for common case)
+      // Phase 67 attempt (sep-per-case + StringRaw batch write) REVERTED:
+      // moving sep write inside each switch case changed the LTO code layout,
+      // causing citm parse to regress from +21% to +4.5% vs yyjson.
+      // Root cause: same PGO/LTO cross-contamination pattern as Phase 66/66-B.
+      // The serialize loop and parse code share one LTO unit — any structural
+      // change to the serialize switch affects parse I-cache layout.
       if (sep)
         *w++ = (sep == 0x02u) ? ':' : ',';
 
