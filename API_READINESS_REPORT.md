@@ -1,55 +1,63 @@
-# 📊 Beast JSON — Public API Readiness Report
+# 📊 Beast JSON 1.0 Release — Technical API Blueprint
 
-GitHub Page/오픈소스 정식 릴리즈를 앞두고 `beast_json.hpp`의 Public API 성숙도를 검토했습니다. 결론부터 말씀드리면, **"성능은 세계 1위이지만, 사용성(API)은 아직 미완성"** 상태입니다.
+이 문서는 차기 에이전트들이 **"Beast JSON 1.0 정식 릴리즈"** 를 완벽하게 수행할 수 있도록, 삭제해야 할 Legacy 코드의 물리적 식별자와 새로 구축해야 할 `beast::lazy` API 아키텍처를 상세히 기술한 **Technical Blueprint(기술 설계서)** 입니다.
 
-## 🟢 완벽한 부분 (Ready)
-
-1. **표준 DOM API (`beast::json::Value`)**
-   - 사용자 친화적인 nlohmann/json 스타일 완벽 지원.
-   - `operator[]`, `as_int()`, `as_string()`, 반복자(`begin()`, `end()`) 등 직관적이고 완벽한 API를 갖추고 있습니다.
-   - 하지만 이 DOM은 객체 생성 오버헤드가 있어 우리의 "세계 최고 속도"를 뽐내는 주인공이 아닙니다.
-
-2. **단일 헤더(Single Header) 구조**
-   - 복잡한 빌드 과정 없이 `#include "beast_json.hpp"` 하나로 즉시 사용 가능한 구조는 오픈소스 배포에 매우 적합합니다.
-
-3. **Parser / Serializer 성능**
-   - `beast::lazy::parse()` 및 `doc.dump()`는 압도적인 벤치마크 데이터를 갖추고 있어 홍보 포인트로 완벽합니다.
+현재 `main` 브랜치 소스코드(`beast_json.hpp`) 기준으로 분석되었습니다.
 
 ---
 
-## 🔴 치명적인 결함 (Blockers before Release)
+## 🗑️ PART 1: Legacy 하위 호환 코드 삭제 명세서 
+가장 먼저 수행해야 할 작업은 구세대 파서 로직(DOM 및 스칼라 파서)의 완전한 궤멸입니다. 이를 통해 바이너리 크기를 줄이고 API 가독성을 확보합니다.
 
-우리의 주력 병기이자 가장 빠른 **`beast::lazy::Value` API의 기능 누락**이 가장 큽니다.
+### 1-1. 삭제 대상 핵심 클래스 및 구조체 (DOM 표현)
+이 클래스들은 느린 메모리 할당(동적 할당) 기반의 DOM 객체들입니다. 모두 제거하십시오.
+- `class Value` (Line ~2119 부근 시작)
+  - 관련된 모든 `as_string`, `as_int`, `operator[]` 등 멤버 함수 일절.
+  - 관련 `from_json`, `to_json` 오버로딩 전면 삭제.
+- `class Object` 및 `class Array`
+- `struct JsonMember`
+- `class Document` (DOM Document)
+- `class StringBuffer` / `class TapeSerializer` 
+  - (단, `beast::lazy::Value::dump()`에서 쓰이는 신규 Serializer 로직은 보존해야 함에 유의)
 
-현재 `beast::lazy::parse(json)`을 호출하면 `beast::lazy::Value`가 반환됩니다. 하지만 이 클래스를 열어보면 다음과 같은 기능밖에 없습니다.
-```cpp
-// 현재 beast::lazy::Value의 모든 기능
-bool is_object() const;
-bool is_array() const;
-std::string dump() const;
-```
-
-**[누락된 필수 API]**
-- **값 추출 불가**: 숫자를 `int`나 `double`로 꺼내는 `as_int()`, `as_double()`이 없습니다. Tape 오프셋만 가지고 있을 뿐, 실제 사용자가 값을 읽을 방법이 없습니다.
-- **문자열 추출 불가**: `as_string_view()` 가 없습니다. 
-- **오브젝트/배열 탐색 불가**: `operator[](const char* key)`, `operator[](size_t index)` 배열/오브젝트 항목 접근 기능이 없습니다. `for (auto& item : obj)`와 같은 이터레이터도 없습니다.
-
-> 사용자가 245μs 만에 JSON을 파싱해도, 특정 키의 값을 읽을 수 있는 API가 제공되지 않아 사실상 "파싱 후 직렬화" 작업 외에는 아무것도 할 수 없는 상태입니다.
+### 1-2. 삭제 대상 파서 백엔드 (구문 분석 로직)
+`beast::lazy` 타겟은 `TapeArena` 기반의 2-Pass `parse_staged` 등 특수 최적화 파서를 씁니다. 구형 문자열 토크나이저는 삭제 대상입니다.
+- `class Parser` 내의 구형 구조:
+  - Phase 50 이전의 `void parse()`, `parse_string()`, `parse_number()`, `parse_object()`, `parse_array()` 등 DOM 객체(`Value`)를 직접 리턴하거나 구성하는 파서 메소드 전부.
+  - `parse_string_swar()`, `skip_whitespace_swar()`, `vgetq_lane` 류의 레거시 스칼라/벡터 fallback 함수(현재 Tape 기반 Lazy Parser가 사용하지 않는 함수 100% 식별 후 제거).
 
 ---
 
-## 🛠️ 해결 방안 (Action Items)
+## 🏗️ PART 2: `beast::lazy` 아키텍처 개편 및 Core-Utils 분리
+파일의 네임스페이스 구조를 `beast::json` (전면 삭제) -> `beast::core` (엔진) / `beast::utils` (사용자 API) / `beast::lazy` (외부 노출 인터페이스) 로 논리적 재구축해야 합니다.
 
-GitHub Page에 라이브러리로써 당당히 올리기 위해서는 **다음 페이즈에서 Lazy DOM Accessor API를 구현**해야 합니다.
+### 2-1. `beast::lazy::Value` Zero-Overhead Accessors (필수)
+현재 `dump()`, `is_object()`, `is_array()`만 존재하는 이 클래스에 생명을 불어넣어야 합니다.
 
-1. **Lazy Value Accessors**
-   - `as_int64()`, `as_double()`, `as_bool()`, `as_string_view()`
-   - 빠른 파싱을 위해 지연(Lazy)된 숫자/문자열 구조를 실제 C++ 타입으로 변환해주는 함수 구현 (기존 Russ Cox 로직을 파싱 시점이 아닌 접근 시점으로 이동)
+- **원시타입 추출기 (Primitive Extractors)**
+  - `std::string_view as_string_view() const` : `TapeNodeType::StringRaw`를 검사하고, 테이프 오프셋에서 원본 메모리 `string_view` 반환.
+  - `int64_t as_int64() const`
+  - `double as_double() const` : **[핵심]** 파서 타임에 실행되던 Russ Cox / Beast Float 부동소수점 스캐너 로직(128-bit PowMantissa)을 파서에서 잘라내어 이 `as_double()` 내부로 이식(Lazy Evaluation)해야 파싱 속도가 200μs 대로 유지됩니다.
 
-2. **Lazy Object/Array Navigation**
-   - `Value operator[](std::string_view key)` (오브젝트 키 검색 - 선형 탐색 기반)
-   - `Value operator[](size_t index)` (배열 인덱스 접근)
-   - `ArrayView`, `ObjectView` 형태의 래퍼(Wrapper) 클래스를 통한 Iterator 제공
+- **컨테이너 네비게이션 (Container Navigate)**
+  - `Value operator[](std::string_view key) const` : 현재 오브젝트의 시작 오프셋부터 배열 길이만큼 테이프를 선형 스캔하며 키 문자열 비교 (SIMD 활용 권장).
+  - `Value operator[](size_t index) const` : 배열 요소의 O(1) 또는 SIMD 스킵 기반 접근.
 
-### 결론
-지금 당장 GitHub Page를 런칭하기에는 "파싱은 빠르지만, 파싱한 데이터를 쓸 수 없는" 상태입니다. Phase 59 (또는 다음 페이즈)의 목표는 **"Lazy 파서의 압도적 속도를 깎아먹지 않는, 제로 오버헤드 Lazy Accessor API 개발"**이 되어야 합니다. 이 작업이 끝나면 자신 있게 1.0 버전을 런칭할 수 있습니다!
+### 2-2. Utils: Auto Serialize / Deserialize 
+사용자 C++ 구조체를 맵핑하기 위한 템플릿/매크로 메타프로그래밍 유틸리티를 추가합니다.
+
+- **C++ STL 컬렉션 호환성**: `std::vector<T>`, `std::map<std::string, T>`, `std::optional<T>`가 `to_json` / `from_json` 패턴이나 `BEAST_DEFINE_STRUCT()` 매크로에 의해 `beast::lazy::Value`와 완벽히 상호 호환되어야 함.
+
+---
+
+## 📜 PART 3: 전 세계 JSON 표준 (RFC) 100% 준수
+GitHub 릴리즈 시 개발자들에게 강력히 어필할 "무결성"을 달성하기 위한 구현 디테일.
+
+1. **RFC 8259 무결성 (코어 레벨 방어)**
+   - 스택 오버플로우 공격을 막기 위한 **심도 제한(Max Depth Limit)** 하드코딩 또는 옵션 처리.
+   - 유니코드 Surrogate Pair (e.g. `\uD83D\uDE00`) 디코딩 무결성 지원. (기존 코드가 지원하는지 필히 테스트 보강)
+2. **Optional RFC 지원 (Utils 레벨 구현)**
+   - **JSON Pointer (RFC 6901)** : `doc.at("/users/0/name")` 형태의 액세서 구축.
+   - **JSON Patch (RFC 6902)** : 성능 저하 없이 DOM 부분 수정을 가능하게 하는 인터페이스 확장.
+
+이 문서를 챗봇 / 에이전트의 프롬프트 컨텍스트로 활용하여 순차적으로 1.0 릴리즈 코딩을 시작하십시오.
