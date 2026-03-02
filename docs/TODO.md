@@ -212,22 +212,24 @@ if (sep) {
 
 **현상**: Phase 57에서 245μs이던 M1 twitter가 Phase 59+64 적용 후 266μs (+21μs) 회귀.
 
+**Phase 66 실패에서 얻은 교훈 적용**: 코드 변경이 PGO 프로파일 경유 간접적으로 성능에 영향을 줄 수 있음. 따라서 이진탐색 시 **PGO 없이 -O3 Release 빌드**로 먼저 측정해 실제 코드 효과를 분리.
+
 **조사 방법**: M1에서 Phase 59 OFF / Phase 64 OFF 각각 빌드 후 이진탐색:
 
-| 빌드 조합 | 예상 twitter μs | 결론 |
-|:---|:---:|:---|
-| Phase 57만 (baseline) | ~245 | — |
-| Phase 59 ON + Phase 64 OFF | ? | Phase 64가 범인이면 여기서 245 유지 |
-| Phase 59 OFF + Phase 64 ON | ? | Phase 59가 범인이면 여기서 245 유지 |
-| Phase 59 ON + Phase 64 ON | ~266 | 현재 상태 |
+| 빌드 조합 | 측정 방법 | 결론 |
+|:---|:---|:---|
+| Phase 57 baseline | `git checkout Phase57-tag` + Release 빌드 | 기준값 |
+| Phase 59 ON + Phase 64 OFF | `#define BEAST_NO_PHASE64` 플래그 | 64 단독 영향 분리 |
+| Phase 59 OFF + Phase 64 ON | `#define BEAST_NO_PHASE59` 플래그 | 59 단독 영향 분리 |
+| Phase 59 ON + Phase 64 ON | 현재 코드 | 확인 |
 
-**가설 A (Phase 64 LUT)**: `sep_lut[cur_state_]` + `ncs_lut[cur_state_]` 두 번의 메모리 로드가 M1 OoO의 AGU 포트를 포화시켜 오히려 스페큘레이션 저해. 해결: M1에서는 비트 연산 방식으로 fallback (`#ifdef __APPLE__`).
+**가설 A (Phase 64 LUT, 유력)**: `sep_lut[cur_state_]` + `ncs_lut[cur_state_]` 두 번의 메모리 로드가 M1의 AGU 포트에 추가 압박. M1은 L1D 접근 레이턴시가 낮지만(4cy), 루프당 2회 연속 로드는 OoO window 압박. 해결: M1에서는 비트 연산 방식으로 fallback (`#ifdef __APPLE__`).
 
-**가설 B (Phase 59 KeyLenCache)**: twitter는 mixed-schema → cache miss 비율 높음. 매 key마다 `cl != 0` check + false branch → 분기 예측기 오염. 해결: miss 누적 시 캐시 비활성화 (adaptive disabling).
+**가설 B (Phase 59 KeyLenCache, 가능)**: twitter는 mixed-schema → cache miss 비율 높음. 매 key마다 `cl != 0` branch를 통과하지만 miss → M1 분기 예측기(BTB)에 불규칙 패턴 부하. 해결: twitter-like 파일에서 자동 비활성화 (miss rate threshold).
 
-**가설 C (빌드 플래그 변경)**: Phase 64와 함께 `-fno-lto` 도입 → LTO 최적화 손실. M1에서 LTO 재활성화 가능성 조사.
+**가설 C (빌드 플래그)**: Phase 64와 함께 `-fno-lto` 도입 → Apple Clang LTO 최적화 손실. 별도 LTO ON/OFF 비교.
 
-**우선순위**: 🔴 M1 twitter 개선의 전제 조건
+**우선순위**: 🔴 M1 twitter 개선의 전제 조건 (M1에서만 실행 가능한 조사)
 
 ---
 
