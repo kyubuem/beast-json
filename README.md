@@ -89,64 +89,73 @@ Beast **beats yyjson by ≥1.2× on parse for ALL 4 files** (Phase 75 milestone)
 
 > **Environment**: macOS 26.3, Apple Clang 17 (`-O3 -fno-lto -fno-vectorize -fno-slp-vectorize` per target), Apple M1 Pro.
 > Phase 31-64 applied (NEON string gate · Action LUT · SWAR float scanner · Pure NEON consolidation · LUT-based `push()` · **KeyLenCache schema-prediction — Phase 59 + correctness fix**).
-> All benchmarks: 1,000 iterations. All results verified correct (✓ PASS).
->
-> ⚠️ **First M1 Pro measurement with KeyLenCache (Phase 59) active.** Previous results were Phase 31-57 only. A false-positive bug in the cache (cross-schema depth reuse) has been fixed in this release; these numbers reflect the corrected implementation.
+> All benchmarks: 1,000 iterations with **LLVM PGO** (`-fprofile-generate` → `llvm-profdata merge` → `-fprofile-instr-use`). All results verified correct (✓ PASS).
 
 #### twitter.json — 616.7 KB · social graph, mixed types
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| yyjson | 173 | 3.57 GB/s | 105 |
-| **beast::lazy** | **266** | **2.31 GB/s** | **112** |
-| beast::rtsm | 277 | 2.22 GB/s | — |
-| nlohmann | 3,616 | 171 MB/s | 1,396 |
+| yyjson | 176 | 3.51 GB/s | 102 |
+| **beast::lazy** | **228** | **2.71 GB/s** | **100** |
+| beast::rtsm | 267 | 2.31 GB/s | — |
+| nlohmann | 3,146 | 196 MB/s | 1,067 |
 
-> Serialize is **near yyjson** (112 vs 105 μs, 7% gap). Parse: yyjson leads on this mixed-schema workload where KeyLenCache schema reuse is limited.
+> **Serialize ties yyjson** (100 vs 102 μs). PGO brought parse from 266 μs → **228 μs (−14%)** via branch-prediction tuning for mixed-type dispatch.
 
 #### canada.json — 2.2 MB · dense floating-point arrays
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| yyjson | 1,464 | 1.50 GB/s | 2,219 |
-| **beast::lazy** | **1,681** | **1.31 GB/s** | **946** |
-| beast::rtsm | 1,904 | 1.15 GB/s | — |
-| nlohmann | 20,115 | 109 MB/s | 6,892 |
+| yyjson | 1,453 | 1.51 GB/s | 2,245 |
+| **beast::lazy** | **1,794** | **1.23 GB/s** | **813** |
+| beast::rtsm | 1,873 | 1.17 GB/s | — |
+| nlohmann | 16,527 | 133 MB/s | 6,471 |
 
-> beast::lazy serialize is **2.3× faster** than yyjson. KeyLenCache narrows the parse gap from 34% → **15%** vs Phase 57 baseline.
+> beast::lazy serialize is **2.76× faster** than yyjson. PGO reduced serialize from 946 μs → **813 μs (−14%)**.
 
 #### citm_catalog.json — 1.7 MB · event catalog, string-heavy
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| yyjson | 480 | 3.52 GB/s | 167 |
-| **beast::lazy** | **563** | **2.99 GB/s** | **287** |
-| beast::rtsm | 1,020 | 1.65 GB/s | — |
-| nlohmann | 8,335 | 202 MB/s | 1,362 |
+| yyjson | 474 | 3.56 GB/s | 166 |
+| **beast::lazy** | **570** | **2.96 GB/s** | **233** |
+| beast::rtsm | 946 | 1.78 GB/s | — |
+| nlohmann | 7,789 | 217 MB/s | 987 |
 
-> KeyLenCache narrows the parse gap from 34% → **17%**. 243 same-schema `performance` objects now use O(1) key-end detection on NEON too.
+> KeyLenCache narrows the parse gap to **20%**. PGO cut serialize from 287 μs → **233 μs (−19%)** — the largest single-file serialize gain.
 
 #### gsoc-2018.json — 3.2 MB · large object array
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **582** | **5.59 GB/s** | **267** |
-| beast::rtsm | 738 | 4.41 GB/s | — |
-| yyjson | 981 | 3.31 GB/s | 722 |
-| nlohmann | 14,405 | 226 MB/s | 11,996 |
+| **beast::lazy** | **584** | **5.57 GB/s** | **241** |
+| beast::rtsm | 725 | 4.48 GB/s | — |
+| yyjson | 1,004 | 3.24 GB/s | 720 |
+| nlohmann | 14,803 | 220 MB/s | 10,348 |
 
-> beast::lazy is **69% faster** to parse and **2.7× faster** to serialize than yyjson. Parse throughput reaches **5.59 GB/s** on M1 Pro.
+> beast::lazy is **72% faster** to parse and **3.0× faster** to serialize than yyjson. PGO reduced serialize from 267 μs → **241 μs (−10%)**.
 
 #### Summary
 
 | Benchmark | Beast vs yyjson (parse) | Beast vs yyjson (serialize) |
 | :--- | :--- | :--- |
-| twitter.json | yyjson 54% faster | beast 7% slower |
-| canada.json | yyjson 15% faster | **Beast 2.3× faster** |
-| citm_catalog.json | yyjson 17% faster | yyjson 72% faster |
-| gsoc-2018.json | **Beast 69% faster** ✅ | **Beast 2.7× faster** |
+| twitter.json | yyjson 30% faster | **Beast tied** (100 vs 102 μs) |
+| canada.json | yyjson 24% faster | **Beast 2.76× faster** |
+| citm_catalog.json | yyjson 20% faster | yyjson 41% faster |
+| gsoc-2018.json | **Beast 72% faster** ✅ | **Beast 3.0× faster** |
 
-Beast **dominates serialization** on gsoc and canada workloads. On gsoc-2018, beast beats yyjson on parse by **69%**. KeyLenCache (Phase 59) tightens the parse gap on citm from 34% → 17% and on canada from 34% → 15%, confirming schema-prediction benefits apply across all architectures including NEON.
+Beast **dominates serialization** on gsoc and canada workloads. On gsoc-2018, beast beats yyjson on parse by **72%** with PGO. PGO (LLVM-native pipeline) delivered consistent improvements across all serialize workloads: **−10% to −19%** per file, and a major **−14% parse improvement on twitter.json**.
+
+#### PGO Impact (non-PGO → PGO)
+
+| Benchmark | Parse Δ | Serialize Δ |
+| :--- | :--- | :--- |
+| twitter.json | **−14%** (266→228 μs) | **−11%** (112→100 μs) |
+| canada.json | +7% (1,681→1,794 μs) | **−14%** (946→813 μs) |
+| citm_catalog.json | +1% (flat) | **−19%** (287→233 μs) |
+| gsoc-2018.json | flat | **−10%** (267→241 μs) |
+
+> Parse gains concentrate on twitter (mixed-type dispatch benefits most from branch prediction). Serialize gains are universal: the tight linear tape scan benefits from PGO's hot-path inlining decisions on all files.
 
 > **Phase 57 Discovery**: "Pure NEON" (removing all scalar SWAR gates) is the optimal AArch64 strategy. GPR-SIMD mixing stalls the vector pipeline; a clean NEON-only path reduced `twitter.json` latency significantly.
 >
