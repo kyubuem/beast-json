@@ -44,14 +44,19 @@ Beast JSON을 명실상부한 **세계에서 가장 빠르고 사용하기 편�
 - [ ] `std::vector`, `std::map`, `std::optional` 등 기본 C++ STL 컨테이너에 대한 자동 맵핑 지원.
 - [ ] 해당 구조변환이 `beast::lazy::Value`의 Zero-overhead 철학을 해치지 않도록 설계 보장.
 
-## 📜 4. JSON 표준(RFC 8259) 100% 준수 검증 (Standard Compliance)
-오픈소스 라이브러리의 신뢰성을 위해 C++ JSON Test Suite 기준을 완벽히 통과해야 합니다.
+## 📜 4. 전 세계 모든 JSON 표준(RFC) 100% 완벽 준수 검증
+오픈소스 라이브러리로서의 "절대적 신뢰성"을 위해, 필수(Mandatory) 사양뿐만 아니라 선택적(Optional) 기능과 확장 표준 체계까지 세상에 존재하는 모든 JSON 관련 RFC를 빠짐없이 지원해야 합니다.
 
-- [ ] JSON Test Suite (NST, JSONChecker 등 300+개 테스트셋) 통합 및 자동화 빌드(`ctest`) 검증.
-- [ ] 극단적인 Edge Case 검토:
-  - 깊이가 깊은 다중 배열/오브젝트 (Stack Overflow 방지)
-  - UTF-8 인코딩 및 Surrogate Pair 이스케이프 정확도
-  - 부동소수점 경계값 및 비정상 숫자 포맷 거부를 엄격히 수행하는지 평가.
+- [ ] **코어 문법의 무결성 (RFC 8259, RFC 7159, RFC 4627)**:
+  - JSON Test Suite (NST, JSONChecker 등 300+개 테스트셋) 통합 및 자동화 빌드(`ctest`) 검증.
+  - 깊이 제한 방어 (Stack Overflow 방지), UTF-8 / Surrogate Pair 이스케이프 완벽 처리, 부동소수점(`NaN`, `Infinity`, 언더플로우/오버플로우) 거부 및 수용 옵션 등 코너 케이스 완벽 제어.
+- [ ] **확장 표준 연산자 (Optional RFCs)**:
+  - **JSON Pointer (RFC 6901)**: `doc["/foo/bar/0"]` 기반의 경로 탐색 기능 구현.
+  - **JSON Patch (RFC 6902)**: 두 JSON 객체의 병합, 수정, 삭제 프로토콜 지원.
+  - **JSON Merge Patch (RFC 7396)**: 간소화된 부분 업데이트 사양 구현.
+- [ ] **Strict & Relaxed Parser Options**: 
+  - 기본값은 초고속 + 완벽한 RFC 8259 엄격성(Strictness) 유지.
+  - 사용자 옵션을 통해 Trailing Comma 허용, C-style 주석(`//`, `/* */`) 허용 등 범용적인 비표준 확장(Relaxed Mode) 지원 완료 확인.
 
 ## 🧪 5. 1.0 Release Verification
 - [ ] `tests/test_lazy_api.cpp` 작성 (Accessor 정확성 및 Russ Cox 검증)
