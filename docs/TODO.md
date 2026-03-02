@@ -149,39 +149,30 @@ if (s[cl] == '"' && s[cl + 1] == ':')
 
 ---
 
-### Phase 66 — x86 StringRaw 단거리 인라인 복사 (단기 🟡)
+### ~~Phase 66~~ — x86 StringRaw SSE2 overlapping-pair ❌ **REVERTED**
 
-**목표**: citm serialize x86 323→~270μs 개선 (~15%)
+**시도**: x86 StringRaw serialize에서 17-31B 문자열을 SSE2 `_mm_loadu/storeu_si128` overlapping pair로 대체.
 
-**현재 코드 분석**:
-- NEON 경로: `slen ≤ 16` → 8-4-1 스칼라 cascade (memcpy 호출 없음)
-- x86 경로: 모든 `slen`에 `std::memcpy()` 사용 추정
+**현황 파악 (시도 전)**: x86 경로는 이미 Phase D3 16-8-4-1 scalar cascade가 존재함. SSE2 overlapping pair가 NEON에서 효과적이었으므로 x86에서도 동일하게 시도.
 
-**문제**: citm 키 이름들 (`"name"` 4B, `"prices"` 6B, `"logoId"` 6B, `"eventId"` 7B, `"blockIds"` 8B 등)은 모두 ≤23B. 243개 객체 × 9키 = **2,187회 단거리 memcpy 호출** → 함수 호출 오버헤드 및 alignment 처리 비용이 누적됨.
+**실패 원인**: PGO + LTO 크로스 컨테미네이션. 직렬화 핫루프의 SSE2 코드가 PGO 프로파일을 변경 → LTO 단계에서 컴파일러가 파서 코드의 인라이닝/레이아웃 결정을 달리 내림.
+- citm serialize: 332→315μs (-5%) 개선
+- citm **parse: 598→684μs (+14%) 회귀** ← 직접 연관 없는 파서 코드 영향
 
-**구현**: x86 경로에도 NEON과 동일한 인라인 cascade 추가:
-```cpp
-#elif defined(BEAST_ARCH_X86_64)
-if (BEAST_LIKELY(slen <= 31)) {
-    if (slen >= 17) {
-        // 17-31B: SSE2 overlapping pair (128-bit loads)
-        __m128i a = _mm_loadu_si128((const __m128i*)sp);
-        __m128i b = _mm_loadu_si128((const __m128i*)(sp + slen - 16));
-        _mm_storeu_si128((__m128i*)w, a);
-        _mm_storeu_si128((__m128i*)(w + slen - 16), b);
-        w += slen;
-    } else {
-        // ≤16B: 8-4-2-1 scalar cascade (no function call)
-        /* ... 기존 NEON scalar cascade 동일 패턴 ... */
-    }
-} else {
-    std::memcpy(w, sp, slen); // ≥32B: memcpy OK
-    w += slen;
-}
-```
+**교훈**: PGO 환경에서 직렬화 루프 변경이 LTO를 통해 파서 성능에 영향. 직렬화와 파서가 동일 LTO 단위에 있으므로, 직렬화 핫패스 변경은 항상 파서 벤치마크도 함께 측정해야 함.
 
-**예상 효과**: x86 citm serialize **~15%** 개선 (323→~275μs)
-**우선순위**: 🟡 Phase 65 다음
+**코드**: 원복됨 (Phase D3 scalar cascade 유지 + revert 이유 주석 추가)
+
+---
+
+### Phase 66-B — Serialize 병목 재분석 (중기 🟠)
+
+**배경**: Phase 66 SSE2 실패로 x86 serialize 병목이 단거리 문자열 복사가 아님을 확인.
+
+**다음 분석 방향**:
+- `perf stat` / `perf record` 로 serialize 핫스팟 정밀 측정 (어느 instruction이 스톨?)
+- 직렬화 루프의 per-node 구조 오버헤드 (switch dispatch, separator 조건 분기) 측정
+- 별도 serialize-only 벤치마크 빌드로 PGO 간섭 없이 측정
 
 ---
 

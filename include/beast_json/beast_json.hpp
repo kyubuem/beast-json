@@ -5197,6 +5197,10 @@ public:
 #else
         // Unrolled 16-8-4-1 copy (Phase D3): avoids glibc dispatch overhead
         // for short strings (twitter.json avg 16.9 chars, 84% ≤ 24 chars).
+        // Phase 66 attempt: SSE2 overlapping-pair for 17–31B was REVERTED.
+        // The SSE2 stores altered the PGO profile (LTO cross-contamination),
+        // causing citm parse to regress +14% (598→684μs) for only −5% serialize
+        // gain. Scalar 16-8-4-1 preserves parse performance.
         if (BEAST_LIKELY(slen <= 31)) {
           uint16_t rem = slen;
           if (rem >= 16) {
