@@ -128,3 +128,26 @@ target_link_libraries(bench_all PRIVATE
     yyjson
 )
 target_compile_features(bench_all PRIVATE cxx_std_20)
+
+# beast::json-only microbenchmark — parse + dump, no third-party dependencies.
+# Safe to run on Android kernels that do not expose SVE to userspace.
+# Usage: ./bench_quick [--all] [--iter N]
+add_executable(bench_quick bench_quick.cpp)
+target_link_libraries(bench_quick PRIVATE beast_json::beast_json)
+target_compile_features(bench_quick PRIVATE cxx_std_20)
+
+# ── SVE safety fix ────────────────────────────────────────────────────────────
+# On AArch64 with -mcpu=cortex-x3 (or -march=native), Clang's auto-vectorizer
+# generates SVE instructions both at compile time and at LTO link time.
+# Android kernel 5.15 does not expose SVE to userspace → SIGILL (exit 132).
+#
+# Fix: disable the loop auto-vectorizer (-fno-vectorize) and LTO (-fno-lto)
+# per-target.  beast_json uses explicit arm_neon.h intrinsics which are
+# unaffected by -fno-vectorize; third-party libraries (nlohmann, yyjson,
+# simdjson) are constrained to NEON-only auto-vectorization this way.
+foreach(_tgt bench_all bench_file_io bench_lazy_dom bench_quick)
+    if(TARGET ${_tgt})
+        target_compile_options(${_tgt} PRIVATE -fno-lto -fno-vectorize -fno-slp-vectorize)
+        target_link_options(${_tgt} PRIVATE -fno-lto)
+    endif()
+endforeach()

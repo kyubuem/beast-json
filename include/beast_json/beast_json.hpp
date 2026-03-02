@@ -5141,6 +5141,60 @@ public:
         const uint16_t slen = static_cast<uint16_t>(meta & 0xFFFFu);
         const char *sp = src + nd.offset;
         *w++ = '"';
+#if BEAST_HAS_NEON
+        // Phase 61: NEON overlapping-pair copy for 17–31-byte strings.
+        // For slen in [17,31]: two 16B VLD1Q+VST1Q stores cover all bytes.
+        //   Store 1: w[0..15]  (first 16B of string)
+        //   Store 2: w[slen-16..slen-1]  (last 16B of string, overlaps)
+        // The overlap region is written twice with identical data — correct.
+        // Source read: sp+slen-16 ≤ sp+15 < sp+slen (closing '"') — in-bounds.
+        // Eliminates the 16B+cascade branch chain for 96%+ of twitter strings.
+        //
+        // For slen ≤ 16: scalar 8-4-1 cascade (fast for short keys).
+        // For slen ≥ 32: std::memcpy (large values, dispatch overhead amortised).
+        if (BEAST_LIKELY(slen <= 31)) {
+          if (slen >= 17) {
+            const uint8_t *up = reinterpret_cast<const uint8_t *>(sp);
+            uint8_t *uw = reinterpret_cast<uint8_t *>(w);
+            vst1q_u8(uw, vld1q_u8(up));
+            vst1q_u8(uw + slen - 16, vld1q_u8(up + slen - 16));
+            w += slen;
+          } else {
+            uint16_t rem = slen;
+            if (rem >= 16) {
+              uint64_t a, b;
+              std::memcpy(&a, sp, 8);
+              std::memcpy(&b, sp + 8, 8);
+              std::memcpy(w, &a, 8);
+              std::memcpy(w + 8, &b, 8);
+              sp += 16;
+              w += 16;
+              rem = 0;
+            }
+            if (rem >= 8) {
+              uint64_t a;
+              std::memcpy(&a, sp, 8);
+              std::memcpy(w, &a, 8);
+              sp += 8;
+              w += 8;
+              rem = static_cast<uint16_t>(rem - 8);
+            }
+            if (rem >= 4) {
+              uint32_t a;
+              std::memcpy(&a, sp, 4);
+              std::memcpy(w, &a, 4);
+              sp += 4;
+              w += 4;
+              rem = static_cast<uint16_t>(rem - 4);
+            }
+            while (rem--)
+              *w++ = *sp++;
+          }
+        } else {
+          std::memcpy(w, sp, slen);
+          w += slen;
+        }
+#else
         // Unrolled 16-8-4-1 copy (Phase D3): avoids glibc dispatch overhead
         // for short strings (twitter.json avg 16.9 chars, 84% ≤ 24 chars).
         if (BEAST_LIKELY(slen <= 31)) {
@@ -5177,6 +5231,7 @@ public:
           std::memcpy(w, sp, slen);
           w += slen;
         }
+#endif // BEAST_HAS_NEON
         *w++ = '"';
         break;
       }
@@ -6187,11 +6242,6 @@ class Parser {
                                             const char **key_end_out) noexcept {
         // s is the char after the opening '"' of the key.
         const char *e;
-        constexpr uint64_t K = 0x0101010101010101ULL;
-        constexpr uint64_t H = 0x8080808080808080ULL;
-        const uint64_t qm = K * static_cast<uint8_t>('"');
-        const uint64_t bsm = K * static_cast<uint8_t>('\\');
-
 #if BEAST_HAS_AVX2
 #if BEAST_HAS_AVX512
         // ── Phase 43: AVX-512 64B one-shot key scan
@@ -6299,6 +6349,11 @@ class Parser {
     // Phase D2: load v0 first; exit immediately for ≤8-char keys (most common
     // twitter.json keys: "id", "text", "user", "lang" etc.) before loading
     // v1/v2.
+    {
+      constexpr uint64_t K = 0x0101010101010101ULL;
+      constexpr uint64_t H = 0x8080808080808080ULL;
+      const uint64_t qm = K * static_cast<uint8_t>('"');
+      const uint64_t bsm = K * static_cast<uint8_t>('\\');
     if (BEAST_LIKELY(s + 24 <= end_)) {
       uint64_t v0;
       std::memcpy(&v0, s, 8);
@@ -6335,6 +6390,7 @@ class Parser {
       }
       // Backslash found → fall through to full scan
     }
+    } // end SWAR-24 scope (K/H/qm/bsm)
 #endif // BEAST_HAS_AVX2
       skn_slow:
         e = skip_string(s);
@@ -6560,6 +6616,56 @@ class Parser {
               // skip_string_from32 starts AVX2 at s+32 directly, skipping
               // scan_string_end's SWAR-8 gate (~11 instructions saved per
               // call).
+              e = skip_string_from32(s);
+              if (BEAST_UNLIKELY(e >= end_ || *e != '"'))
+                goto fail;
+              push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
+                   static_cast<uint32_t>(s - data_));
+              p_ = e + 1;
+              goto str_done;
+            }
+            // near end of buffer: fall through to SWAR-24
+#elif BEAST_HAS_NEON
+            // ── Phase 62: NEON 32B inline value-string scan ─────────────────
+            // Mirrors the NEON path in scan_key_colon_next(): two 16B loads
+            // cover strings up to 31 chars (the majority of twitter.json
+            // value strings: tweet dates, screen names, short URLs).
+            // For strings > 31 chars the 32B check is clean → skip_string_from32
+            // to avoid rescanning the first 32B (important for long tweet text).
+            if (BEAST_LIKELY(s + 32 <= end_)) {
+              const uint8x16_t vq = vdupq_n_u8('"');
+              const uint8x16_t vbs = vdupq_n_u8('\\');
+              uint8x16_t v1 = vld1q_u8(reinterpret_cast<const uint8_t *>(s));
+              uint8x16_t m1 = vorrq_u8(vceqq_u8(v1, vq), vceqq_u8(v1, vbs));
+              if (BEAST_LIKELY(vmaxvq_u32(vreinterpretq_u32_u8(m1)) != 0)) {
+                e = s;
+                while (*e != '"' && *e != '\\')
+                  ++e;
+                if (BEAST_LIKELY(*e == '"')) {
+                  push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
+                       static_cast<uint32_t>(s - data_));
+                  p_ = e + 1;
+                  goto str_done;
+                }
+                goto str_slow;
+              }
+              uint8x16_t v2 =
+                  vld1q_u8(reinterpret_cast<const uint8_t *>(s + 16));
+              uint8x16_t m2 = vorrq_u8(vceqq_u8(v2, vq), vceqq_u8(v2, vbs));
+              if (BEAST_LIKELY(vmaxvq_u32(vreinterpretq_u32_u8(m2)) != 0)) {
+                e = s + 16;
+                while (*e != '"' && *e != '\\')
+                  ++e;
+                if (BEAST_LIKELY(*e == '"')) {
+                  push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
+                       static_cast<uint32_t>(s - data_));
+                  p_ = e + 1;
+                  goto str_done;
+                }
+                goto str_slow;
+              }
+              // [s, s+32) clean: long string — skip_string_from32 starts
+              // SWAR-8 at s+32, avoiding rescan of the clean first 32B.
               e = skip_string_from32(s);
               if (BEAST_UNLIKELY(e >= end_ || *e != '"'))
                 goto fail;

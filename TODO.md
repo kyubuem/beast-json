@@ -1,9 +1,10 @@
 # Beast JSON Optimization — TODO
 
-> **최종 업데이트**: 2026-03-01 (Phase 57 완료 - AArch64 Pure NEON 패러다임 정립)
+> **최종 업데이트**: 2026-03-02 (Phase 61+62 완료 - NEON dump string copy + value string scan)
 > **현재 최고 기록 (Linux x86_64 AVX-512)**: twitter lazy **202μs** · canada lazy 1,448μs · citm lazy **757μs** · gsoc lazy 806μs
 > **현재 최고 기록 (macOS AArch64)**: twitter lazy **245μs** · canada lazy **1,935μs** · citm lazy **632μs** · gsoc lazy **606μs**
-> **현재 최고 기록 (Snapdragon Cortex-X3)**: twitter lazy **232μs** · canada lazy **1,692μs** · citm lazy **645μs** · gsoc lazy **651μs**
+> **현재 최고 기록 (Snapdragon Cortex-X3, bench_quick 300iter)**: twitter parse **~270μs** dump **~224μs** · canada parse **~1899μs** · citm parse **~644μs** · gsoc parse **~586μs**
+> **bench_all (beast vs yyjson, 300iter)**: twitter **283μs** vs 364μs · canada **1901μs** vs 2688μs · citm 658μs vs **938μs** · gsoc **609μs** vs 1696μs
 > **새 목표 (x86_64 기준)**: yyjson 대비 **1.2× (20% 이상) 전 파일 동시 달성**
 > **1.2× 목표치 (x86_64)**: twitter ≤219μs · canada ≤2,274μs · citm ≤592μs · gsoc ≤1,209μs
 
@@ -527,6 +528,9 @@ cur_state_ = cstate_stack_[--depth_];
 | **Phase 58-A** | **Snapdragon 프리페치 거리 튜닝** | 입력 프리페치 192B→**256B** (L2 hint), 테이프 +8→**+16** 노드. twitter pinned 246→**243.7μs** (-1.0%). 전 파일 회귀 없음. |
 | Phase 60-B | AArch64 단거리 키 스칼라 프리스캔 | ❌ 243.7→**257.5μs** (+5.6% 회귀) → revert. 분기 의존성이 NEON 스페큘레이션 저해. |
 | **Phase 60-A** | **compact context state (cur_state_)** | 4×64-bit 비트스택 → uint8_t cur_state_ 레지스터. twitter -4.7%, **canada -15.8%**, citm ~0%, gsoc -1.2%. ctest 81/81 PASS. |
+| Phase 63 | AArch64 32B 듀얼 체크 skip_to_action | ❌ twitter +3.2% 회귀 → revert. v1/v2 동시 로드, m2 VLD1Q+VCGTQ+VMAXVQ 오버헤드가 단거리 WS 절감 효과 초과. |
+| **Phase 61** | **NEON 오버랩 페어 dump() 문자열 복사** | 17-31자 문자열: 두 16B VLD1Q+VST1Q 오버랩 스토어 (이전: 16-8-4-1 스칼라 캐스케이드). twitter dump **-5.5%**. |
+| **Phase 62** | **NEON 32B 인라인 value string 스캔** | kActString에 `#elif BEAST_HAS_NEON` 블록 추가. 16B×2 NEON 체크, long string은 skip_string_from32(). twitter parse **-5.7%**, citm **-3.3%**, gsoc **-3.1%**. |
 
 ---
 
