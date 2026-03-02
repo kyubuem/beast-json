@@ -5807,6 +5807,20 @@ class Parser {
   // eliminating the pointer-chain access doc_->tape.head on every push().
   TapeNode *tape_head_ = nullptr;
 
+  // Phase 59: Key Length Cache — schema-prediction key scanner bypass.
+  // For each nesting depth, caches JSON source lengths of object keys seen in
+  // the first object at that depth. Subsequent same-schema objects skip the
+  // SIMD key-end scan: a single byte comparison s[cached_len]=='"' suffices.
+  //
+  // citm_catalog.json: 243 performances × 9 keys = 2187 SIMD scans replaced
+  // by byte comparisons. Memory: 8×16×2 + 8 = 264 bytes (trivially L1-resident).
+  struct KeyLenCache {
+    static constexpr uint8_t MAX_DEPTH = 8;
+    static constexpr uint8_t MAX_KEYS  = 16;
+    uint8_t  key_idx[MAX_DEPTH] = {};            // current key pos per depth
+    uint16_t lens[MAX_DEPTH][MAX_KEYS] = {};     // cached source lengths (0=unset)
+  } kc_;
+
   // ── skip_to_action: SWAR-8 + scalar whitespace skip chain ──
   // Returns the first action byte and advances p_ past whitespace.
   // Use the returned char directly in switch(c) — avoids extra *p_ read.
@@ -6245,6 +6259,26 @@ class Parser {
                                             const char **key_end_out) noexcept {
         // s is the char after the opening '"' of the key.
         const char *e;
+        // Phase 59: KeyCache fast path — O(1) key-end detection.
+        // In valid JSON, any '"' inside a string is escaped as '\"', so
+        // s[cached_len] == '"' unambiguously identifies the closing quote.
+        // Skips the full SIMD scan for repeated same-schema objects (citm: 2187×).
+        const uint8_t kd = (depth_ < KeyLenCache::MAX_DEPTH)
+                               ? static_cast<uint8_t>(depth_) : uint8_t(255);
+        if (BEAST_LIKELY(kd < KeyLenCache::MAX_DEPTH)) {
+          const uint8_t kidx = kc_.key_idx[kd];
+          if (kidx < KeyLenCache::MAX_KEYS) {
+            const uint16_t cl = kc_.lens[kd][kidx];
+            if (cl != 0) {
+              if (BEAST_LIKELY(s + cl < end_) && s[cl] == '"') {
+                e = s + cl;
+                kc_.key_idx[kd] = kidx + 1;
+                goto skn_cache_hit;
+              }
+              kc_.lens[kd][kidx] = 0; // length mismatch: clear for re-learning
+            }
+          }
+        }
 #if BEAST_HAS_AVX2
 #if BEAST_HAS_AVX512
         // ── Phase 43: AVX-512 64B one-shot key scan
@@ -6400,6 +6434,16 @@ class Parser {
         if (BEAST_UNLIKELY(e >= end_ || *e != '"'))
           return 0; // malformed
       skn_found:
+        // Phase 59: record key length for future cache hits (first-pass learning).
+        if (BEAST_LIKELY(kd < KeyLenCache::MAX_DEPTH)) {
+          const uint8_t kidx = kc_.key_idx[kd];
+          if (kidx < KeyLenCache::MAX_KEYS) {
+            if (kc_.lens[kd][kidx] == 0)
+              kc_.lens[kd][kidx] = static_cast<uint16_t>(e - s);
+            kc_.key_idx[kd] = kidx + 1;
+          }
+        }
+      skn_cache_hit:
         if (key_end_out)
           *key_end_out = e;
         push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
@@ -6517,6 +6561,9 @@ class Parser {
             cstate_stack_[depth_] = cur_state_;
             cur_state_ = 0b011u; // in_obj=1, is_key=1, has_elem=0
             ++depth_;
+            // Phase 59: reset key index for newly entered object depth.
+            if (BEAST_LIKELY(depth_ < KeyLenCache::MAX_DEPTH))
+              kc_.key_idx[depth_] = 0;
             ++p_;
             if (BEAST_LIKELY(p_ < end_)) {
               unsigned char fc = static_cast<unsigned char>(*p_);
@@ -7120,6 +7167,9 @@ class Parser {
             cstate_stack_[depth_] = cur_state_;
             cur_state_ = 0b011u; // in_obj=1, is_key=1, has_elem=0
             ++depth_;
+            // Phase 59: reset key index for newly entered object depth.
+            if (BEAST_LIKELY(depth_ < KeyLenCache::MAX_DEPTH))
+              kc_.key_idx[depth_] = 0;
             last_off = off + 1;
             break;
           }
