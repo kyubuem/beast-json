@@ -52,7 +52,16 @@ JSON을 물리적으로 파싱하고 직렬화하는 절대적인 "엔진부"입
   - **필수 구현 접근자**: `as_int64()`, `as_double()`, `as_string_view()`, `as_bool()`, `operator[](std::string_view)`, `operator[](size_t)`.
 - **`beast::parse()`**: 코어의 `parse_staged()`를 감싸는 래퍼 함수.
 
-이 구조 전환을 통해 사용자는 "단순히 `beast::Value v = beast::parse(json);`을 썼을 뿐인데 세계에서 가장 빠르다"는 경험을 하게 됩니다.
+### Layer 4: Modern Error Handling (`std::optional`)
+기존의 복잡한 예외(Exception) 던지기나 에러 코드 반환 대신, C++17의 `std::optional`을 활용하여 **"안전하고 직관적인 에러 핸들링"** 체계를 구축합니다.
+
+- **안전한 데이터 추출 (Safe Accessors)**:
+  - `std::optional<int64_t> get_int64() const` 
+  - `std::optional<std::string_view> get_string() const`
+  - 값이 존재하지 않거나 타입이 틀릴 경우 `std::nullopt`를 반환하여 사용자가 `if (auto val = obj["key"].get_int64())` 형태로 매우 우아하게 에러를 처리할 수 있게 합니다.
+- **예외 발생 최소화**: 코어 파싱 에러(Syntax Error)를 제외한 데이터 탐색/추출 에러는 예외(Throw) 시스템을 쓰지 않고 `optional`로 단일화하여 성능과 편의성을 극대화합니다.
+
+이 구조 전환을 통해 사용자는 "단순히 `beast::Value v = beast::parse(json);`을 썼을 뿐인데 세계에서 가장 빠르고 안전하다"는 경험을 하게 됩니다.
 
 ---
 
