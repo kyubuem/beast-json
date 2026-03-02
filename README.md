@@ -1,7 +1,7 @@
 # Beast JSON
 
-> 🚧 **Work in Progress (Pre-Release 1.0)** 🚧  
-> *We are currently undergoing a massive API overhaul for the official `1.0` GitHub Pages Release! The core parsing engine is now finalized (and is the fastest in the world), and we are now building **"The Ultimate API"** — a Zero-Allocation Monadic DOM with extreme developer convenience. See the Roadmap section below for details.*
+> 🚧 **Work in Progress (Pre-Release 1.0)** 🚧
+> *The core parsing engine has achieved its primary benchmark goal: **Beast beats yyjson on all 4 standard JSON files on every measured platform** (Linux x86_64, Snapdragon 8 Gen 2). We are now building **"The Ultimate API"** — a Zero-Allocation Monadic DOM with extreme developer convenience. See the Roadmap section below for details.*
 
 **Beast JSON** is a high-performance, single-header C++20 JSON library built around a tape-based lazy DOM. Its design goal is simple: match or beat the world's fastest JSON libraries through aggressive low-level optimization — while remaining practical for real-world use.
 
@@ -14,72 +14,74 @@
 ### Linux x86-64
 
 > **Environment**: Linux x86-64, GCC 13.3.0 `-O3 -flto -march=native` + PGO, 150 iterations per file, timings are per-run averages.
-> Phase 44–53 applied (Action LUT · AVX-512 string gate · AVX-512 64B WS skip · SWAR-8 pre-gate · PGO · input prefetch · Stage 1+2 two-phase parsing · positions `:,` elimination).
-> yyjson compiled with full SIMD enabled. All results verified correct (✓ PASS).
+> Phase 44–64 applied (Action LUT · AVX-512 string gate · AVX-512 64B WS skip · SWAR-8 pre-gate · PGO · input prefetch · Stage 1+2 two-phase parsing · positions `:,` elimination · compact `cur_state_` · LUT-based `push()` · **KeyLenCache SIMD key bypass**).
+> yyjson compiled with full SIMD enabled (`-march=native`). All results verified correct (✓ PASS).
 
 #### twitter.json — 616.7 KB · social graph, mixed types
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **202** | **3.06 GB/s** | **131** |
-| yyjson | 248 | 2.49 GB/s | 139 |
-| beast::rtsm | 295 | 2.09 GB/s | — |
-| nlohmann | 4,415 | 140 MB/s | 1,339 |
+| **beast::lazy** | **203** | **3.04 GB/s** | **150** |
+| yyjson | 277 | 2.23 GB/s | 140 |
+| beast::rtsm | 339 | 1.82 GB/s | — |
+| nlohmann | 4,411 | 140 MB/s | 1,479 |
 
-> beast::lazy is **23% faster** than yyjson on parse. Two-phase AVX-512 Stage 1+2 parsing with positions array optimizations delivers parse throughput of **3.06 GB/s**.
+> beast::lazy is **36% faster** than yyjson on parse. Two-phase AVX-512 Stage 1+2 parsing with KeyLenCache delivers **3.04 GB/s** parse throughput.
 
 #### canada.json — 2.2 MB · dense floating-point arrays
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **1,448** | **1.52 GB/s** | **844** |
-| beast::rtsm | 1,978 | 1.11 GB/s | — |
-| yyjson | 2,734 | 0.80 GB/s | 3,379 |
-| nlohmann | 26,333 | 83 MB/s | 6,858 |
+| **beast::lazy** | **1,597** | **1.38 GB/s** | **963** |
+| beast::rtsm | 2,109 | 1.04 GB/s | — |
+| yyjson | 2,946 | 0.75 GB/s | 3,840 |
+| nlohmann | 26,847 | 82 MB/s | 7,420 |
 
-> beast::lazy is **89% faster** to parse and **4.0× faster** to serialize than yyjson. AVX-512 64B whitespace skip delivers massive gains on coordinate-heavy JSON.
+> beast::lazy is **84% faster** to parse and **4.0× faster** to serialize than yyjson. AVX-512 64B whitespace skip delivers massive gains on coordinate-heavy JSON.
 
 #### citm_catalog.json — 1.7 MB · event catalog, string-heavy
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| yyjson | 736 | 2.29 GB/s | 257 |
-| **beast::lazy** | **757** | **2.23 GB/s** | **347** |
-| beast::rtsm | 1,174 | 1.44 GB/s | — |
-| nlohmann | 9,353 | 180 MB/s | 1,313 |
+| **beast::lazy** | **582** | **2.90 GB/s** | **388** |
+| yyjson | 795 | 2.12 GB/s | 248 |
+| beast::rtsm | 1,218 | 1.38 GB/s | — |
+| nlohmann | 9,248 | 182 MB/s | 1,273 |
 
-> Beast is within **3% of yyjson** — essentially tied. Stage 1+2 two-phase parsing improved this from -32% to near-parity.
+> beast::lazy is **37% faster** than yyjson. **Phase 59 KeyLenCache** replaced 2,187 AVX-512 key scans with O(1) byte comparisons — citm went from near-parity (−3%) to **+37%** advantage.
 
 #### gsoc-2018.json — 3.2 MB · large object array
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **806** | **4.03 GB/s** | **514** |
-| beast::rtsm | 1,018 | 3.19 GB/s | — |
-| yyjson | 1,782 | 1.82 GB/s | 1,582 |
-| nlohmann | 14,863 | 218 MB/s | 12,231 |
+| **beast::lazy** | **800** | **4.06 GB/s** | **452** |
+| beast::rtsm | 1,093 | 2.97 GB/s | — |
+| yyjson | 1,708 | 1.90 GB/s | 1,503 |
+| nlohmann | 15,345 | 212 MB/s | 11,690 |
 
-> beast::lazy is **121% faster** to parse and **3.1× faster** to serialize than yyjson. Parse throughput reaches **4.03 GB/s**.
+> beast::lazy is **114% faster** to parse and **3.3× faster** to serialize than yyjson. Parse throughput reaches **4.06 GB/s**.
 
 #### Summary
 
 | Benchmark | Beast vs yyjson (parse) | Beast vs yyjson (serialize) |
 | :--- | :--- | :--- |
-| twitter.json | **Beast 23% faster** ✅ | **Beast 6% faster** |
-| canada.json | **Beast 89% faster** ✅ | **Beast 4.0× faster** |
-| citm_catalog.json | yyjson 3% faster | yyjson 35% faster |
-| gsoc-2018.json | **Beast 121% faster** ✅ | **Beast 3.1× faster** |
+| twitter.json | **Beast 36% faster** ✅ | Beast ~7% slower |
+| canada.json | **Beast 84% faster** ✅ | **Beast 4.0× faster** |
+| citm_catalog.json | **Beast 37% faster** ✅ | yyjson 57% faster |
+| gsoc-2018.json | **Beast 114% faster** ✅ | **Beast 3.3× faster** |
 
-Beast **beats yyjson on parse speed for 3 out of 4 files** and is near-tied on the fourth (citm). The **twitter** result (202 μs vs 248 μs) is particularly notable — a file historically dominated by yyjson now falls to Beast by 23%.
+Beast **beats yyjson on parse speed for all 4 files** — the first time the full 1.2× sweep has been achieved on x86_64. Phase 59 (KeyLenCache) was the decisive breakthrough, eliminating SIMD key scanning for repeated-schema objects and taking citm from near-parity to **+37%**.
 
 #### 1.2× Goal Progress (beat yyjson by ≥20% on all 4 files)
 
-| File | Target | Current | Status |
+| File | Target (yyjson/1.2) | Current | Status |
 | :--- | ---: | ---: | :---: |
-| twitter.json | ≤219 μs | **202 μs** | ✅ |
-| canada.json | ≤2,274 μs | **1,448 μs** | ✅ |
-| citm_catalog.json | ≤592 μs | 757 μs | ⬜ |
-| gsoc-2018.json | ≤1,209 μs | **806 μs** | ✅ |
+| twitter.json | ≤231 μs | **203 μs** | ✅ |
+| canada.json | ≤2,455 μs | **1,597 μs** | ✅ |
+| citm_catalog.json | ≤663 μs | **582 μs** | ✅ 🎉 |
+| gsoc-2018.json | ≤1,423 μs | **800 μs** | ✅ |
+
+> **All 4 files beat yyjson by ≥20%** simultaneously as of Phase 59. The final holdout was citm_catalog.json — now 37% faster than yyjson thanks to schema-prediction caching.
 
 ---
 
@@ -298,13 +300,17 @@ Beast eliminates this by pre-computing the separator **during parsing** and baki
 > Because Beast calculates the bit-stacks (using precomputed `depth_mask_`) iteratively during the single pass, the cost is effectively hidden in instruction-level parallelism.
 
 ```cpp
-/* --- 1. DURING PARSE --- */
-const bool in_obj = !!(obj_bits_ & depth_mask_);
-const bool is_key = !!(kv_key_bits_ & depth_mask_);
-const bool is_val = in_obj & !is_key;
-
-// 2=colon, 1=comma, 0=none (stored right into the TapeNode!)
-uint8_t sep = is_val ? 2 : uint8_t(has_elem);
+/* --- 1. DURING PARSE (Phase 60-A + Phase 64) --- */
+// cur_state_ is a register-resident uint8_t encoding three bits:
+//   bit0 = is_key  (next push is an object key)
+//   bit1 = in_obj  (we're inside an object, not an array)
+//   bit2 = has_elem (≥1 element already pushed at this depth)
+//
+// Phase 64: two 8-byte LUTs replace ~14 instructions of bit arithmetic.
+static constexpr uint8_t sep_lut[8] = {0, 0, 0, 0, 1, 0, 2, 1};
+static constexpr uint8_t ncs_lut[8] = {4, 0, 0, 6, 4, 0, 7, 6};
+sep       = sep_lut[cur_state_];   // 0=none · 1=comma · 2=colon
+cur_state_ = ncs_lut[cur_state_];  // advance state machine
 
 /* --- 2. DURING SERIALIZATION --- */
 // One branch replaces 50 lines of complex state-tracking code!
@@ -337,6 +343,25 @@ The biggest parse-speed breakthrough: a simdjson-inspired two-phase parsing pipe
 A 2 MB size threshold selects the path: files ≤2 MB (twitter, citm) use Stage 1+2; larger number-heavy files (canada, gsoc) fall back to the optimized single-pass parser, where the positions array would exceed L3 capacity.
 
 > **Note on NEON/ARM64**: We implemented an equivalent `stage1_scan_neon` processing 64 bytes per iteration (unrolling 4 × 16-byte `vld1q_u8`). However, benchmark results showed a **~30-45% performance degradation** compared to the single-pass parser. Generating the 64-bit structural bitmasks requires too many shift-and-OR operations (`neon_movemask` per 16B chunk), creating higher overhead than simply scanning line-by-line. AArch64 benefits far more from our highly optimized single-pass linear scans than a two-phase architecture.
+
+### Phase 59 — KeyLenCache: Schema-Prediction Key Scanner Bypass
+
+The final x86_64 breakthrough: a 264-byte cache that makes key scanning O(1) for repeated-schema objects.
+
+**Core insight**: In valid JSON, any `"` inside a string is escaped as `\"`. Therefore, if we've seen a key of source-length `N` before, we can detect it next time with a single byte comparison: `s[N] == '"'` — no SIMD scan needed.
+
+```cpp
+// Lookup: is the closing '"' where we expect it?
+uint16_t cl = kc_.lens[depth_][key_idx];
+if (cl != 0 && s[cl] == '"') {
+    e = s + cl;             // cache HIT — skip entire AVX-512 scan
+    goto skn_cache_hit;
+}
+// Miss: run normal SIMD scan, then record result for next time
+kc_.lens[depth_][key_idx] = static_cast<uint16_t>(e - s);
+```
+
+**citm_catalog.json** has 243 `performance` objects, each with the same 9 keys. After the first object, all 2,187 subsequent key scans become byte comparisons. Combined with Stage 1+2 two-phase parsing, citm went from **757 μs to 582 μs (−23%)** — flipping from 3% behind yyjson to **37% ahead**.
 
 ---
 
