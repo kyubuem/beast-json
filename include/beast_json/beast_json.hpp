@@ -6242,11 +6242,6 @@ class Parser {
                                             const char **key_end_out) noexcept {
         // s is the char after the opening '"' of the key.
         const char *e;
-        constexpr uint64_t K = 0x0101010101010101ULL;
-        constexpr uint64_t H = 0x8080808080808080ULL;
-        const uint64_t qm = K * static_cast<uint8_t>('"');
-        const uint64_t bsm = K * static_cast<uint8_t>('\\');
-
 #if BEAST_HAS_AVX2
 #if BEAST_HAS_AVX512
         // ── Phase 43: AVX-512 64B one-shot key scan
@@ -6354,6 +6349,11 @@ class Parser {
     // Phase D2: load v0 first; exit immediately for ≤8-char keys (most common
     // twitter.json keys: "id", "text", "user", "lang" etc.) before loading
     // v1/v2.
+    {
+      constexpr uint64_t K = 0x0101010101010101ULL;
+      constexpr uint64_t H = 0x8080808080808080ULL;
+      const uint64_t qm = K * static_cast<uint8_t>('"');
+      const uint64_t bsm = K * static_cast<uint8_t>('\\');
     if (BEAST_LIKELY(s + 24 <= end_)) {
       uint64_t v0;
       std::memcpy(&v0, s, 8);
@@ -6390,6 +6390,7 @@ class Parser {
       }
       // Backslash found → fall through to full scan
     }
+    } // end SWAR-24 scope (K/H/qm/bsm)
 #endif // BEAST_HAS_AVX2
       skn_slow:
         e = skip_string(s);
@@ -6615,6 +6616,56 @@ class Parser {
               // skip_string_from32 starts AVX2 at s+32 directly, skipping
               // scan_string_end's SWAR-8 gate (~11 instructions saved per
               // call).
+              e = skip_string_from32(s);
+              if (BEAST_UNLIKELY(e >= end_ || *e != '"'))
+                goto fail;
+              push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
+                   static_cast<uint32_t>(s - data_));
+              p_ = e + 1;
+              goto str_done;
+            }
+            // near end of buffer: fall through to SWAR-24
+#elif BEAST_HAS_NEON
+            // ── Phase 62: NEON 32B inline value-string scan ─────────────────
+            // Mirrors the NEON path in scan_key_colon_next(): two 16B loads
+            // cover strings up to 31 chars (the majority of twitter.json
+            // value strings: tweet dates, screen names, short URLs).
+            // For strings > 31 chars the 32B check is clean → skip_string_from32
+            // to avoid rescanning the first 32B (important for long tweet text).
+            if (BEAST_LIKELY(s + 32 <= end_)) {
+              const uint8x16_t vq = vdupq_n_u8('"');
+              const uint8x16_t vbs = vdupq_n_u8('\\');
+              uint8x16_t v1 = vld1q_u8(reinterpret_cast<const uint8_t *>(s));
+              uint8x16_t m1 = vorrq_u8(vceqq_u8(v1, vq), vceqq_u8(v1, vbs));
+              if (BEAST_LIKELY(vmaxvq_u32(vreinterpretq_u32_u8(m1)) != 0)) {
+                e = s;
+                while (*e != '"' && *e != '\\')
+                  ++e;
+                if (BEAST_LIKELY(*e == '"')) {
+                  push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
+                       static_cast<uint32_t>(s - data_));
+                  p_ = e + 1;
+                  goto str_done;
+                }
+                goto str_slow;
+              }
+              uint8x16_t v2 =
+                  vld1q_u8(reinterpret_cast<const uint8_t *>(s + 16));
+              uint8x16_t m2 = vorrq_u8(vceqq_u8(v2, vq), vceqq_u8(v2, vbs));
+              if (BEAST_LIKELY(vmaxvq_u32(vreinterpretq_u32_u8(m2)) != 0)) {
+                e = s + 16;
+                while (*e != '"' && *e != '\\')
+                  ++e;
+                if (BEAST_LIKELY(*e == '"')) {
+                  push(TapeNodeType::StringRaw, static_cast<uint16_t>(e - s),
+                       static_cast<uint32_t>(s - data_));
+                  p_ = e + 1;
+                  goto str_done;
+                }
+                goto str_slow;
+              }
+              // [s, s+32) clean: long string — skip_string_from32 starts
+              // SWAR-8 at s+32, avoiding rescan of the clean first 32B.
               e = skip_string_from32(s);
               if (BEAST_UNLIKELY(e >= end_ || *e != '"'))
                 goto fail;
