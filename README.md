@@ -365,6 +365,7 @@ We are currently purging all legacy DOM code to establish a brand-new, modern C+
 - [ ] **Zero-Allocation Typed Views**: `for(int id : doc["ids"].as_array<int>())`
 - [ ] **Compile-Time JSON Pointer**: `doc.at<"/api/config/timeout">()`
 - [ ] **100% RFC Compliance**: Strict testing against JSON Test Suite (RFC 8259, JSON Pointer, JSON Patch).
+- [ ] **Foreign Language Bindings**: C-API exports to support blazing-fast Python (`pybind11`/`ctypes`) and Node.js (`N-API`) wrappers.
 
 ---
 
