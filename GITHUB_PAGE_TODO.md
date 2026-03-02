@@ -6,11 +6,14 @@ Beast JSON을 명실상부한 **세계에서 가장 빠르고 사용하기 편�
 
 ---
 
-## 🗑️ 1. Legacy DOM 완전 삭제 (Cleanup)
-이전 세대의 느린 DOM 파싱 로직(`beast::json::Value`, `beast::json::Object`, `beast::json::Array`, `beast::json::Parser` 등)을 코드베이스에서 영구히 제거합니다.
-- [ ] `include/beast_json/beast_json.hpp`에서 기존 `Value`, `Object`, `Array` 클래스 정의 삭제
-- [ ] 구형 `Parser::parse()` 및 관련 스칼라/SIMD 백엔드 코드 일괄 삭제
-- [ ] 테스트 코드(`tests/`) 및 벤치마크(`benchmarks/`)에서 기존 DOM을 참조하는 코드 모두 `beast::lazy` 기반으로 마이그레이션 또는 삭제
+## 🗑️ 1. 구조 개편 및 Legacy DOM 완전 삭제 (Architecture & Cleanup)
+이전 세대의 느린 DOM 파싱 로직(`beast::json::Value` 등)을 영구히 제거하고, **핵심 속도 엔진(Core)과 사용자 편의 기능(Utils)을 논리적/물리적으로 완전히 분리**합니다.
+
+- [ ] `include/beast_json/beast_json.hpp`에서 기존 `Value`, `Object`, `Array` 클래스 및 파서 백엔드 일괄 삭제.
+- [ ] 파일 및 네임스페이스 구조 개편: 
+  - **Core Layer**: 순수 고속 파싱/직렬화 엔진 (`tape`, `Parser`, `simd` 등)
+  - **Utils/API Layer**: `lazy::Value` 접근자 및 매크로 기반 편의 기능
+- [ ] 테스트 코드(`tests/`) 및 벤치마크(`benchmarks/`)를 순수 `beast::lazy` 기반으로 마이그레이션.
 
 ## 🏗️ 2. Lazy DOM Accessor API 구현 (Core Feature)
 단일 헤더 파서인 `beast::lazy::Value`에 사용자가 파싱된 데이터를 손쉽게 꺼내 쓸 수 있는 직관적인 API를 추가합니다. 이 API들은 파싱 시점의 오버헤드를 0으로 유지하고, **접근 시점(On-demand)에만 연산**을 수행합니다.
@@ -34,10 +37,27 @@ Beast JSON을 명실상부한 **세계에서 가장 빠르고 사용하기 편�
 - [x] `is_object() const` (기존재)
 - [x] `is_array() const` (기존재)
 
-## 🧪 3. 1.0 Release Verification
-- [ ] `tests/test_lazy_api.cpp`를 신규 작성하여 Accessor들의 정확성 검증 (특히 Russ Cox 플로트 추출 로직의 정확도 보장)
-- [ ] 벤치마크 파일 업데이트: 기존 `beast::lazy` 벤치마크는 그대로 유지되는지(회귀 없음) 확인
-- [ ] `README.md` 내 Usage(사용법) 섹션을 새로 추가된 "Lazy API 사용법"으로 전면 개편
+## 🧲 3. 자동 직렬화/역직렬화 (Auto Serialize/Deserialize)
+사용자가 C++ 구조체(struct) 및 클래스를 JSON과 손쉽게 상호 변환할 수 있는 유틸리티(Utils)를 제공합니다.
+
+- [ ] 매크로 기반 자동 직렬화 `BEAST_DEFINE_STRUCT()` 또는 범용 템플릿(nlohmann/json의 `to_json`, `from_json` 스타일) 설계 및 구현.
+- [ ] `std::vector`, `std::map`, `std::optional` 등 기본 C++ STL 컨테이너에 대한 자동 맵핑 지원.
+- [ ] 해당 구조변환이 `beast::lazy::Value`의 Zero-overhead 철학을 해치지 않도록 설계 보장.
+
+## 📜 4. JSON 표준(RFC 8259) 100% 준수 검증 (Standard Compliance)
+오픈소스 라이브러리의 신뢰성을 위해 C++ JSON Test Suite 기준을 완벽히 통과해야 합니다.
+
+- [ ] JSON Test Suite (NST, JSONChecker 등 300+개 테스트셋) 통합 및 자동화 빌드(`ctest`) 검증.
+- [ ] 극단적인 Edge Case 검토:
+  - 깊이가 깊은 다중 배열/오브젝트 (Stack Overflow 방지)
+  - UTF-8 인코딩 및 Surrogate Pair 이스케이프 정확도
+  - 부동소수점 경계값 및 비정상 숫자 포맷 거부를 엄격히 수행하는지 평가.
+
+## 🧪 5. 1.0 Release Verification
+- [ ] `tests/test_lazy_api.cpp` 작성 (Accessor 정확성 및 Russ Cox 검증)
+- [ ] `tests/test_auto_serialize.cpp` 작성 (구조체 자동 변환 검증)
+- [ ] 벤치마크 파일 업데이트: 회귀(Regression) 없음 확인
+- [ ] `README.md` 전면 개편: Core/Utils 구조 분리 채택 설명 및 Lazy API / 자동 변환 사용법 추가
 
 ---
 이 TODO 리스트가 모두 완료되면, Beast JSON은 **"가장 빠르면서도 누구나 쉽게 쓸 수 있는"** 완벽한 1.0 릴리즈 상태가 됩니다.
