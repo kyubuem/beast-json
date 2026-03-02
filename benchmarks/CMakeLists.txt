@@ -37,6 +37,10 @@ FetchContent_Declare(
 )
 set(YYJSON_DISABLE_SIMD OFF CACHE BOOL "Disable SIMD in yyjson" FORCE)
 FetchContent_MakeAvailable(yyjson)
+# Apply -march=native to yyjson on x86_64 for fair comparison (enables AVX2/AVX-512 in yyjson)
+if(TARGET yyjson AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+    target_compile_options(yyjson PRIVATE -march=native)
+endif()
 
 # Fetch fast_float removed
 
@@ -136,18 +140,29 @@ add_executable(bench_quick bench_quick.cpp)
 target_link_libraries(bench_quick PRIVATE beast_json::beast_json)
 target_compile_features(bench_quick PRIVATE cxx_std_20)
 
-# ── SVE safety fix ────────────────────────────────────────────────────────────
-# On AArch64 with -mcpu=cortex-x3 (or -march=native), Clang's auto-vectorizer
-# generates SVE instructions both at compile time and at LTO link time.
-# Android kernel 5.15 does not expose SVE to userspace → SIGILL (exit 132).
-#
-# Fix: disable the loop auto-vectorizer (-fno-vectorize) and LTO (-fno-lto)
-# per-target.  beast_json uses explicit arm_neon.h intrinsics which are
-# unaffected by -fno-vectorize; third-party libraries (nlohmann, yyjson,
-# simdjson) are constrained to NEON-only auto-vectorization this way.
-foreach(_tgt bench_all bench_file_io bench_lazy_dom bench_quick)
-    if(TARGET ${_tgt})
-        target_compile_options(${_tgt} PRIVATE -fno-lto -fno-vectorize -fno-slp-vectorize)
-        target_link_options(${_tgt} PRIVATE -fno-lto)
+# ── Architecture-specific flags ───────────────────────────────────────────────
+# x86_64: enable -march=native so AVX-512/AVX2 intrinsics are compiled correctly
+#         and auto-vectorization can use native ISA. LTO is kept enabled.
+# AArch64 + Clang: disable SVE auto-vectorization and LTO to prevent SIGILL on
+#         Android kernels that do not expose SVE to userspace (kernel 5.15).
+#         beast_json uses explicit arm_neon.h intrinsics (unaffected by -fno-vectorize).
+
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+    # x86_64: use native ISA; keep LTO and auto-vectorization intact.
+    foreach(_tgt bench_all bench_file_io bench_lazy_dom bench_quick)
+        if(TARGET ${_tgt})
+            target_compile_options(${_tgt} PRIVATE -march=native)
+        endif()
+    endforeach()
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+    # AArch64 + Clang: SVE safety — disable auto-vectorizer and LTO per-target.
+    # Clang generates SVE at LTO link time even when source uses NEON intrinsics.
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        foreach(_tgt bench_all bench_file_io bench_lazy_dom bench_quick)
+            if(TARGET ${_tgt})
+                target_compile_options(${_tgt} PRIVATE -fno-lto -fno-vectorize -fno-slp-vectorize)
+                target_link_options(${_tgt} PRIVATE -fno-lto)
+            endif()
+        endforeach()
     endif()
-endforeach()
+endif()

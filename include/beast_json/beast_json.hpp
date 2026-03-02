@@ -5858,6 +5858,9 @@ class Parser {
       if (BEAST_LIKELY(am != 0)) {
         p_ += BEAST_CTZ(am) >> 3;
         return *p_;
+      }
+      p_ += 8;
+    }
 #elif BEAST_HAS_NEON
     // ── Phase 57: Global AArch64 NEON Loop ──────────────────────────────────
     // SWAR pre-gates are strictly avoided on AArch64 because vector setup
@@ -6440,20 +6443,24 @@ class Parser {
         __builtin_prefetch(tape_head_ + 16, 1, 1);
         uint8_t sep = 0;
         if (BEAST_LIKELY(depth_ > 0)) {
-          // Phase 60-A: cur_state_ is register-resident (no memory load).
-          // bit0=is_key, bit1=in_obj, bit2=has_elem
+          // Phase 64 (x86_64): LUT-based sep+state computation.
+          // Replaces 14-instruction bit arithmetic with 2 table loads.
+          // Valid states: 0(arr,no-elem), 3(obj,key,no-elem), 4(arr,has-elem),
+          //               6(obj,val), 7(obj,key,has-elem).
+          // sep_lut  maps cur_state_ → separator byte (0=none, 1=comma, 2=colon)
+          // ncs_lut  maps cur_state_ → next cur_state_ after this push()
+          // Both tables fit in a single 8-byte pair (trivially L1-resident).
+          static constexpr uint8_t sep_lut[8] = {0, 0, 0, 0, 1, 0, 2, 1};
+          // ncs_lut[cs] = next cur_state_ after push():
+          //   000(0)→100(4): arr, gains has_elem
+          //   011(3)→110(6): obj key (no-elem) → obj val (has-elem)
+          //   100(4)→100(4): arr, has_elem stays
+          //   110(6)→111(7): obj val → obj key (has-elem)
+          //   111(7)→110(6): obj key → obj val
+          static constexpr uint8_t ncs_lut[8] = {4, 0, 0, 6, 4, 0, 7, 6};
           const uint8_t cs = cur_state_;
-          const bool in_obj = (cs >> 1) & 1;
-          const bool is_key = cs & 1;
-          const bool has_el = (cs >> 2) & 1;
-          // value-position in object → colon(2); else comma-or-none
-          const bool is_val = in_obj & !is_key;
-          sep = is_val ? uint8_t(2) : uint8_t(has_el);
-          // Update: toggle is_key if in_obj; always set has_elem.
-          // new_is_key = is_key ^ in_obj = (cs ^ (cs>>1)) & 1
-          cur_state_ = (cs & 0b010u) |
-                       static_cast<uint8_t>((cs ^ (cs >> 1)) & 1u) |
-                       0b100u;
+          sep = sep_lut[cs];
+          cur_state_ = ncs_lut[cs];
         }
         TapeNode *n = tape_head_++;
         n->meta = (static_cast<uint32_t>(t) << 24) |
