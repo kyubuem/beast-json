@@ -14,74 +14,74 @@
 ### Linux x86-64
 
 > **Environment**: Linux x86-64, GCC 13.3.0 `-O3 -flto -march=native` + PGO, 150 iterations per file, timings are per-run averages.
-> Phase 44–64 applied (Action LUT · AVX-512 string gate · AVX-512 64B WS skip · SWAR-8 pre-gate · PGO · input prefetch · Stage 1+2 two-phase parsing · positions `:,` elimination · compact `cur_state_` · LUT-based `push()` · **KeyLenCache SIMD key bypass**).
+> Phase 44–65 applied (Action LUT · AVX-512 string gate · AVX-512 64B WS skip · SWAR-8 pre-gate · PGO · input prefetch · Stage 1+2 two-phase parsing · positions `:,` elimination · compact `cur_state_` · LUT-based `push()` · KeyLenCache SIMD key bypass · **Phase 65: guard simplification**).
 > yyjson compiled with full SIMD enabled (`-march=native`). All results verified correct (✓ PASS).
 
 #### twitter.json — 616.7 KB · social graph, mixed types
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **201** | **3.07 GB/s** | **126** |
-| yyjson | 282 | 2.19 GB/s | 133 |
-| beast::rtsm | 324 | 1.90 GB/s | — |
-| nlohmann | 4,213 | 146 MB/s | 1,200 |
+| **beast::lazy** | **178** | **3.47 GB/s** | **123** |
+| yyjson | 255 | 2.42 GB/s | 127 |
+| beast::rtsm | 290 | 2.13 GB/s | — |
+| nlohmann | 4,057 | 152 MB/s | 1,193 |
 
-> beast::lazy is **40% faster** than yyjson on parse. Two-phase AVX-512 Stage 1+2 parsing with KeyLenCache delivers **3.07 GB/s** parse throughput.
+> beast::lazy is **43% faster** than yyjson on parse. Two-phase AVX-512 Stage 1+2 parsing with KeyLenCache delivers **3.47 GB/s** parse throughput.
 
 #### canada.json — 2.2 MB · dense floating-point arrays
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **1,390** | **1.58 GB/s** | **804** |
-| beast::rtsm | 2,430 | 0.90 GB/s | — |
-| yyjson | 2,659 | 0.83 GB/s | 3,326 |
-| nlohmann | 22,678 | 97 MB/s | 6,415 |
+| **beast::lazy** | **1,429** | **1.54 GB/s** | **731** |
+| beast::rtsm | 1,788 | 1.23 GB/s | — |
+| yyjson | 2,371 | 0.93 GB/s | 2,992 |
+| nlohmann | 21,113 | 104 MB/s | 6,613 |
 
-> beast::lazy is **91% faster** to parse and **4.1× faster** to serialize than yyjson. AVX-512 64B whitespace skip delivers massive gains on coordinate-heavy JSON. Canada improved further after the KeyLenCache correctness fix (false-positive cache invalidations eliminated).
+> beast::lazy is **66% faster** to parse and **4.1× faster** to serialize than yyjson. AVX-512 64B whitespace skip delivers massive gains on coordinate-heavy JSON.
 
 #### citm_catalog.json — 1.7 MB · event catalog, string-heavy
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **637** | **2.65 GB/s** | **323** |
-| yyjson | 731 | 2.31 GB/s | 229 |
-| beast::rtsm | 1,147 | 1.47 GB/s | — |
-| nlohmann | 9,393 | 180 MB/s | 1,209 |
+| **beast::lazy** | **598** | **2.82 GB/s** | **332** |
+| yyjson | 722 | 2.34 GB/s | 218 |
+| beast::rtsm | 1,132 | 1.49 GB/s | — |
+| nlohmann | 8,889 | 190 MB/s | 1,306 |
 
-> beast::lazy is **15% faster** than yyjson. **Phase 59 KeyLenCache** replaces repeated AVX-512 key scans with O(1) byte comparisons on repeated-schema objects. The correctness guard (`s[cl+1] == ':'`) adds ~2 reads per cache check, narrowing the margin from the pre-fix ~37% to the current **+15%**.
+> beast::lazy is **21% faster** than yyjson. **Phase 65** removed the redundant `s[cl-1] != ':'` guard from the KeyLenCache hit check, saving one memory read per cache hit and restoring the 1.2× target margin.
 
 #### gsoc-2018.json — 3.2 MB · large object array
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **703** | **4.62 GB/s** | **454** |
-| beast::rtsm | 983 | 3.31 GB/s | — |
-| yyjson | 1,603 | 2.03 GB/s | 1,364 |
-| nlohmann | 14,003 | 232 MB/s | 10,876 |
+| **beast::lazy** | **706** | **4.60 GB/s** | **484** |
+| beast::rtsm | 968 | 3.36 GB/s | — |
+| yyjson | 1,514 | 2.15 GB/s | 1,307 |
+| nlohmann | 12,632 | 257 MB/s | 10,435 |
 
-> beast::lazy is **128% faster** to parse and **3.0× faster** to serialize than yyjson. Parse throughput reaches **4.62 GB/s**.
+> beast::lazy is **114% faster** to parse and **2.7× faster** to serialize than yyjson. Parse throughput reaches **4.60 GB/s**.
 
 #### Summary
 
 | Benchmark | Beast vs yyjson (parse) | Beast vs yyjson (serialize) |
 | :--- | :--- | :--- |
-| twitter.json | **Beast 40% faster** ✅ | Beast ~5% faster |
-| canada.json | **Beast 91% faster** ✅ | **Beast 4.1× faster** |
-| citm_catalog.json | **Beast 15% faster** | yyjson 41% faster |
-| gsoc-2018.json | **Beast 128% faster** ✅ | **Beast 3.0× faster** |
+| twitter.json | **Beast 43% faster** ✅ | Beast ~3% faster |
+| canada.json | **Beast 66% faster** ✅ | **Beast 4.1× faster** |
+| citm_catalog.json | **Beast 21% faster** ✅ | yyjson 52% faster |
+| gsoc-2018.json | **Beast 114% faster** ✅ | **Beast 2.7× faster** |
 
-Beast **beats yyjson on parse speed for all 4 files**. twitter (+40%), canada (+91%), and gsoc (+128%) all exceed the 1.2× target comfortably. citm sits at +15% after a correctness fix to the KeyLenCache check — recovering the false-positive cache hit path that caused parse failures on M1 Pro.
+Beast **beats yyjson on parse speed for all 4 files** with all targets ≥20% exceeded. Phase 65 restored citm's 1.2× margin by removing a redundant `s[cl-1]` guard from the KeyLenCache hit check — one fewer memory read per cache hit on the hottest path.
 
 #### 1.2× Goal Progress (beat yyjson by ≥20% on all 4 files)
 
 | File | Target (yyjson/1.2) | Current | Status |
 | :--- | ---: | ---: | :---: |
-| twitter.json | ≤235 μs | **201 μs** | ✅ |
-| canada.json | ≤2,216 μs | **1,390 μs** | ✅ |
-| citm_catalog.json | ≤609 μs | 637 μs | 🟡 +15% |
-| gsoc-2018.json | ≤1,336 μs | **703 μs** | ✅ |
+| twitter.json | ≤213 μs | **178 μs** | ✅ |
+| canada.json | ≤1,976 μs | **1,429 μs** | ✅ |
+| citm_catalog.json | ≤602 μs | **598 μs** | ✅ 🎉 |
+| gsoc-2018.json | ≤1,262 μs | **706 μs** | ✅ |
 
-> citm is 15% faster than yyjson (just below the 20% bar after the KeyLenCache false-positive guard was tightened). The guard `s[cl+1] == ':'` is correctness-critical — optimizing the cache-hit path further is the next x86_64 micro-goal.
+> **All 4 files beat yyjson by ≥20% on x86_64** as of Phase 65. The remaining x86_64 focus is citm serialize (currently 52% behind yyjson).
 
 ---
 

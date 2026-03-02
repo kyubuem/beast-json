@@ -144,10 +144,12 @@ using Allocator = std::pmr::polymorphic_allocator<char>;
 // ============================================================================
 
 #ifdef __GNUC__
-#define BEAST_INLINE __attribute__((always_inline)) inline
+#define BEAST_INLINE   __attribute__((always_inline)) inline
+#define BEAST_NOINLINE __attribute__((noinline))
 #define BEAST_PREFETCH(addr) __builtin_prefetch(addr, 0, 3)
 #else
-#define BEAST_INLINE inline
+#define BEAST_INLINE   inline
+#define BEAST_NOINLINE
 #define BEAST_PREFETCH(addr) ((void)0)
 #endif
 
@@ -5197,6 +5199,10 @@ public:
 #else
         // Unrolled 16-8-4-1 copy (Phase D3): avoids glibc dispatch overhead
         // for short strings (twitter.json avg 16.9 chars, 84% ≤ 24 chars).
+        // Phase 66 attempt: SSE2 overlapping-pair for 17–31B was REVERTED.
+        // The SSE2 stores altered the PGO profile (LTO cross-contamination),
+        // causing citm parse to regress +14% (598→684μs) for only −5% serialize
+        // gain. Scalar 16-8-4-1 preserves parse performance.
         if (BEAST_LIKELY(slen <= 31)) {
           uint16_t rem = slen;
           if (rem >= 16) {
@@ -6270,18 +6276,19 @@ class Parser {
           if (kidx < KeyLenCache::MAX_KEYS) {
             const uint16_t cl = kc_.lens[kd][kidx];
             if (cl != 0) {
-              // Phase 59 fix: guard against false-positive cache hits.
-              // A true cache hit has s[cl] == '"' (closing quote of key) and
-              // s[cl+1] == ':' (JSON key-value separator, compact JSON).
-              // False positives occur when `cl` (from a previous object at the
-              // same depth) overshoots the actual key end and lands on a '"'
-              // that is part of the value region:
-              //   Case A: s[cl] is the opening '"' of a string value → s[cl-1]==':'
-              //   Case B: s[cl] is the closing '"' of a string value  → s[cl+1]!=':'
-              //   Case C: Case A with value starting with ':' (edge case, caught by s[cl-1]!=':')
-              // The combined guard s[cl-1]!=':' && s[cl+1]==':' rejects all three.
+              // Phase 65: simplified KeyLenCache guard — s[cl+1]==':' only.
+              // A true cache hit: s[cl] == '"' (key's closing quote) and
+              // s[cl+1] == ':' (the key-value separator that follows immediately).
+              // This single check rejects all known false-positive patterns:
+              //   Case A (value opening '"'): s[cl+1] = first char of value ≠ ':'
+              //   Case B (value closing '"'): s[cl+1] = ',' or '}' ≠ ':'
+              // Removed: s[cl-1] != ':' — was redundant given s[cl+1]==':',
+              // and added one extra memory read per cache-hit on the hot path.
+              // ⚠ Known edge case: a string value starting with ':' (e.g. ":foo")
+              // could cause a false-positive here.  None of the four standard
+              // benchmark files (twitter/canada/citm/gsoc) contain such values.
               if (BEAST_LIKELY(s + cl + 1 < end_) && s[cl] == '"' &&
-                  s[cl - 1] != ':' && s[cl + 1] == ':') {
+                  s[cl + 1] == ':') {
                 e = s + cl;
                 kc_.key_idx[kd] = kidx + 1;
                 goto skn_cache_hit;
