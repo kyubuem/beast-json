@@ -1,7 +1,7 @@
 # Beast JSON
 
 > 🚧 **Work in Progress (Pre-Release 1.0)** 🚧
-> *The core parsing engine has achieved its primary benchmark goal: **Beast beats yyjson on all 4 standard JSON files on every measured platform** (Linux x86_64, Snapdragon 8 Gen 2). **Phase 73**: `dump(string&)` buffer-reuse overload eliminates per-call `malloc+memset` — Beast now **sweeps all 4 serialize benchmarks on Snapdragon** (citm: was losing by 71%, now winning by 1.3×). We are now building **"The Ultimate API"** — a Zero-Allocation Monadic DOM with extreme developer convenience. See the Roadmap section below for details.*
+> *The core parsing engine has achieved its primary benchmark goal: **Beast beats yyjson on all 4 standard JSON files on every measured platform** (Linux x86_64, Snapdragon 8 Gen 2). **Phase 75**: parse-only PGO profile + `last_dump_size_` cache — **x86 parse 4/4 全 파일 1.2× 동시 달성** (citm 1.21×), citm serialize −22.4%. Beast now **sweeps all parse benchmarks on x86 and Snapdragon**. We are now building **"The Ultimate API"** — a Zero-Allocation Monadic DOM with extreme developer convenience. See the Roadmap section below for details.*
 
 **Beast JSON** is a high-performance, single-header C++20 JSON library built around a tape-based lazy DOM. Its design goal is simple: match or beat the world's fastest JSON libraries through aggressive low-level optimization — while remaining practical for real-world use.
 
@@ -13,75 +13,75 @@
 
 ### Linux x86-64
 
-> **Environment**: Linux x86-64, GCC 13.3.0 `-O3 -flto -march=native` + PGO, 150 iterations per file, timings are per-run averages.
-> Phase 44–65 applied (Action LUT · AVX-512 string gate · AVX-512 64B WS skip · SWAR-8 pre-gate · PGO · input prefetch · Stage 1+2 two-phase parsing · positions `:,` elimination · compact `cur_state_` · LUT-based `push()` · KeyLenCache SIMD key bypass · **Phase 65: guard simplification**).
+> **Environment**: Linux x86-64, GCC 13.3.0 `-O3 -flto -march=native` + PGO (parse-only profile), 300 iterations per file, timings are per-run averages.
+> Phase 44–65+73+75 applied (Action LUT · AVX-512 string gate · AVX-512 64B WS skip · SWAR-8 pre-gate · PGO · input prefetch · Stage 1+2 two-phase parsing · positions `:,` elimination · compact `cur_state_` · LUT-based `push()` · KeyLenCache SIMD key bypass · Phase 65: guard simplification · Phase 73: `dump(string&)` buffer-reuse · **Phase 75: parse-only PGO + `last_dump_size_` cache**).
 > yyjson compiled with full SIMD enabled (`-march=native`). All results verified correct (✓ PASS).
 
 #### twitter.json — 616.7 KB · social graph, mixed types
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **178** | **3.47 GB/s** | **123** |
-| yyjson | 255 | 2.42 GB/s | 127 |
-| beast::rtsm | 290 | 2.13 GB/s | — |
-| nlohmann | 4,057 | 152 MB/s | 1,193 |
+| **beast::lazy** | **189** | **3.27 GB/s** | **145** |
+| yyjson | 282 | 2.19 GB/s | 131 |
+| beast::rtsm | 309 | 2.00 GB/s | — |
+| nlohmann | 4,352 | 142 MB/s | 1,932 |
 
-> beast::lazy is **43% faster** than yyjson on parse. Two-phase AVX-512 Stage 1+2 parsing with KeyLenCache delivers **3.47 GB/s** parse throughput.
+> beast::lazy is **49% faster** (1.49×) than yyjson on parse. Two-phase AVX-512 Stage 1+2 parsing with KeyLenCache delivers **3.27 GB/s** parse throughput.
 
 #### canada.json — 2.2 MB · dense floating-point arrays
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **1,429** | **1.54 GB/s** | **731** |
-| beast::rtsm | 1,788 | 1.23 GB/s | — |
-| yyjson | 2,371 | 0.93 GB/s | 2,992 |
-| nlohmann | 21,113 | 104 MB/s | 6,613 |
+| **beast::lazy** | **1,433** | **1.54 GB/s** | **789** |
+| beast::rtsm | 1,869 | 1.18 GB/s | — |
+| yyjson | 2,595 | 0.85 GB/s | 3,301 |
+| nlohmann | 23,386 | 94 MB/s | 9,296 |
 
-> beast::lazy is **66% faster** to parse and **4.1× faster** to serialize than yyjson. AVX-512 64B whitespace skip delivers massive gains on coordinate-heavy JSON.
+> beast::lazy is **1.81× faster** to parse and **4.18× faster** to serialize than yyjson. AVX-512 64B whitespace skip delivers massive gains on coordinate-heavy JSON.
 
 #### citm_catalog.json — 1.7 MB · event catalog, string-heavy
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **598** | **2.82 GB/s** | **332** |
-| yyjson | 722 | 2.34 GB/s | 218 |
-| beast::rtsm | 1,132 | 1.49 GB/s | — |
-| nlohmann | 8,889 | 190 MB/s | 1,306 |
+| **beast::lazy** | **626** | **2.70 GB/s** | **312** |
+| yyjson | 757 | 2.23 GB/s | 235 |
+| beast::rtsm | 1,057 | 1.60 GB/s | — |
+| nlohmann | 9,566 | 176 MB/s | 2,047 |
 
-> beast::lazy is **21% faster** than yyjson. **Phase 65** removed the redundant `s[cl-1] != ':'` guard from the KeyLenCache hit check, saving one memory read per cache hit and restoring the 1.2× target margin.
+> beast::lazy is **21% faster** (1.21×) than yyjson on parse. Phase 75 parse-only PGO profile restored the citm margin. Serialize: yyjson 33% faster (gap narrowed from 49% by `last_dump_size_` cache, −22.4% improvement).
 
 #### gsoc-2018.json — 3.2 MB · large object array
 
 | Library | Parse (μs) | Throughput | Serialize (μs) |
 | :--- | ---: | :--- | ---: |
-| **beast::lazy** | **706** | **4.60 GB/s** | **484** |
-| beast::rtsm | 968 | 3.36 GB/s | — |
-| yyjson | 1,514 | 2.15 GB/s | 1,307 |
-| nlohmann | 12,632 | 257 MB/s | 10,435 |
+| **beast::lazy** | **731** | **4.45 GB/s** | **369** |
+| beast::rtsm | 979 | 3.32 GB/s | — |
+| yyjson | 1,615 | 2.01 GB/s | 1,417 |
+| nlohmann | 15,048 | 216 MB/s | 11,932 |
 
-> beast::lazy is **114% faster** to parse and **2.7× faster** to serialize than yyjson. Parse throughput reaches **4.60 GB/s**.
+> beast::lazy is **2.21× faster** to parse and **3.84× faster** to serialize than yyjson. Parse throughput reaches **4.45 GB/s**.
 
 #### Summary
 
 | Benchmark | Beast vs yyjson (parse) | Beast vs yyjson (serialize) |
 | :--- | :--- | :--- |
-| twitter.json | **Beast 43% faster** ✅ | Beast ~3% faster |
-| canada.json | **Beast 66% faster** ✅ | **Beast 4.1× faster** |
-| citm_catalog.json | **Beast 21% faster** ✅ | yyjson 52% faster |
-| gsoc-2018.json | **Beast 114% faster** ✅ | **Beast 2.7× faster** |
+| twitter.json | **Beast 1.49× faster** ✅ | yyjson 11% faster |
+| canada.json | **Beast 1.81× faster** ✅ | **Beast 4.18× faster** |
+| citm_catalog.json | **Beast 1.21× faster** ✅ | yyjson 33% faster |
+| gsoc-2018.json | **Beast 2.21× faster** ✅ | **Beast 3.84× faster** |
 
-Beast **beats yyjson on parse speed for all 4 files** with all targets ≥20% exceeded. Phase 65 restored citm's 1.2× margin by removing a redundant `s[cl-1]` guard from the KeyLenCache hit check — one fewer memory read per cache hit on the hottest path.
+Beast **beats yyjson by ≥1.2× on parse for ALL 4 files** (Phase 75 milestone). ✅
 
 #### 1.2× Goal Progress (beat yyjson by ≥20% on all 4 files)
 
 | File | Target (yyjson/1.2) | Current | Status |
 | :--- | ---: | ---: | :---: |
-| twitter.json | ≤213 μs | **178 μs** | ✅ |
-| canada.json | ≤1,976 μs | **1,429 μs** | ✅ |
-| citm_catalog.json | ≤602 μs | **598 μs** | ✅ 🎉 |
-| gsoc-2018.json | ≤1,262 μs | **706 μs** | ✅ |
+| twitter.json | ≤235 μs | **189 μs** | ✅ |
+| canada.json | ≤2,163 μs | **1,433 μs** | ✅ |
+| citm_catalog.json | ≤631 μs | **626 μs** | ✅ |
+| gsoc-2018.json | ≤1,346 μs | **731 μs** | ✅ |
 
-> **All 4 files beat yyjson by ≥20% on x86_64** as of Phase 65. The remaining x86_64 focus is citm serialize (currently 52% behind yyjson).
+> **Phase 75 milestone**: All 4 x86_64 parse targets met simultaneously for the first time. Parse-only PGO profile (Phase 75A) restored LTO code layout for parse — citm 698→626 μs. `last_dump_size_` cache (Phase 75B) eliminated per-call zero-fill overhead (citm serialize −22.4%, pure C++20).
 
 ---
 
@@ -228,7 +228,7 @@ Beast **sweeps all 8 parse + serialize benchmarks** on Snapdragon 8 Gen 2 / Cort
 
 > **Phase 57+58-A+60-A note**: Pure NEON (Phase 57) + prefetch 192B→256B (Phase 58-A) + compact context state (Phase 60-A). Phase 60-A replaced 4×64-bit bit-stacks with `uint8_t cur_state_` — eliminating 5-7 ops per open/close bracket. canada.json gained **-15.8%** from simplified bracket handling. Cortex-X3 at 3360 MHz now delivers **30 cy/tok** on twitter. yyjson costs **50 cy/tok** on Cortex-X3 vs 23 cy/tok on M1 Pro, confirming yyjson's dependency on M1's 576-entry reorder buffer.
 >
-> **Phase 73 note**: `dump(string&)` buffer-reuse overload pre-allocates the output buffer once; subsequent calls use `__resize_default_init` (O(1), no `malloc`, no `memset`). Serialize improvement vs old `dump()`: twitter **−50%**, canada **−44%**, citm **−45%**, gsoc **−71%**. This closed the largest remaining Snapdragon gap (citm serialize) and now beast beats yyjson on all 4 serialize benchmarks.
+> **Phase 73 note**: `dump(string&)` buffer-reuse overload pre-allocates the output buffer once; subsequent calls reuse the existing capacity — eliminating per-call `malloc+free`. On Android scudo allocator, `malloc(1.7 MB)+free` per iteration was the dominant overhead. Serialize improvement vs old `dump()`: twitter **−50%**, canada **−44%**, citm **−45%**, gsoc **−71%**. This closed the largest remaining Snapdragon gap (citm serialize) and now beast beats yyjson on all 4 serialize benchmarks.
 
 
 ---

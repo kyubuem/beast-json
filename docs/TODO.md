@@ -1,6 +1,6 @@
 # Beast JSON Optimization — TODO
 
-> **최종 업데이트**: 2026-03-03 (Phase 73 ✅ — `dump(string&)` buffer-reuse · Snapdragon serialize 전 파일 yyjson 압도 · Phase 65 ✅ · Phase 66/66-B/67 ❌ REVERTED)
+> **최종 업데이트**: 2026-03-03 (Phase 75 ✅ — `--parse-only` PGO 프로파일 분리 + `last_dump_size_` 캐시 → x86 parse **4/4 1.2× 전 파일 달성** · citm serialize −22.4%)
 
 ---
 
@@ -14,28 +14,47 @@
 
 ---
 
-## 🟡 x86_64 — Linux · GCC · AVX-512 + PGO
+## ✅ x86_64 — Linux · GCC · AVX-512 + PGO
 
-**상태**: 전 파일 parse 1.2× ✅ (Phase 65 완료) · citm serialize **−52%** (yyjson에 뒤짐 ❌)
+**상태**: **Phase 75 완료 — parse 4/4 전 파일 1.2× 달성** ✅
 
-### 현재 성적 (Phase 65 + PGO 재빌드, 150 iter)
+### 현재 성적 (Phase 75 — GCC 13.3, C++20, PGO parse-only, 300 iter, bench_all 기준)
 
-| 파일 | Beast parse | yyjson parse | vs yyjson | 1.2× 목표 | 달성 |
-|:---|---:|---:|:---:|---:|:---:|
-| twitter.json | **178 μs** | 255 μs | Beast **+43%** | ≤213 μs | ✅ |
-| canada.json | **1,429 μs** | 2,371 μs | Beast **+66%** | ≤1,976 μs | ✅ |
-| citm_catalog.json | **598 μs** | 722 μs | Beast **+21%** | ≤602 μs | ✅ 🎉 |
-| gsoc-2018.json | **706 μs** | 1,514 μs | Beast **+114%** | ≤1,262 μs | ✅ |
+| 파일 | Beast parse | yyjson parse | vs yyjson | 1.2× 달성 |
+|:---|---:|---:|:---:|:---:|
+| twitter.json | **189 μs** | 282 μs | Beast **+49%** (1.49×) | ✅ |
+| canada.json | **1,433 μs** | 2,595 μs | Beast **+81%** (1.81×) | ✅ |
+| citm_catalog.json | **626 μs** | 757 μs | Beast **+21%** (1.21×) | ✅ |
+| gsoc-2018.json | **731 μs** | 1,615 μs | Beast **+121%** (2.21×) | ✅ |
 
 | 파일 | Beast serialize | yyjson serialize | vs yyjson |
 |:---|---:|---:|:---:|
-| twitter.json | **123 μs** | 127 μs | Beast +3% ✅ |
-| canada.json | **731 μs** | 2,992 μs | Beast **4.1×** ✅ |
-| citm_catalog.json | **332 μs** | 218 μs | yyjson **+52%** ❌ |
-| gsoc-2018.json | **484 μs** | 1,307 μs | Beast **2.7×** ✅ |
+| twitter.json | 145 μs | 131 μs | yyjson 1.11× 빠름 |
+| canada.json | **789 μs** | 3,301 μs | Beast **4.18×** ✅ |
+| citm_catalog.json | 312 μs | 235 μs | yyjson 1.33× 빠름 |
+| gsoc-2018.json | **369 μs** | 1,417 μs | Beast **3.84×** ✅ |
 
-> **parse 전 파일 1.2× 달성** ✅ — Phase 65로 citm +15%→+21% 회복.
-> **다음 주력**: citm serialize (yyjson 52% 빠름) — Phase 66/67 대상.
+> **bench_ser_profile** (격리 측정, 5000 iter, Phase 75B `last_dump_size_` 캐시 적용):
+> citm **288 μs** (Phase 73 371 μs → −22.4%), twitter 124 μs, canada 707 μs, gsoc 339 μs.
+
+### Phase 75 — PGO 프로파일 분리 + `last_dump_size_` 캐시 ✅ COMPLETE (2026-03-03)
+
+**Phase 75A**: `bench_all --parse-only` PGO 프로파일 분리
+- 문제: Phase 73에서 bench_all이 `dump(string&)` serialize hot path를 프로파일에 포함시켜 LTO 코드 레이아웃이 parse 불리하게 변경됨 → citm parse 698→626 μs 개선
+- 해결: bench_all에 `--parse-only` 플래그 추가. PGO GENERATE 시 parse 경로만 프로파일링 → LTO가 parse I-cache 레이아웃 우선 최적화
+- PGO 워크플로: `./bench_all --parse-only --iter 30 --all` (GENERATE) → `./bench_all --iter 300 --all` (측정)
+
+**Phase 75B**: `DocumentView::last_dump_size_` 캐시 (C++20 표준, 컴파일러 무관)
+- 문제: citm source 1,686 KB → compact output 488 KB. `resize(buf_cap)` 매 호출마다 1,198 KB zero-fill
+- 해결: `mutable size_t last_dump_size_ = 0` — 이전 호출의 실제 출력 크기를 캐싱. 두 번째 호출부터 `resize(last_dump_size_)` = no-op (size 변화 없음) → zero-fill cost = 0
+- 순수 C++20 표준, 컴파일러 확장 없음 (GCC/Clang/x86/AArch64 공통)
+- 효과: bench_ser_profile citm 371 μs → **288 μs** (−22.4%)
+
+### ~~Phase 74~~ — C++23 `resize_and_overwrite` / libc++ `__resize_default_init` ❌ **REVERTED**
+
+**원복 이유**: 컴파일러 전용 비표준 API (C++23/libc++ 전용). Phase 75B가 동일 문제를 순수 C++20으로 해결.
+
+**코드**: 완전 원복 → Phase 75B의 `last_dump_size_` 캐시로 대체
 
 ### 완료된 x86_64 최적화 (연대순)
 

@@ -150,21 +150,21 @@ target_link_libraries(bench_all PRIVATE
     nlohmann_json::nlohmann_json
     yyjson
 )
-target_compile_features(bench_all PRIVATE cxx_std_20)
-
 # Phase 73: serialize-only profiling benchmark (parse once, dump in tight loop).
 # Used to measure dump() vs dump(string&) buffer-reuse overhead.
 # Usage (from build_bench/benchmarks/): ./bench_ser_profile [file.json] [iters]
 add_executable(bench_ser_profile bench_ser_profile.cpp)
 target_link_libraries(bench_ser_profile PRIVATE beast_json::beast_json)
-target_compile_features(bench_ser_profile PRIVATE cxx_std_20)
 
 # beast::json-only microbenchmark — parse + dump, no third-party dependencies.
 # Safe to run on Android kernels that do not expose SVE to userspace.
 # Usage: ./bench_quick [--all] [--iter N]
 add_executable(bench_quick bench_quick.cpp)
 target_link_libraries(bench_quick PRIVATE beast_json::beast_json)
+
+target_compile_features(bench_all PRIVATE cxx_std_20)
 target_compile_features(bench_quick PRIVATE cxx_std_20)
+target_compile_features(bench_ser_profile PRIVATE cxx_std_20)
 
 # ── Architecture-specific flags ───────────────────────────────────────────────
 # x86_64: enable -march=native so AVX-512/AVX2 intrinsics are compiled correctly
@@ -175,7 +175,7 @@ target_compile_features(bench_quick PRIVATE cxx_std_20)
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
     # x86_64: use native ISA; keep LTO and auto-vectorization intact.
-    foreach(_tgt bench_all bench_file_io bench_lazy_dom bench_quick)
+    foreach(_tgt bench_all bench_file_io bench_lazy_dom bench_quick bench_ser_profile)
         if(TARGET ${_tgt})
             target_compile_options(${_tgt} PRIVATE -march=native)
         endif()

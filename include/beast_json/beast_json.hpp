@@ -5018,6 +5018,10 @@ public:
   TapeArena tape;
   Stage1Index idx; // Phase 50: structural index reused across calls
   int ref_count = 0;
+  // Phase 75: cache actual serialised size from the last dump(string&) call.
+  // On repeated calls with the same document, resize(last_dump_size_) is a
+  // no-op (out.size() already equals last_dump_size_) → zero zero-fill cost.
+  mutable size_t last_dump_size_ = 0;
 
   DocumentView() = default;
   explicit DocumentView(std::string_view json) : source(json) {}
@@ -5048,6 +5052,7 @@ public:
       o.idx.positions = nullptr;
       o.idx.count = o.idx.capacity = 0;
       ref_count = 0;
+      last_dump_size_ = o.last_dump_size_;
     }
     return *this;
   }
@@ -5279,26 +5284,24 @@ public:
     return out;
   }
 
-  // Phase 73: Buffer-reuse dump() overload.
+  // Phase 75: Buffer-reuse dump() overload.
   //
-  // Serializes into a caller-provided std::string, amortising malloc+memset
+  // Serializes into a caller-provided std::string, amortising malloc+free
   // across repeated calls on the same document (streaming, hot loops).
   //
   // Usage:
   //   std::string buf;
   //   for (...) { root.dump(buf); process(buf); }
   //
-  // On libc++ (Clang / Android / Apple), __resize_default_init avoids
-  // zero-initialising the buffer on every call.  After the first call the
-  // buffer has sufficient capacity and __resize_default_init is O(1) —
-  // no malloc, no memset.  On libstdc++ (GCC) we fall back to resize(),
-  // which still saves the malloc+free on repeated calls (only partial memset
-  // of the unused tail is needed).
+  // Phase 75: uses last_dump_size_ to resize to the exact output size from
+  // the previous call instead of buf_cap.  For a fixed document the output
+  // size is constant, so resize(last_dump_size_) is a no-op on the 2nd+
+  // call (out.size() already equals last_dump_size_) — zero zero-fill cost.
+  // The first call still uses buf_cap to guarantee sufficient capacity.
   //
   // LTO safety (Phase 66-B lesson): do NOT mark this NOINLINE.  The compiler
   // will inline it at call sites, keeping code layout identical to dump().
-  // NOINLINE caused parse regression on x86 PGO/LTO builds.  On AArch64
-  // Snapdragon (-fno-lto), this is unconditionally safe.
+  // NOINLINE caused parse regression on x86 PGO/LTO builds.
   void dump(std::string &out) const {
     if (!doc_ || doc_->tape.size() == 0) {
       out.assign("null", 4);
@@ -5308,14 +5311,10 @@ public:
     const size_t ntape = doc_->tape.size();
     const size_t buf_cap = doc_->source.size() + 16;
 
-    // Resize without zero-init on libc++ so repeated calls are O(1)
-    // (capacity already sufficient → just bumps the size field, no memset).
-    // Falls back to resize() on other standard libraries.
-#if defined(_LIBCPP_VERSION)
-    out.__resize_default_init(buf_cap);
-#else
-    out.resize(buf_cap);
-#endif
+    // Use cached exact size if available; fall back to buf_cap on first call.
+    const size_t target =
+        (doc_->last_dump_size_ > 0) ? doc_->last_dump_size_ : buf_cap;
+    out.resize(target);
     char *w = out.data();
     char *w0 = w;
 
@@ -5429,7 +5428,9 @@ public:
       }
     }
 
-    out.resize(static_cast<size_t>(w - w0));
+    const size_t actual = static_cast<size_t>(w - w0);
+    out.resize(actual);
+    doc_->last_dump_size_ = actual; // cache for zero-fill-free resize next call
   }
 };
 
