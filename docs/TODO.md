@@ -1,6 +1,7 @@
 # Beast JSON Optimization — TODO
 
 > **최종 업데이트**: 2026-03-03 (Phase 75 ✅ — `--parse-only` PGO 프로파일 분리 + `last_dump_size_` 캐시 → x86 parse **4/4 1.2× 전 파일 달성** · citm serialize −22.4%)
+> **아키텍처 전략**: `docs/ARCH_STRATEGY.md` 참조 — 보유 3종 장비 + GitHub Actions CI 조합으로 전체 커버
 
 ---
 
@@ -371,6 +372,40 @@ yyjson: 1,464μs → Beast 1,681μs. Gap 15%, 27% 개선 필요.
 | Phase 61 | NEON 오버랩 페어 dump() 문자열 복사 | AArch64 | dump −5.5% |
 | Phase 62 | NEON 32B inline value string 스캔 | AArch64 | twitter −5.7% |
 | **Phase 73** | **`dump(string&)` buffer-reuse 오버로드 (`__resize_default_init`)** | **All** | **serialize citm −55%, gsoc −72%, twitter −48%, canada −40%** |
+
+---
+
+## 🏗️ 인프라 / CI — 미보유 아키텍처 정확성 커버
+
+> **설계 방향**: 성능 튜닝은 보유 장비 3종(Mac M1 Pro, Snapdragon Gen 2, Claude Code x86)으로 집중.
+> 정확성 검증은 GitHub Actions CI로 커버. **세부 전략: `docs/ARCH_STRATEGY.md`**
+
+### 즉시 구성 가능 (공개 저장소 무료 러너)
+
+| 항목 | 러너 | 우선순위 | 상태 |
+|:---|:---|:---:|:---:|
+| `ubuntu-24.04-arm` Graviton2 ctest | `ubuntu-24.04-arm` | 🔴 높음 | ☐ 미구현 |
+| `macos-15` Apple Silicon ctest | `macos-15` | 🔴 높음 | ☐ 미구현 |
+| `windows-2025-arm` Windows ARM64 ctest | `windows-2025-arm` | 🟠 중간 | ☐ 미구현 |
+| `ubuntu-24.04` x86_64 ctest (기준선) | `ubuntu-24.04` | 🔴 높음 | ☐ 미구현 |
+
+**다음 액션**: `.github/workflows/ci.yml` 생성. cmake Release 빌드 + ctest 만 실행. 성능 측정 없음.
+
+### QEMU 에뮬레이션 (정확성 only, 낮은 우선순위)
+
+| 항목 | 대상 | 우선순위 | 상태 |
+|:---|:---|:---:|:---:|
+| RISC-V 64 fallback 경로 검증 | `qemu-riscv64` + toolchain | 🟡 낮음 | ☐ 미구현 |
+| PPC64LE big-endian 코너케이스 | `qemu-ppc64le` + toolchain | 🟡 낮음 | ☐ 미구현 |
+
+**toolchain 파일 필요**: `cmake/toolchains/riscv64-linux-gnu.cmake`, `ppc64le-linux-gnu.cmake`
+
+### 장기 — 실 하드웨어 추가
+
+| 항목 | 조달 방법 | 우선순위 | 상태 |
+|:---|:---|:---:|:---:|
+| SVE 실 측정 (Graviton 3 / Neoverse V1) | Oracle Cloud Always Free (Ampere A1 4코어) | 🟠 중기 | ☐ 미착수 |
+| Windows ARM64 실 측정 | CI 우선, 필요 시 별도 조달 | 🟡 낮음 | ☐ 미착수 |
 
 ---
 
