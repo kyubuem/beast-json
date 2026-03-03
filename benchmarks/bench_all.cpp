@@ -49,9 +49,12 @@ static void run_file(const std::string &filename, size_t N) {
     double p_ns = pt.elapsed_ns() / N;
 
     auto doc = beast::json::lazy::parse_reuse(ctx, content);
+    // Phase 73: use buffer-reuse dump(string&) — amortises malloc+memset.
+    std::string dump_buf;
+    dump_buf.reserve(content.size() + 16);
     st.start();
     for (size_t i = 0; i < N; ++i)
-      (void)doc.dump();
+      doc.dump(dump_buf);
     double s_ns = st.elapsed_ns() / N;
 
     // Correctness: round-trip via nlohmann comparison

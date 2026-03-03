@@ -152,6 +152,13 @@ target_link_libraries(bench_all PRIVATE
 )
 target_compile_features(bench_all PRIVATE cxx_std_20)
 
+# Phase 73: serialize-only profiling benchmark (parse once, dump in tight loop).
+# Used to measure dump() vs dump(string&) buffer-reuse overhead.
+# Usage (from build_bench/benchmarks/): ./bench_ser_profile [file.json] [iters]
+add_executable(bench_ser_profile bench_ser_profile.cpp)
+target_link_libraries(bench_ser_profile PRIVATE beast_json::beast_json)
+target_compile_features(bench_ser_profile PRIVATE cxx_std_20)
+
 # beast::json-only microbenchmark — parse + dump, no third-party dependencies.
 # Safe to run on Android kernels that do not expose SVE to userspace.
 # Usage: ./bench_quick [--all] [--iter N]

@@ -5278,6 +5278,159 @@ public:
     out.resize(static_cast<size_t>(w - w0));
     return out;
   }
+
+  // Phase 73: Buffer-reuse dump() overload.
+  //
+  // Serializes into a caller-provided std::string, amortising malloc+memset
+  // across repeated calls on the same document (streaming, hot loops).
+  //
+  // Usage:
+  //   std::string buf;
+  //   for (...) { root.dump(buf); process(buf); }
+  //
+  // On libc++ (Clang / Android / Apple), __resize_default_init avoids
+  // zero-initialising the buffer on every call.  After the first call the
+  // buffer has sufficient capacity and __resize_default_init is O(1) —
+  // no malloc, no memset.  On libstdc++ (GCC) we fall back to resize(),
+  // which still saves the malloc+free on repeated calls (only partial memset
+  // of the unused tail is needed).
+  //
+  // LTO safety (Phase 66-B lesson): do NOT mark this NOINLINE.  The compiler
+  // will inline it at call sites, keeping code layout identical to dump().
+  // NOINLINE caused parse regression on x86 PGO/LTO builds.  On AArch64
+  // Snapdragon (-fno-lto), this is unconditionally safe.
+  void dump(std::string &out) const {
+    if (!doc_ || doc_->tape.size() == 0) {
+      out.assign("null", 4);
+      return;
+    }
+    const char *src = doc_->source.data();
+    const size_t ntape = doc_->tape.size();
+    const size_t buf_cap = doc_->source.size() + 16;
+
+    // Resize without zero-init on libc++ so repeated calls are O(1)
+    // (capacity already sufficient → just bumps the size field, no memset).
+    // Falls back to resize() on other standard libraries.
+#if defined(_LIBCPP_VERSION)
+    out.__resize_default_init(buf_cap);
+#else
+    out.resize(buf_cap);
+#endif
+    char *w = out.data();
+    char *w0 = w;
+
+    for (size_t i = 0; i < ntape; ++i) {
+      const TapeNode &nd = doc_->tape[i];
+      const uint32_t meta = nd.meta;
+      const auto type = static_cast<TapeNodeType>((meta >> 24) & 0xFF);
+      const uint8_t sep = (meta >> 16) & 0xFFu;
+
+      if (sep)
+        *w++ = (sep == 0x02u) ? ':' : ',';
+
+      switch (type) {
+
+      case TapeNodeType::ObjectStart:
+        *w++ = '{';
+        break;
+      case TapeNodeType::ObjectEnd:
+        *w++ = '}';
+        break;
+      case TapeNodeType::ArrayStart:
+        *w++ = '[';
+        break;
+      case TapeNodeType::ArrayEnd:
+        *w++ = ']';
+        break;
+
+      case TapeNodeType::StringRaw: {
+        const uint16_t slen = static_cast<uint16_t>(meta & 0xFFFFu);
+        const char *sp = src + nd.offset;
+        *w++ = '"';
+#if BEAST_HAS_NEON
+        if (BEAST_LIKELY(slen <= 31)) {
+          if (slen >= 17) {
+            const uint8_t *up = reinterpret_cast<const uint8_t *>(sp);
+            uint8_t *uw = reinterpret_cast<uint8_t *>(w);
+            vst1q_u8(uw, vld1q_u8(up));
+            vst1q_u8(uw + slen - 16, vld1q_u8(up + slen - 16));
+            w += slen;
+          } else {
+            uint16_t rem = slen;
+            if (rem >= 16) {
+              uint64_t a, b;
+              std::memcpy(&a, sp, 8); std::memcpy(&b, sp + 8, 8);
+              std::memcpy(w, &a, 8); std::memcpy(w + 8, &b, 8);
+              sp += 16; w += 16; rem = 0;
+            }
+            if (rem >= 8) {
+              uint64_t a;
+              std::memcpy(&a, sp, 8); std::memcpy(w, &a, 8);
+              sp += 8; w += 8; rem = static_cast<uint16_t>(rem - 8);
+            }
+            if (rem >= 4) {
+              uint32_t a;
+              std::memcpy(&a, sp, 4); std::memcpy(w, &a, 4);
+              sp += 4; w += 4; rem = static_cast<uint16_t>(rem - 4);
+            }
+            while (rem--) *w++ = *sp++;
+          }
+        } else {
+          std::memcpy(w, sp, slen);
+          w += slen;
+        }
+#else
+        if (BEAST_LIKELY(slen <= 31)) {
+          uint16_t rem = slen;
+          if (rem >= 16) {
+            uint64_t a, b;
+            std::memcpy(&a, sp, 8); std::memcpy(&b, sp + 8, 8);
+            std::memcpy(w, &a, 8); std::memcpy(w + 8, &b, 8);
+            sp += 16; w += 16; rem = static_cast<uint16_t>(rem - 16);
+          }
+          if (rem >= 8) {
+            uint64_t a;
+            std::memcpy(&a, sp, 8); std::memcpy(w, &a, 8);
+            sp += 8; w += 8; rem = static_cast<uint16_t>(rem - 8);
+          }
+          if (rem >= 4) {
+            uint32_t a;
+            std::memcpy(&a, sp, 4); std::memcpy(w, &a, 4);
+            sp += 4; w += 4; rem = static_cast<uint16_t>(rem - 4);
+          }
+          while (rem--) *w++ = *sp++;
+        } else {
+          std::memcpy(w, sp, slen);
+          w += slen;
+        }
+#endif
+        *w++ = '"';
+        break;
+      }
+
+      case TapeNodeType::Integer:
+      case TapeNodeType::NumberRaw:
+      case TapeNodeType::Double: {
+        const uint16_t nlen = static_cast<uint16_t>(meta & 0xFFFFu);
+        std::memcpy(w, src + nd.offset, nlen);
+        w += nlen;
+        break;
+      }
+
+      case TapeNodeType::BooleanTrue:
+        std::memcpy(w, "true", 4); w += 4; break;
+      case TapeNodeType::BooleanFalse:
+        std::memcpy(w, "false", 5); w += 5; break;
+      case TapeNodeType::Null:
+        std::memcpy(w, "null", 4); w += 4; break;
+
+      default:
+        break;
+      }
+    }
+
+    out.resize(static_cast<size_t>(w - w0));
+  }
 };
 
 // ─────────────────────────────────────────────────────────────

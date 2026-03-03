@@ -38,11 +38,14 @@ static double measure_dump(beast::json::lazy::DocumentView &ctx,
                             const std::string &content, int N) {
     beast::json::lazy::parse_reuse(ctx, content);
     auto root = beast::json::lazy::parse_reuse(ctx, content);
+    // Phase 73: buffer-reuse overload — pre-allocate once, skip malloc+memset.
+    std::string out;
+    out.reserve(content.size() + 16);
     for (int i = 0; i < 20; ++i)
-        root.dump();
+        root.dump(out);
     auto t0 = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < N; ++i)
-        root.dump();
+        root.dump(out);
     auto t1 = std::chrono::high_resolution_clock::now();
     return std::chrono::duration<double, std::micro>(t1 - t0).count() / N;
 }
