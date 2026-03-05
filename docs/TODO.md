@@ -1,4 +1,10 @@
-# Beast JSON Optimization — TODO
+# Beast JSON Optimization — TODO (Phase 기록)
+
+> **⚠️ 이 문서는 최적화 Phase 상세 기록 문서입니다.**
+> **앞으로의 작업 계획과 진행 현황은 [ROADMAP.md](ROADMAP.md) 에서 관리합니다.**
+> **신규 작업 추가는 ROADMAP.md 에 기록하세요.**
+
+---
 
 > **최종 업데이트**: 2026-03-05 (Phase 80-M1 ✅ — M1 serialize 4/4 전 파일 yyjson 동률 또는 대승 · serialize 최적화 완전 마무리)
 > **아키텍처 전략**: `docs/ARCH_STRATEGY.md` 참조 — 보유 3종 장비 + GitHub Actions CI 조합으로 전체 커버

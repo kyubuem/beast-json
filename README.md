@@ -394,28 +394,32 @@ kc_.lens[depth_][key_idx] = static_cast<uint16_t>(e - s);
 ---
 
 ## 📚 Documentation
+- [**Roadmap to v1.0**](docs/ROADMAP.md)
 - [API Readiness & The Ultimate API Blueprint](docs/API_READINESS_REPORT.md)
 - [1.0 Release GitHub Page TODO](docs/GITHUB_PAGE_TODO.md)
 - [Optimization Failures & History](docs/OPTIMIZATION_FAILURES.md)
-- [General TODO / Future Plans](docs/TODO.md)
+- [Optimization TODO / Phase History](docs/TODO.md)
 - [Extreme Optimization Plan (Phases 1-60)](docs/OPTIMIZATION_PLAN.md)
 
 ---
 
 ## 🗺️ Roadmap to 1.0 (The Ultimate API)
-We are currently purging all legacy DOM code to establish a brand-new, modern C++20 **"Zero-Allocation Monadic DOM"**. This upcoming API combines the raw speed of `yyjson`/`simdjson`, the meta-programming power of `Glaze`, and the sheer intuitiveness of `nlohmann/json`.
 
-**Currently Under Active Development (Target: 1.0 Release):**
-- [x] **Core Engine Perfection**: Reached >5 GB/s on Apple Silicon & Snapdragon 8 Gen 2.
-- [ ] **Eradicate Legacy DOM**: Deleting `beast::json::Value`, `Parser`, `Object`, `Array` to reduce binary size.
-- [ ] **3-Tier Architecture**: Separation into `beast::core` (engine), `beast::utils` (macros/utilities), and `beast` (public facade).
-- [ ] **Implicit Conversions (nlohmann style)**: `int age = doc["age"];`
-- [ ] **1-Line Meta-Deserialization (Glaze style)**: `auto user = beast::read<User>(json_str);` via `BEAST_DEFINE_STRUCT()`.
-- [ ] **Pipe Operator Fallback `|`**: `int age = doc["users"][0]["age"] | 18;` (Zero exceptions, monad-style error propagation).
-- [ ] **Zero-Allocation Typed Views**: `for(int id : doc["ids"].as_array<int>())`
+> 3종 플랫폼 최적화 완료 (x86_64 Phase 75 · Snapdragon Gen 2 Phase 73 · M1 Pro Phase 80-M1). 다음 목표: **Zero-Allocation Monadic DOM**.
+
+자세한 계획 및 진행 현황은 **[docs/ROADMAP.md](docs/ROADMAP.md)** 를 참조하세요.
+
+**핵심 목표 (v1.0):**
+- [x] **Core Engine**: x86_64 / Snapdragon 8 Gen 2 / M1 Pro 전 플랫폼 최적화 완료.
+- [ ] **Legacy DOM 제거**: `beast::json::Value`, `Parser`, `Object`, `Array` 삭제.
+- [ ] **3-Tier 아키텍처**: `beast::core` · `beast::utils` · `beast` 퍼사드 분리.
+- [ ] **암시적 변환** (nlohmann 스타일): `int age = doc["age"];`
+- [ ] **1줄 역직렬화** (Glaze 스타일): `auto user = beast::read<User>(json_str);`
+- [ ] **Pipe Fallback `|`**: `int age = doc["users"][0]["age"] | 18;` (모나드 스타일)
+- [ ] **Zero-Allocation Typed Views**: `for (int id : doc["ids"].as_array<int>())`
 - [ ] **Compile-Time JSON Pointer**: `doc.at<"/api/config/timeout">()`
-- [ ] **100% RFC Compliance**: Strict testing against JSON Test Suite (RFC 8259, JSON Pointer, JSON Patch).
-- [ ] **Foreign Language Bindings**: C-API exports to support blazing-fast Python (`pybind11`/`ctypes`) and Node.js (`N-API`) wrappers.
+- [ ] **100% RFC 8259 준수**: JSON Test Suite 전체 통과.
+- [ ] **Foreign Language Bindings**: Python (`pybind11`/`ctypes`) · Node.js (`N-API`).
 
 ---
 
