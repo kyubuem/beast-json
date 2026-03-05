@@ -46,6 +46,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <future>
 #include <initializer_list>
 #include <iomanip> // for std::setw
@@ -469,6 +470,36 @@ public:
 };
 
 // ─────────────────────────────────────────────────────────────
+// C++20 Concepts — named constraints used throughout Value/SafeValue
+// ─────────────────────────────────────────────────────────────
+
+/// Matches any integral type except bool (maps to JSON integer).
+template<typename T>
+concept JsonInteger = std::integral<T> && !std::same_as<T, bool>;
+
+/// Matches floating-point types (maps to JSON double).
+template<typename T>
+concept JsonFloat = std::floating_point<T>;
+
+/// Types that can be read back from a JSON value via as<T>().
+template<typename T>
+concept JsonReadable =
+    std::same_as<T, bool>        ||
+    JsonInteger<T>               ||
+    JsonFloat<T>                 ||
+    std::same_as<T, std::string> ||
+    std::same_as<T, std::string_view>;
+
+/// Types that can be written into a JSON value via set()/operator=().
+template<typename T>
+concept JsonWritable =
+    std::same_as<T, std::nullptr_t> ||
+    std::same_as<T, bool>           ||
+    JsonInteger<T>                  ||
+    JsonFloat<T>                    ||
+    std::convertible_to<T, std::string_view>;
+
+// ─────────────────────────────────────────────────────────────
 // Forward declarations
 // ─────────────────────────────────────────────────────────────
 
@@ -558,9 +589,7 @@ public:
     doc_->last_dump_size_ = 0;
   }
 
-  template <typename T, std::enable_if_t<std::is_integral_v<T> &&
-                                             !std::is_same_v<T, bool>,
-                                         int> = 0>
+  template<JsonInteger T>
   void set(T val) {
     char buf[32];
     auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf),
@@ -570,8 +599,7 @@ public:
     doc_->last_dump_size_ = 0;
   }
 
-  template <typename T,
-            std::enable_if_t<std::is_floating_point_v<T>, int> = 0>
+  template<JsonFloat T>
   void set(T val) {
     char buf[64];
 #if __cpp_lib_to_chars >= 201611L && !defined(__APPLE__)
@@ -613,13 +641,10 @@ public:
   Value& operator=(std::string_view s)   { set(s);       return *this; }
   Value& operator=(const std::string &s) { set(s);       return *this; }
 
-  template <typename T,
-            std::enable_if_t<std::is_integral_v<T> && !std::is_same_v<T, bool>,
-                             int> = 0>
+  template<JsonInteger T>
   Value& operator=(T val) { set(val); return *this; }
 
-  template <typename T,
-            std::enable_if_t<std::is_floating_point_v<T>, int> = 0>
+  template<JsonFloat T>
   Value& operator=(T val) { set(val); return *this; }
 
   // ── Safe optional-chain access ────────────────────────────────────────────
@@ -885,7 +910,9 @@ public:
   }
 
   // try_as<T>(): non-throwing variant — returns std::nullopt on any error.
-  template <typename T> std::optional<T> try_as() const noexcept {
+  // Constrained to JsonReadable types; ill-formed for unsupported T.
+  template<JsonReadable T>
+  std::optional<T> try_as() const noexcept {
     try {
       return as<T>();
     } catch (...) {
@@ -899,11 +926,7 @@ public:
   // Restricted to arithmetic types and std::string/string_view to prevent
   // accidental conversions.
 
-  template <typename T,
-            std::enable_if_t<std::is_arithmetic_v<T> ||
-                                 std::is_same_v<T, std::string> ||
-                                 std::is_same_v<T, std::string_view>,
-                             int> = 0>
+  template<JsonReadable T>
   operator T() const {
     return as<T>();
   }
@@ -3760,19 +3783,68 @@ class Parser {
     // ── Terminal: typed extraction ────────────────────────────────────────────
 
     // as<T>() — returns std::optional<T>; std::nullopt when absent or wrong type
-    template <typename T> std::optional<T> as() const noexcept {
+    template<JsonReadable T>
+    std::optional<T> as() const noexcept {
       if (!has_) return std::nullopt;
       return val_.try_as<T>();
     }
 
     // value_or(default) — direct T with fallback; never throws
-    template <typename T> T value_or(T def) const noexcept {
+    template<JsonReadable T>
+    T value_or(T def) const noexcept {
       auto r = as<T>();
       return r ? *r : def;
     }
 
     // dump() — "null" when absent
     std::string dump() const { return has_ ? val_.dump() : "null"; }
+
+    // ── Monadic operations ────────────────────────────────────────────────────
+    //
+    // Inspired by the Monad pattern and C++23 std::optional monadic ops.
+    // All three propagate the absent state (has_=false) without branching at
+    // the call site, keeping transformation pipelines free of if-checks.
+    //
+    // Example pipeline:
+    //
+    //   auto price = root["store"]["items"][0]
+    //       .and_then([](const Value& v) -> SafeValue {
+    //           return v.is_number() ? SafeValue{v} : SafeValue{};
+    //       })
+    //       .transform([](const Value& v) { return v.as<double>() * 1.1; })
+    //       .value_or(0.0);
+
+    // and_then — flatMap: F(Value) -> SafeValue.
+    // If absent, returns SafeValue{}.  F is only called when has_value().
+    // Use when the transformation can itself fail (returns SafeValue).
+    template<std::invocable<const Value&> F>
+      requires std::same_as<std::invoke_result_t<F, const Value&>, SafeValue>
+    SafeValue and_then(F&& f) const
+        noexcept(std::is_nothrow_invocable_v<F, const Value&>) {
+      if (!has_) return {};
+      return std::invoke(std::forward<F>(f), val_);
+    }
+
+    // transform — map: F(Value) -> U, result wrapped in std::optional<U>.
+    // If absent, returns std::nullopt.  Never throws unless F throws.
+    // Use when the transformation always succeeds given a valid Value.
+    template<std::invocable<const Value&> F>
+    auto transform(F&& f) const
+        noexcept(std::is_nothrow_invocable_v<F, const Value&>)
+        -> std::optional<std::invoke_result_t<F, const Value&>> {
+      if (!has_) return std::nullopt;
+      return std::invoke(std::forward<F>(f), val_);
+    }
+
+    // or_else — fallback: F() -> SafeValue, called only when absent.
+    // Use to supply a default SafeValue when the chain is broken.
+    template<std::invocable F>
+      requires std::same_as<std::invoke_result_t<F>, SafeValue>
+    SafeValue or_else(F&& f) const
+        noexcept(std::is_nothrow_invocable_v<F>) {
+      if (has_) return *this;
+      return std::invoke(std::forward<F>(f));
+    }
   };
 
   // ── Value::get() out-of-line definitions (SafeValue now complete) ──────────

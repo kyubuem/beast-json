@@ -733,3 +733,155 @@ TEST(SafeValue, DumpAbsent) {
   auto root = parse_root(doc, R"({"x": 1})");
   EXPECT_EQ(root.get("missing").dump(), "null");
 }
+
+// ── Monadic operations ────────────────────────────────────────────────────────
+
+TEST(Monadic, AndThenPresent) {
+  Document doc;
+  auto root = parse_root(doc, R"({"price": 100})");
+  // and_then: Value is present, transform succeeds → still SafeValue
+  auto result = root.get("price")
+      .and_then([](const Value& v) -> SafeValue {
+          return v.is_number() ? SafeValue{v} : SafeValue{};
+      });
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result.as<int>(), std::optional<int>(100));
+}
+
+TEST(Monadic, AndThenAbsent) {
+  Document doc;
+  auto root = parse_root(doc, R"({"price": 100})");
+  // and_then: Value is absent, F is never called → SafeValue{}
+  bool called = false;
+  auto result = root.get("missing")
+      .and_then([&](const Value&) -> SafeValue {
+          called = true;
+          return {};
+      });
+  EXPECT_FALSE(result.has_value());
+  EXPECT_FALSE(called);
+}
+
+TEST(Monadic, AndThenValidationFail) {
+  Document doc;
+  auto root = parse_root(doc, R"({"tag": "hello"})");
+  // and_then: Value is present but validation rejects it → SafeValue{}
+  auto result = root.get("tag")
+      .and_then([](const Value& v) -> SafeValue {
+          return v.is_number() ? SafeValue{v} : SafeValue{};
+      });
+  EXPECT_FALSE(result.has_value());
+}
+
+TEST(Monadic, TransformPresent) {
+  Document doc;
+  auto root = parse_root(doc, R"({"count": 7})");
+  // transform: map Value -> double
+  auto result = root.get("count")
+      .transform([](const Value& v) { return v.as<int>() * 2; });
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, 14);
+}
+
+TEST(Monadic, TransformAbsent) {
+  Document doc;
+  auto root = parse_root(doc, R"({"count": 7})");
+  auto result = root.get("missing")
+      .transform([](const Value& v) { return v.as<int>(); });
+  EXPECT_FALSE(result.has_value());
+}
+
+TEST(Monadic, TransformStringExtract) {
+  Document doc;
+  auto root = parse_root(doc, R"({"name": "beast"})");
+  auto result = root.get("name")
+      .transform([](const Value& v) { return std::string(v.as<std::string_view>()); });
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "beast");
+}
+
+TEST(Monadic, OrElsePresent) {
+  Document doc;
+  auto root = parse_root(doc, R"({"x": 42})");
+  bool called = false;
+  auto result = root.get("x")
+      .or_else([&]() -> SafeValue {
+          called = true;
+          return {};
+      });
+  EXPECT_TRUE(result.has_value());
+  EXPECT_FALSE(called);
+}
+
+TEST(Monadic, OrElseAbsent) {
+  Document doc1, doc2;
+  auto root1 = parse_root(doc1, R"({"x": 42})");
+  auto root2 = parse_root(doc2, R"({"default": 99})");
+  auto result = root1.get("missing")
+      .or_else([&]() -> SafeValue { return root2.get("default"); });
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result.as<int>(), std::optional<int>(99));
+}
+
+TEST(Monadic, PipelineChain) {
+  Document doc;
+  // Full pipeline: navigate → validate → transform → fallback
+  auto root = parse_root(doc, R"({"store": {"item": {"price": 200}}})");
+  double price = root.get("store")["item"]["price"]
+      .and_then([](const Value& v) -> SafeValue {
+          return v.is_number() ? SafeValue{v} : SafeValue{};
+      })
+      .transform([](const Value& v) { return v.as<double>() * 1.1; })
+      .value_or(0.0);
+  EXPECT_NEAR(price, 220.0, 1e-9);
+}
+
+TEST(Monadic, PipelineChainMissing) {
+  Document doc;
+  auto root = parse_root(doc, R"({"store": {}})");
+  double price = root.get("store")["item"]["price"]
+      .and_then([](const Value& v) -> SafeValue {
+          return v.is_number() ? SafeValue{v} : SafeValue{};
+      })
+      .transform([](const Value& v) { return v.as<double>() * 1.1; })
+      .value_or(-1.0);
+  EXPECT_DOUBLE_EQ(price, -1.0);
+}
+
+// ── Concept constraints (compile-time) ────────────────────────────────────────
+
+TEST(Concepts, JsonIntegerConcept) {
+  // JsonInteger accepts int, long, short but not bool
+  static_assert(beast::json::lazy::JsonInteger<int>);
+  static_assert(beast::json::lazy::JsonInteger<long>);
+  static_assert(beast::json::lazy::JsonInteger<int64_t>);
+  static_assert(!beast::json::lazy::JsonInteger<bool>);
+  static_assert(!beast::json::lazy::JsonInteger<float>);
+  SUCCEED();
+}
+
+TEST(Concepts, JsonFloatConcept) {
+  static_assert(beast::json::lazy::JsonFloat<float>);
+  static_assert(beast::json::lazy::JsonFloat<double>);
+  static_assert(!beast::json::lazy::JsonFloat<int>);
+  static_assert(!beast::json::lazy::JsonFloat<bool>);
+  SUCCEED();
+}
+
+TEST(Concepts, JsonReadableConcept) {
+  static_assert(beast::json::lazy::JsonReadable<bool>);
+  static_assert(beast::json::lazy::JsonReadable<int>);
+  static_assert(beast::json::lazy::JsonReadable<double>);
+  static_assert(beast::json::lazy::JsonReadable<std::string>);
+  static_assert(beast::json::lazy::JsonReadable<std::string_view>);
+  SUCCEED();
+}
+
+TEST(Concepts, JsonWritableConcept) {
+  static_assert(beast::json::lazy::JsonWritable<bool>);
+  static_assert(beast::json::lazy::JsonWritable<int>);
+  static_assert(beast::json::lazy::JsonWritable<double>);
+  static_assert(beast::json::lazy::JsonWritable<std::string_view>);
+  static_assert(beast::json::lazy::JsonWritable<std::nullptr_t>);
+  SUCCEED();
+}
