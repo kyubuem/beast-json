@@ -469,6 +469,12 @@ public:
 };
 
 // ─────────────────────────────────────────────────────────────
+// Forward declarations
+// ─────────────────────────────────────────────────────────────
+
+class SafeValue; // optional-propagating proxy (defined after Value)
+
+// ─────────────────────────────────────────────────────────────
 // Value + zero-copy dump()
 // ─────────────────────────────────────────────────────────────
 
@@ -593,6 +599,44 @@ public:
     doc_->mutations_.erase(idx_);
     doc_->last_dump_size_ = 0;
   }
+
+  // ── operator= write overloads ─────────────────────────────────────────────
+  //
+  // Enables: root["key"] = 42;  root["arr"][0] = "text";
+  // Each overload delegates to set() and returns *this for chaining.
+  // The compiler-generated copy assignment (Value& = const Value&) is
+  // retained for view-copy semantics (root["x"] = other_value_ref).
+
+  Value& operator=(std::nullptr_t)       { set(nullptr); return *this; }
+  Value& operator=(bool b)               { set(b);       return *this; }
+  Value& operator=(const char *s)        { set(s);       return *this; }
+  Value& operator=(std::string_view s)   { set(s);       return *this; }
+  Value& operator=(const std::string &s) { set(s);       return *this; }
+
+  template <typename T,
+            std::enable_if_t<std::is_integral_v<T> && !std::is_same_v<T, bool>,
+                             int> = 0>
+  Value& operator=(T val) { set(val); return *this; }
+
+  template <typename T,
+            std::enable_if_t<std::is_floating_point_v<T>, int> = 0>
+  Value& operator=(T val) { set(val); return *this; }
+
+  // ── Safe optional-chain access ────────────────────────────────────────────
+  //
+  // get(key/idx) starts — or continues — an optional chain.  The return
+  // type is SafeValue (defined below), which propagates std::nullopt
+  // silently through every subsequent operator[] so the chain NEVER throws.
+  //
+  // Usage:
+  //   auto id = root.get("user")["id"].as<int>();     // std::optional<int>
+  //   int  id = root.get("user")["id"].value_or(-1);  // int with default
+  //
+  // These are declared here and defined out-of-line after SafeValue.
+  SafeValue get(std::string_view key) const noexcept;
+  SafeValue get(const char *key)      const noexcept;
+  SafeValue get(size_t idx)           const noexcept;
+  SafeValue get(int idx)              const noexcept;
 
   // ── Internal: skip past the value at tape[idx], return next tape index ─────
   // O(n) walk for nested objects/arrays; O(1) for scalar types.
@@ -3634,6 +3678,129 @@ class Parser {
 #endif
       return Value(&doc, 0);
     }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // SafeValue — optional-propagating chain proxy
+  //
+  // Returned by Value::get(key/idx).  Every subsequent operator[] propagates
+  // std::nullopt silently: if any step is absent, the entire chain returns
+  // an empty SafeValue without throwing.
+  //
+  // Read path comparison:
+  //   root["user"]["id"].as<int>()        ← throws on missing key (fast path)
+  //   root.get("user")["id"].as<int>()    ← std::optional<int>, never throws
+  //   root.get("user")["id"].value_or(-1) ← int with default, never throws
+  //
+  // SafeValue is std::optional<Value>-compatible: has_value(), operator bool,
+  // operator* and operator-> all work, so existing code using optional<Value>
+  // patterns compiles unchanged.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  class SafeValue {
+    Value val_; // valid only when has_ == true; default-constructed otherwise
+    bool has_ = false;
+
+  public:
+    SafeValue() noexcept = default;
+    explicit SafeValue(Value v) noexcept : val_(v), has_(true) {}
+
+    // ── std::optional-compatible interface ───────────────────────────────────
+
+    bool has_value() const noexcept { return has_; }
+    explicit operator bool() const noexcept { return has_; }
+
+    Value &value() {
+      if (!has_) throw std::bad_optional_access{};
+      return val_;
+    }
+    const Value &value() const {
+      if (!has_) throw std::bad_optional_access{};
+      return val_;
+    }
+    Value &operator*() { return value(); }
+    const Value &operator*() const { return value(); }
+    Value *operator->() { return &value(); }
+    const Value *operator->() const { return &value(); }
+
+    // ── Type checks — false when absent ──────────────────────────────────────
+
+    bool is_null()   const noexcept { return has_ && val_.is_null();   }
+    bool is_bool()   const noexcept { return has_ && val_.is_bool();   }
+    bool is_int()    const noexcept { return has_ && val_.is_int();    }
+    bool is_double() const noexcept { return has_ && val_.is_double(); }
+    bool is_number() const noexcept { return has_ && val_.is_number(); }
+    bool is_string() const noexcept { return has_ && val_.is_string(); }
+    bool is_object() const noexcept { return has_ && val_.is_object(); }
+    bool is_array()  const noexcept { return has_ && val_.is_array();  }
+
+    // ── Chaining — absent propagates forward, never throws ───────────────────
+
+    SafeValue operator[](std::string_view key) const noexcept {
+      if (!has_) return {};
+      return val_.get(key); // calls Value::get() defined below
+    }
+    SafeValue operator[](const char *key) const noexcept {
+      return (*this)[std::string_view(key)];
+    }
+    SafeValue operator[](size_t idx) const noexcept {
+      if (!has_) return {};
+      return val_.get(idx);
+    }
+    SafeValue operator[](int idx) const noexcept {
+      if (idx < 0 || !has_) return {};
+      return val_.get(static_cast<size_t>(idx));
+    }
+
+    // Alias for further chaining (same as operator[]):
+    SafeValue get(std::string_view key) const noexcept { return (*this)[key]; }
+    SafeValue get(const char *key)      const noexcept { return (*this)[key]; }
+    SafeValue get(size_t idx)           const noexcept { return (*this)[idx]; }
+    SafeValue get(int idx)              const noexcept { return (*this)[idx]; }
+
+    // ── Terminal: typed extraction ────────────────────────────────────────────
+
+    // as<T>() — returns std::optional<T>; std::nullopt when absent or wrong type
+    template <typename T> std::optional<T> as() const noexcept {
+      if (!has_) return std::nullopt;
+      return val_.try_as<T>();
+    }
+
+    // value_or(default) — direct T with fallback; never throws
+    template <typename T> T value_or(T def) const noexcept {
+      auto r = as<T>();
+      return r ? *r : def;
+    }
+
+    // dump() — "null" when absent
+    std::string dump() const { return has_ ? val_.dump() : "null"; }
+  };
+
+  // ── Value::get() out-of-line definitions (SafeValue now complete) ──────────
+
+  inline SafeValue Value::get(std::string_view key) const noexcept {
+    auto opt = find(key); // find() returns std::optional<Value>
+    return opt ? SafeValue(*opt) : SafeValue{};
+  }
+  inline SafeValue Value::get(const char *key) const noexcept {
+    return get(std::string_view(key));
+  }
+  inline SafeValue Value::get(size_t idx) const noexcept {
+    if (!is_array()) return {};
+    uint32_t i = idx_ + 1;
+    const size_t ntape = doc_->tape.size();
+    size_t count = 0;
+    while (i < ntape) {
+      if (doc_->tape[i].type() == TapeNodeType::ArrayEnd) return {};
+      if (count == idx) return SafeValue(Value(doc_, i));
+      i = skip_value_(i);
+      ++count;
+    }
+    return {};
+  }
+  inline SafeValue Value::get(int idx) const noexcept {
+    if (idx < 0) return {};
+    return get(static_cast<size_t>(idx));
+  }
 
   } // namespace lazy
 } // namespace json

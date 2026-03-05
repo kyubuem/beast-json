@@ -509,3 +509,227 @@ TEST(ValueMutation, LargerMutationNoOverflow) {
   std::string out = root.dump();
   EXPECT_EQ(out, R"({"s":"a much longer string than the original"})");
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// operator= write syntax: root["key"] = value
+// ══════════════════════════════════════════════════════════════════════════════
+
+TEST(ValueAssign, AssignInt) {
+  Document doc;
+  auto root = parse_root(doc, R"({"x": 0})");
+  root["x"] = 42;
+  EXPECT_EQ(root["x"].as<int>(), 42);
+  EXPECT_EQ(root.dump(), R"({"x":42})");
+}
+
+TEST(ValueAssign, AssignNegative) {
+  Document doc;
+  auto root = parse_root(doc, R"({"n": 0})");
+  root["n"] = -7;
+  EXPECT_EQ(root["n"].as<int>(), -7);
+}
+
+TEST(ValueAssign, AssignDouble) {
+  Document doc;
+  auto root = parse_root(doc, R"({"f": 0})");
+  root["f"] = 1.5;
+  EXPECT_NEAR(root["f"].as<double>(), 1.5, 1e-9);
+}
+
+TEST(ValueAssign, AssignBool) {
+  Document doc;
+  auto root = parse_root(doc, R"({"b": false})");
+  root["b"] = true;
+  EXPECT_TRUE(root["b"].as<bool>());
+  EXPECT_EQ(root.dump(), R"({"b":true})");
+}
+
+TEST(ValueAssign, AssignNull) {
+  Document doc;
+  auto root = parse_root(doc, R"({"v": 99})");
+  root["v"] = nullptr;
+  EXPECT_TRUE(root["v"].is_null());
+  EXPECT_EQ(root.dump(), R"({"v":null})");
+}
+
+TEST(ValueAssign, AssignStringLiteral) {
+  Document doc;
+  auto root = parse_root(doc, R"({"name": "old"})");
+  root["name"] = "new";
+  EXPECT_EQ(root["name"].as<std::string>(), "new");
+  EXPECT_EQ(root.dump(), R"({"name":"new"})");
+}
+
+TEST(ValueAssign, AssignStdString) {
+  Document doc;
+  auto root = parse_root(doc, R"({"msg": ""})");
+  std::string s = "hello";
+  root["msg"] = s;
+  EXPECT_EQ(root["msg"].as<std::string>(), "hello");
+}
+
+TEST(ValueAssign, AssignArrayElement) {
+  Document doc;
+  auto root = parse_root(doc, "[1, 2, 3]");
+  root[1] = 99;
+  EXPECT_EQ(root.dump(), "[1,99,3]");
+}
+
+TEST(ValueAssign, AssignNested) {
+  Document doc;
+  auto root = parse_root(doc, R"({"a": {"b": 0}})");
+  root["a"]["b"] = 42;
+  EXPECT_EQ(root.dump(), R"({"a":{"b":42}})");
+}
+
+TEST(ValueAssign, AssignChained) {
+  Document doc;
+  auto root = parse_root(doc, R"({"x": 1, "y": 2})");
+  root["x"] = 10;
+  root["y"] = 20;
+  EXPECT_EQ(root.dump(), R"({"x":10,"y":20})");
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SafeValue: get() optional chain — never throws
+// ══════════════════════════════════════════════════════════════════════════════
+
+using namespace beast::json::lazy; // access SafeValue type
+
+TEST(SafeValue, GetPresentKey) {
+  Document doc;
+  auto root = parse_root(doc, R"({"id": 7})");
+  auto v = root.get("id");
+  EXPECT_TRUE(v.has_value());
+  EXPECT_EQ(v.as<int>(), std::optional<int>(7));
+}
+
+TEST(SafeValue, GetMissingKey) {
+  Document doc;
+  auto root = parse_root(doc, R"({"id": 7})");
+  auto v = root.get("missing");
+  EXPECT_FALSE(v.has_value());
+  EXPECT_FALSE(v.as<int>().has_value());
+}
+
+TEST(SafeValue, GetChainBothPresent) {
+  Document doc;
+  auto root = parse_root(doc, R"({"user": {"id": 42}})");
+  auto id = root.get("user")["id"].as<int>();
+  ASSERT_TRUE(id.has_value());
+  EXPECT_EQ(*id, 42);
+}
+
+TEST(SafeValue, GetChainFirstMissing) {
+  Document doc;
+  auto root = parse_root(doc, R"({"user": {"id": 42}})");
+  auto id = root.get("nope")["id"].as<int>(); // "nope" doesn't exist
+  EXPECT_FALSE(id.has_value()); // chain short-circuits, no throw
+}
+
+TEST(SafeValue, GetChainSecondMissing) {
+  Document doc;
+  auto root = parse_root(doc, R"({"user": {"id": 42}})");
+  auto v = root.get("user")["nope"].as<int>(); // "nope" not in user
+  EXPECT_FALSE(v.has_value());
+}
+
+TEST(SafeValue, GetDeepChain) {
+  Document doc;
+  auto root = parse_root(doc, R"({"a": {"b": {"c": 99}}})");
+  auto v = root.get("a")["b"]["c"].as<int>();
+  ASSERT_TRUE(v.has_value());
+  EXPECT_EQ(*v, 99);
+}
+
+TEST(SafeValue, GetDeepChainMidMissing) {
+  Document doc;
+  auto root = parse_root(doc, R"({"a": {"b": {"c": 99}}})");
+  auto v = root.get("a")["x"]["c"].as<int>(); // "x" missing
+  EXPECT_FALSE(v.has_value());
+}
+
+TEST(SafeValue, ValueOrPresent) {
+  Document doc;
+  auto root = parse_root(doc, R"({"score": 88})");
+  int s = root.get("score").value_or(0);
+  EXPECT_EQ(s, 88);
+}
+
+TEST(SafeValue, ValueOrMissing) {
+  Document doc;
+  auto root = parse_root(doc, R"({"score": 88})");
+  int s = root.get("missing").value_or(-1);
+  EXPECT_EQ(s, -1);
+}
+
+TEST(SafeValue, ValueOrNestedMissing) {
+  Document doc;
+  auto root = parse_root(doc, R"({"user": {}})");
+  int id = root.get("user")["id"].value_or(0);
+  EXPECT_EQ(id, 0); // "id" missing → 0
+}
+
+TEST(SafeValue, BoolConversion) {
+  Document doc;
+  auto root = parse_root(doc, R"({"x": 1})");
+  EXPECT_TRUE(static_cast<bool>(root.get("x")));
+  EXPECT_FALSE(static_cast<bool>(root.get("y")));
+}
+
+TEST(SafeValue, StarOperator) {
+  Document doc;
+  auto root = parse_root(doc, R"({"v": 5})");
+  auto sv = root.get("v");
+  EXPECT_EQ((*sv).as<int>(), 5);
+}
+
+TEST(SafeValue, ArrowOperator) {
+  Document doc;
+  auto root = parse_root(doc, R"({"v": 5})");
+  auto sv = root.get("v");
+  EXPECT_EQ(sv->as<int>(), 5);
+}
+
+TEST(SafeValue, TypeChecks) {
+  Document doc;
+  auto root = parse_root(doc, R"({"n": 1, "s": "x", "b": true})");
+  EXPECT_TRUE(root.get("n").is_int());
+  EXPECT_TRUE(root.get("s").is_string());
+  EXPECT_TRUE(root.get("b").is_bool());
+  EXPECT_FALSE(root.get("missing").is_int());
+}
+
+TEST(SafeValue, GetArrayIndex) {
+  Document doc;
+  auto root = parse_root(doc, R"({"ids": [10, 20, 30]})");
+  auto v = root.get("ids")[1].as<int>();
+  ASSERT_TRUE(v.has_value());
+  EXPECT_EQ(*v, 20);
+}
+
+TEST(SafeValue, GetArrayOutOfRange) {
+  Document doc;
+  auto root = parse_root(doc, "[1, 2]");
+  EXPECT_FALSE(root.get(5).has_value()); // index 5 doesn't exist
+}
+
+TEST(SafeValue, GetOnNonObject) {
+  Document doc;
+  auto root = parse_root(doc, "[1, 2]");
+  EXPECT_FALSE(root.get("key").has_value()); // array, not object
+}
+
+TEST(SafeValue, DumpPresent) {
+  // SafeValue::dump() delegates to val_.dump() which serializes the whole
+  // document (dump() always iterates from tape[0]).
+  Document doc;
+  auto root = parse_root(doc, R"({"x": 1})");
+  EXPECT_EQ(root.get("x").dump(), R"({"x":1})");
+}
+
+TEST(SafeValue, DumpAbsent) {
+  Document doc;
+  auto root = parse_root(doc, R"({"x": 1})");
+  EXPECT_EQ(root.get("missing").dump(), "null");
+}

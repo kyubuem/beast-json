@@ -106,7 +106,7 @@
 
 ### 타입 변환 · 역직렬화
 
-- [x] **Beast Value Accessor + Mutation API** (ctest 137/137 PASS, 2026-03-05):
+- [x] **Beast Value Accessor + Mutation + SafeValue API** (ctest 166/166 PASS, 2026-03-05):
   - **타입 체크**: `is_null()`, `is_bool()`, `is_int()`, `is_double()`, `is_number()`, `is_string()`
   - **`as<T>()`** — Beast 고유 패턴: 단일 정규 접근자, 타입 불일치 시 `std::runtime_error`
   - **`try_as<T>()`** — `std::optional<T>` 반환, 예외 없는 안전 접근
@@ -119,25 +119,35 @@
     - `dump()` / `dump(string&)` / `is_*()` / `as<T>()` / `try_as<T>()` 모두 뮤테이션 반영
     - 뮤테이션 없는 경우 zero overhead (`BEAST_UNLIKELY`, map 미탐색)
   - `const char*` / `int` 오버로드로 연산자 중의성 방지
+  - **`operator=(T)`** — `=` 구문 쓰기: `root["key"] = 42;`
+  - **`SafeValue`** — optional propagating proxy:
+    - `get(key/idx)` → `SafeValue` (throws 없이 optional 체인 시작)
+    - `SafeValue::operator[]` → 체인 전파 (absent 시 nullopt 전파)
+    - `SafeValue::as<T>()` → `std::optional<T>`
+    - `SafeValue::value_or(T)` → 기본값 폴백
+    - `has_value()` / `operator bool` / `operator*` / `operator->` 지원
 
   ```cpp
   beast::Document doc;
   auto root = beast::parse(doc, R"({"user": {"id": 7, "score": 3.14}})");
 
-  // Read — as<T>(), 암시적 변환, try_as<T>(), find()
-  int id       = root["user"]["id"].as<int>();
-  int id2      = root["user"]["id"];             // 암시적 변환
-  auto maybe   = root["user"]["id"].try_as<int>(); // std::optional<int>
-  if (auto v = root.find("user")) { /* ... */ }
+  // Read — throwing (fast path, 확신 있는 접근)
+  int id = root["user"]["id"].as<int>();
+  int id2 = root["user"]["id"];             // 암시적 변환
 
-  // Write — set()
-  root["user"]["id"].set(99);           // int
-  root["user"]["score"].set(9.9);       // double
-  root["user"].find("name")->set("Eve"); // string
-  root["user"]["id"].set(nullptr);      // null
+  // Read — safe chain (never throws, std::optional 전파)
+  auto maybe = root.get("user")["id"].as<int>(); // std::optional<int>
+  int  safe  = root.get("user")["id"].value_or(-1); // 기본값
+  int  deep  = root.get("a")["b"]["c"].value_or(0); // 중간 missing → 0
+
+  // Write — set() 또는 = 구문
+  root["user"]["id"] = 99;
+  root["user"]["score"] = 9.9;
+  root["user"]["name"] = "Eve";
+  root["user"]["id"] = nullptr;
 
   // Reflected immediately in dump()
-  std::string json = root.dump(); // {"user":{"id":null,"score":9.9,...}}
+  std::string json = root.dump();
 
   // Restore original
   root["user"]["id"].unset();
