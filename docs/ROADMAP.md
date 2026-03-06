@@ -1,7 +1,7 @@
 # Beast JSON — Roadmap
 
-> **최종 업데이트**: 2026-03-05
-> 최적화 3종 플랫폼 완료 · **Legacy DOM 제거 완료** (7,880→3,187 lines) · **The Ultimate API 완성** · **Zero-Effort 자동 직렬화 엔진 완성** (ctest 312/312 PASS) → 다음 목표: **RFC 8259 완전 준수 + Foreign Language Bindings (v1.0)**
+> **최종 업데이트**: 2026-03-06
+> 최적화 3종 플랫폼 완료 · **Legacy DOM 제거 완료** (7,880→3,187 lines) · **The Ultimate API 완성** · **Zero-Effort 자동 직렬화 엔진 완성** · **RFC 8259 완전 준수** · **Foreign Language Bindings 완성** (ctest 368/368 PASS) — **v1.0 목표 달성**
 
 ---
 
@@ -380,8 +380,80 @@
 
 ### 정합성 · 표준
 
-- [ ] **100% RFC 8259 준수**: JSON Test Suite 전체 통과 (JSON Pointer, JSON Patch 포함)
-- [ ] **Foreign Language Bindings**: C-API → Python (`pybind11`/`ctypes`) · Node.js (`N-API`)
+- [x] **100% RFC 8259 준수** (ctest 368/368 PASS, 2026-03-06):
+  - **`beast::rfc8259::validate(json)`** — standalone RFC 8259 검증기 (56개 테스트 통과)
+  - **`beast::parse_strict(doc, json)`** — 검증 후 파싱, `std::runtime_error` + 오프셋 정보 포함
+  - **검증 범위**: 후행 쉼표 거부, 선행 0 거부, 불완전 이스케이프 거부, 제어 문자 거부, 후행 내용 거부, 빈 입력 거부
+  - **구현체**: `beast::rfc8259::detail_::Validator` (recursive descent, zero-allocation)
+
+  ```cpp
+  // 검증만
+  try { beast::rfc8259::validate("[1,2,3]"); }
+  catch (const std::runtime_error& e) { /* offset 포함 메시지 */ }
+
+  // 검증 + 파싱 (한 번에)
+  beast::Document doc;
+  auto root = beast::parse_strict(doc, R"({"a":1})");  // 통과
+  auto bad  = beast::parse_strict(doc, "[1,2,]");      // 예외: trailing comma at offset 5
+  ```
+
+- [x] **Foreign Language Bindings** — C-API + Python ctypes (2026-03-06):
+
+  **C Shared Library** (`bindings/c/`):
+  - 오파크 핸들 기반: `BJSONDocument*` / `BJSONValue*` / `BJSONIter*`
+  - 문서 생명주기: `bjson_doc_create()` / `bjson_doc_destroy()`
+  - 파싱: `bjson_parse()` / `bjson_parse_strict()` / `bjson_last_error()`
+  - 타입 조회: `bjson_type()` / `bjson_type_name()` / `bjson_is_valid()`
+  - 스칼라 추출: `bjson_as_bool()` / `bjson_as_int()` / `bjson_as_double()` / `bjson_as_string()`
+  - 컨테이너: `bjson_size()` / `bjson_empty()` / `bjson_get_idx()` / `bjson_get_key()` / `bjson_at_path()`
+  - 이터레이션: `bjson_iter_create()` / `bjson_iter_next()` / `bjson_iter_key()` / `bjson_iter_value()` / `bjson_iter_destroy()`
+  - 직렬화: `bjson_dump()` / `bjson_dump_pretty()`
+  - 뮤테이션: `bjson_set_int/double/string/null/bool()` / `bjson_insert_raw()` / `bjson_erase_key/idx()`
+  - 빌드: `cmake -DBEAST_JSON_BUILD_BINDINGS=ON`
+
+  **Python ctypes 바인딩** (`bindings/python/`):
+  - `Document(json_str, strict=False)` — Beast 파싱, 자동 메모리 관리
+  - `Value` — lazy accessor: `[]`, `at()`, `items()`, `dump()`, `set()`, `insert()`, `erase()`
+  - `loads(json_str)` / `dumps(obj)` — `json` 모듈과 동일 인터페이스
+  - Python native 변환: `get()` → `dict/list/str/int/float/bool/None` 자동
+
+  ```python
+  from beast_json import Document, loads
+
+  doc = Document('{"name":"Alice","tags":["a","b"],"addr":{"city":"Seoul"}}')
+  root = doc.root()
+
+  # 접근
+  print(root["name"])           # Alice
+  print(root["addr"]["city"])   # Seoul
+  print(root["tags"][0])        # a
+
+  # JSON Pointer (RFC 6901)
+  print(root.at("/tags/1"))     # b
+
+  # 이터레이션
+  for key, val in root.items():
+      print(f"{key}: {val.type_name}")
+
+  # 뮤테이션
+  root["name"].set("Bob")
+  root.insert("version", 2)
+  root["tags"].erase(0)
+  print(root.dump(indent=2))
+
+  # Python dict 변환
+  obj = root.get()    # → {'name': 'Bob', ...}
+
+  # RFC 8259 strict 모드
+  try:
+      bad = Document("[1,2,]", strict=True)
+  except ValueError as e:
+      print(e)  # JSON parse error: RFC 8259 violation at offset 5: trailing comma
+
+  # loads() — json.loads() 대체
+  data = loads('[1, 2, {"x": 3}]')
+  print(data)   # [1, 2, {'x': 3}]
+  ```
 
 ---
 
@@ -433,7 +505,7 @@
 
 ## 불변 원칙
 
-- **모든 변경은 `ctest PASS` 후 커밋** — 예외 없음 (현재 272개)
+- **모든 변경은 `ctest PASS` 후 커밋** — 예외 없음 (현재 368개)
 - **회귀 즉시 revert** — 원인 분석 선행
 - **Phase 65 리스크**: `s[cl+1]==':'` 단독 가드는 값이 `":"` 형태인 JSON에서 false-positive 가능. 표준 4종 벤치마크 파일 안전 확인됨.
 - **SVE 절대 금기** (Snapdragon): Android 커널 비활성화 → SIGILL.

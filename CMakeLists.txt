@@ -65,3 +65,9 @@ option(BEAST_JSON_BUILD_FUZZ "Build libFuzzer fuzz targets (requires Clang)" OFF
 if(BEAST_JSON_BUILD_FUZZ)
     add_subdirectory(fuzz)
 endif()
+
+# Language bindings (Optional)
+option(BEAST_JSON_BUILD_BINDINGS "Build C shared library + language bindings" OFF)
+if(BEAST_JSON_BUILD_BINDINGS)
+    add_subdirectory(bindings/c)
+endif()
