@@ -404,36 +404,62 @@ kc_.lens[depth_][key_idx] = static_cast<uint16_t>(e - s);
 
 ---
 
-## 🗺️ Roadmap to 1.0 (The Ultimate API)
+## 🗺️ Roadmap to v1.0
 
-> 3종 플랫폼 최적화 완료 (x86_64 Phase 75 · Snapdragon Gen 2 Phase 73 · M1 Pro Phase 80-M1) · **The Ultimate API 완성** · **Zero-Effort 자동 직렬화 엔진 완성** · **RFC 8259 완전 준수** · **Foreign Language Bindings 완성** (ctest 368/368 PASS) — **v1.0 목표 달성**.
+> All three platform optimization targets met (x86_64 Phase 75 · Snapdragon 8 Gen 2 Phase 73 · Apple M1 Pro Phase 80-M1). **The Ultimate API complete** · **Zero-Effort Auto-Serialization complete** · **RFC 8259 fully compliant** · **Foreign Language Bindings complete** (ctest 368/368 PASS) — **v1.0 goals achieved**.
 
-자세한 계획 및 진행 현황은 **[docs/ROADMAP.md](docs/ROADMAP.md)** 를 참조하세요.
+For the full optimization history and detailed platform notes, see **[docs/ROADMAP.md](docs/ROADMAP.md)**.
 
-**핵심 목표 (v1.0):**
-- [x] **Core Engine**: x86_64 / Snapdragon 8 Gen 2 / M1 Pro 전 플랫폼 최적화 완료.
-- [x] **Legacy DOM 제거**: `beast::json::Value`, `Parser`, `Object`, `Array`, `rtsm::Parser` 삭제 완료.
-- [x] **3-Tier 아키텍처**: `beast::core` · `beast::utils` · `beast` 퍼사드 분리 완료.
-- [x] **암시적 변환** (nlohmann 스타일): `int age = doc["age"];`
-- [x] **안전 접근 체인** (SafeValue 모나드): `int t = doc.get("cfg")["timeout"].value_or(5000);`
-- [x] **AutoChain / operator[] non-throwing**: `root["a"]["b"]["c"]` — missing key → invalid `Value{}`, 예외 없음.
-- [x] **구조적 뮤테이션**: `erase(key/idx)`, `insert(key, T)`, `push_back(T)` — overlay, 원본 tape 불변.
-- [x] **이터레이션**: `items()` / `elements()` — range-for, structured bindings, 삭제 항목 자동 skip.
-- [x] **Pretty-print**: `dump(int indent)` — `root.dump(2)` / `root.dump(4)`.
-- [x] **C++20 Ranges/STL 완전 호환**: `borrowed_range`, `std::views::filter/transform` 파이프 지원.
-- [x] **C++20 Concepts**: 컴파일 타임 타입 안전성.
-- [x] **`operator|` Pipe Fallback**: `int age = doc["age"] | 42;` — 누락·타입 불일치 시 기본값 반환.
-- [x] **Typed Views `as_array<T>()`**: `for (int id : doc["ids"].as_array<int>())`.
-- [x] **Runtime JSON Pointer `at(path)`**: `root.at("/users/0/name")` — RFC 6901.
-- [x] **Compile-Time JSON Pointer `at<Path>()`**: `root.at<"/config/timeout">()` — 컴파일 타임 경로 검증.
+### Platform Performance Status
+
+| Architecture | Parse ≥1.2× yyjson | Serialize ≥1.2× yyjson | Status |
+| :--- | :---: | :---: | :--- |
+| **Linux x86_64** (GCC 13.3, AVX-512, PGO) | ✅ All 4 files | ⚠️ 3/4 (citm pending) | Phase 75 complete |
+| **Snapdragon 8 Gen 2** (Android Termux, Clang 21) | ✅ All 4 files | ✅ All 4 files | Phase 73 complete · 8/8 swept |
+| **Apple M1 Pro** (Apple Clang, NEON, PGO) | ⚠️ gsoc only | ✅ All 4 files | Phase 80-M1 complete · serialize 4/4 swept |
+
+### v1.0 Feature Checklist
+
+**Core Engine & Architecture**
+- [x] **Core Engine**: Optimized across x86_64 / Snapdragon 8 Gen 2 / Apple M1 Pro.
+- [x] **Legacy DOM removed**: `beast::json::Value`, `Parser`, `Object`, `Array`, `rtsm::Parser` deleted (7,880 → 3,187 lines).
+- [x] **3-Tier architecture**: `beast::core` (engine) · `beast::utils` (platform macros) · `beast` (public facade).
+
+**API — Access & Type Safety**
+- [x] **Implicit conversion** (nlohmann-style): `int age = doc["age"];`
+- [x] **Safe access chain** (SafeValue monad): `int t = doc.get("cfg")["timeout"].value_or(5000);`
+- [x] **AutoChain / non-throwing `operator[]`**: `root["a"]["b"]["c"]` — missing key → invalid `Value{}`, never throws.
+- [x] **`as<T>()` / `try_as<T>()`**: Typed access with exception or `std::optional<T>`.
+- [x] **`find(key)`**: Returns `std::optional<Value>` — safe object key lookup.
 - [x] **`contains()` / `value(key, default)`**: `root.contains("k")` / `root.value("age", 0)`.
-- [x] **`type_name()`**: `"null"/"bool"/"int"/"double"/"string"/"array"/"object"`.
-- [x] **`keys()` / `values()` 범위**: 객체 키·값 lazy 범위 (`std::views::transform` 기반).
-- [x] **`merge()` / `merge_patch(json)`**: RFC 7396 JSON Merge Patch.
-- [x] **`beast::read<T>()` / `beast::write()`**: 자동 직렬화 엔진 (STL 전체 + 매크로 구조체).
-- [x] **`BEAST_JSON_FIELDS(Type, ...)`**: 한 줄 매크로로 커스텀 구조체 읽기+쓰기 완전 자동화.
-- [x] **RFC 8259 완전 준수**: `beast::rfc8259::validate()` + `beast::parse_strict()` — 56개 테스트 통과.
-- [x] **Foreign Language Bindings**: C Shared Library (`beast_json_c.so`) + Python ctypes 바인딩 완성.
+- [x] **`type_name()`**: Returns `"null"/"bool"/"int"/"double"/"string"/"array"/"object"/"invalid"`.
+- [x] **`is_valid()`**: Public validity check API.
+
+**API — Mutation**
+- [x] **Structural mutation** (overlay — original tape unchanged): `erase(key/idx)`, `insert(key, T)`, `push_back(T)`.
+- [x] **Value mutation**: `set(T)` / `unset()` / `operator=(T)` — immediately reflected in `dump()`.
+
+**API — Iteration & Views**
+- [x] **Iteration**: `items()` / `elements()` — range-for with structured bindings, deleted items auto-skipped.
+- [x] **`keys()` / `values()` ranges**: Lazy object key/value ranges via `std::views::transform`.
+- [x] **Typed array view `as_array<T>()`**: `for (int id : doc["ids"].as_array<int>())` — zero allocation.
+- [x] **Pretty-print**: `dump(int indent)` — `root.dump(2)` / `root.dump(4)`.
+
+**API — C++20 & Convenience**
+- [x] **C++20 Ranges/STL compatibility**: `borrowed_range`, `std::views::filter/transform` pipe syntax.
+- [x] **C++20 Concepts**: Compile-time type safety on all template parameters.
+- [x] **`operator|` pipe fallback**: `int age = doc["age"] | 42;` — returns default on missing key or type mismatch, never throws.
+- [x] **Runtime JSON Pointer `at(path)`**: `root.at("/users/0/name")` — RFC 6901 compliant.
+- [x] **Compile-time JSON Pointer `at<Path>()`**: `root.at<"/config/timeout">()` — path validated at compile time.
+- [x] **`merge()` / `merge_patch(json)`**: RFC 7396 JSON Merge Patch support.
+
+**Serialization**
+- [x] **`beast::read<T>()` / `beast::write()`**: Auto-serialization engine (full STL + macro structs).
+- [x] **`BEAST_JSON_FIELDS(Type, ...)`**: One-liner macro for complete read+write automation for custom structs.
+
+**Standards & Bindings**
+- [x] **RFC 8259 fully compliant**: `beast::rfc8259::validate()` + `beast::parse_strict()` — 56 test cases passing.
+- [x] **Foreign Language Bindings**: C shared library (`beast_json_c.so`) + Python ctypes binding complete.
 
 ---
 
@@ -708,7 +734,7 @@ data = loads('[1, 2, {"x": 3}]')  # → [1, 2, {'x': 3}]
 | RFC8259_ImplDefined | 3 | ✅ PASS |
 | RFC8259_Roundtrip | 4 | ✅ PASS |
 | RFC8259_API | 4 | ✅ PASS |
-| **Total** | **312** | **100% PASS** |
+| **Total** | **368** | **100% PASS** |
 
 ---
 
@@ -725,7 +751,7 @@ cmake -S . -B build-san \
   -DBEAST_JSON_BUILD_TESTS=ON \
   "-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer"
 cmake --build build-san -j$(nproc)
-cd build-san && ctest -j$(nproc)   # 312/312 PASS
+cd build-san && ctest -j$(nproc)   # 368/368 PASS
 ```
 
 ### libFuzzer Targets
