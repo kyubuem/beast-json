@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, macos-13]
+        os: [ubuntu-latest, macos-latest]
         arch: [x86_64, aarch64]
         build_type: [Release, Debug]
         compiler: [gcc, clang, apple-clang]
@@ -29,18 +29,12 @@ jobs:
           # Exclude invalid architecture combinations
           - os: macos-latest
             arch: x86_64 # macos-latest is ARM (M1/M2/M3), exclude x86_64
-          - os: macos-13
-            arch: aarch64 # macos-13 is Intel, exclude aarch64
           # Exclude combinations that don't make sense
           - os: ubuntu-latest
             compiler: apple-clang
           - os: macos-latest
             compiler: gcc
           - os: macos-latest
-            compiler: clang
-          - os: macos-13
-            compiler: gcc
-          - os: macos-13
             compiler: clang
 
     steps:
