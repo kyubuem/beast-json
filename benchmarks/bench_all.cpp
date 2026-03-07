@@ -11,7 +11,9 @@
 #include "utils.hpp"
 #include <beast_json/beast_json.hpp>
 #include <fstream>
+#ifdef BEAST_HAS_GLAZE
 #include <glaze/glaze.hpp>
+#endif
 #include <nlohmann/json.hpp>
 #include <yyjson.h>
 
@@ -106,6 +108,7 @@ static void run_file(const std::string &filename, size_t N, bool parse_only) {
   }
 
   // ── 3. Glaze (DOM glz::json_t) ───────────────────────────────────────────
+#ifdef BEAST_HAS_GLAZE
   {
     bench::Timer pt, st;
     pt.start();
@@ -133,6 +136,7 @@ static void run_file(const std::string &filename, size_t N, bool parse_only) {
 
     bench::Result{"Glaze DOM", p_ns, s_ns, true}.print();
   }
+#endif
 
   // ── 4. nlohmann/json (baseline) ──────────────────────────────────────────
   {

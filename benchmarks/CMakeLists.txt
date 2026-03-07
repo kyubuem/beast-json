@@ -44,13 +44,26 @@ endif()
 
 # Fetch fast_float removed
 
-# Fetch Glaze (C++23)
-FetchContent_Declare(
-    glaze
-    GIT_REPOSITORY https://github.com/stephenberry/glaze.git
-    GIT_TAG v2.9.5
-)
-FetchContent_MakeAvailable(glaze)
+# Check for C++23 support
+include(CheckCXXCompilerFlag)
+check_cxx_compiler_flag("-std=c++23" HAS_CXX23)
+check_cxx_compiler_flag("-std=c++2b" HAS_CXX2B)
+if(HAS_CXX23 OR HAS_CXX2B)
+    set(BEAST_BUILD_GLAZE ON)
+else()
+    set(BEAST_BUILD_GLAZE OFF)
+    message(STATUS "Compiler does not support C++23. Skipping Glaze benchmarks.")
+endif()
+
+if(BEAST_BUILD_GLAZE)
+    # Fetch Glaze (C++23)
+    FetchContent_Declare(
+        glaze
+        GIT_REPOSITORY https://github.com/stephenberry/glaze.git
+        GIT_TAG v2.9.5
+    )
+    FetchContent_MakeAvailable(glaze)
+endif()
 
 # Download benchmark data
 set(BENCHMARK_DATA_DIR ${CMAKE_CURRENT_BINARY_DIR})
@@ -149,8 +162,23 @@ target_link_libraries(bench_all PRIVATE
     beast_json::beast_json
     nlohmann_json::nlohmann_json
     yyjson
-    glaze::glaze
 )
+
+if(BEAST_BUILD_GLAZE)
+    target_link_libraries(bench_all PRIVATE glaze::glaze)
+    target_compile_definitions(bench_all PRIVATE BEAST_HAS_GLAZE=1)
+    # Attempt to use cxx_std_23 if CMake knows it, else fallback to standard options
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.20" OR "cxx_std_23" IN_LIST CMAKE_CXX_COMPILE_FEATURES)
+        target_compile_features(bench_all PRIVATE cxx_std_23)
+    elseif(HAS_CXX23)
+        target_compile_options(bench_all PRIVATE -std=c++23)
+    else()
+        target_compile_options(bench_all PRIVATE -std=c++2b)
+    endif()
+else()
+    target_compile_features(bench_all PRIVATE cxx_std_20)
+endif()
+
 # Phase 73: serialize-only profiling benchmark (parse once, dump in tight loop).
 # Used to measure dump() vs dump(string&) buffer-reuse overhead.
 # Usage (from build_bench/benchmarks/): ./bench_ser_profile [file.json] [iters]
@@ -163,25 +191,38 @@ target_link_libraries(bench_ser_profile PRIVATE beast_json::beast_json)
 add_executable(bench_quick bench_quick.cpp)
 target_link_libraries(bench_quick PRIVATE beast_json::beast_json)
 
-target_compile_features(bench_all PRIVATE cxx_std_23)
 target_compile_features(bench_quick PRIVATE cxx_std_20)
 target_compile_features(bench_ser_profile PRIVATE cxx_std_20)
 
-# Glaze Benchmark
-add_executable(bench_glaze bench_glaze.cpp)
-target_link_libraries(bench_glaze PRIVATE
-    beast_json::beast_json
-    glaze::glaze
-)
-target_compile_features(bench_glaze PRIVATE cxx_std_23)
+if(BEAST_BUILD_GLAZE)
+    # Glaze Benchmark
+    add_executable(bench_glaze bench_glaze.cpp)
+    target_link_libraries(bench_glaze PRIVATE
+        beast_json::beast_json
+        glaze::glaze
+    )
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.20" OR "cxx_std_23" IN_LIST CMAKE_CXX_COMPILE_FEATURES)
+        target_compile_features(bench_glaze PRIVATE cxx_std_23)
+    elseif(HAS_CXX23)
+        target_compile_options(bench_glaze PRIVATE -std=c++23)
+    else()
+        target_compile_options(bench_glaze PRIVATE -std=c++2b)
+    endif()
 
-# Deep Nesting Benchmark
-add_executable(bench_deep_nesting bench_deep_nesting.cpp)
-target_link_libraries(bench_deep_nesting PRIVATE
-    beast_json::beast_json
-    glaze::glaze
-)
-target_compile_features(bench_deep_nesting PRIVATE cxx_std_23)
+    # Deep Nesting Benchmark
+    add_executable(bench_deep_nesting bench_deep_nesting.cpp)
+    target_link_libraries(bench_deep_nesting PRIVATE
+        beast_json::beast_json
+        glaze::glaze
+    )
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.20" OR "cxx_std_23" IN_LIST CMAKE_CXX_COMPILE_FEATURES)
+        target_compile_features(bench_deep_nesting PRIVATE cxx_std_23)
+    elseif(HAS_CXX23)
+        target_compile_options(bench_deep_nesting PRIVATE -std=c++23)
+    else()
+        target_compile_options(bench_deep_nesting PRIVATE -std=c++2b)
+    endif()
+endif()
 
 # ── Architecture-specific flags ───────────────────────────────────────────────
 # The AArch64 space is NOT monolithic. Three distinct sub-targets require
