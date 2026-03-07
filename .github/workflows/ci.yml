@@ -14,6 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, macos-13, windows-latest]
+        arch: [x86_64, aarch64]
         build_type: [Release, Debug]
         compiler: [gcc, clang, msvc, apple-clang]
         include:
@@ -25,6 +26,13 @@ jobs:
             cc: clang-17
             cxx: clang++-17
         exclude:
+          # Exclude invalid architecture combinations
+          - os: macos-latest
+            arch: aarch64 # macos-latest is inherently ARM, don't double dip/emulate
+          - os: macos-13
+            arch: aarch64
+          - os: windows-latest
+            arch: aarch64
           # Exclude combinations that don't make sense
           - os: ubuntu-latest
             compiler: msvc
@@ -55,19 +63,20 @@ jobs:
         submodules: recursive
 
     - name: Install Compilers (Ubuntu)
-      if: runner.os == 'Linux' && matrix.compiler == 'gcc'
+      if: runner.os == 'Linux' && matrix.compiler == 'gcc' && matrix.arch == 'x86_64'
       run: |
         sudo apt-get update
         sudo apt-get install -y g++-13
         
     - name: Install Compilers (Ubuntu Clang)
-      if: runner.os == 'Linux' && matrix.compiler == 'clang'
+      if: runner.os == 'Linux' && matrix.compiler == 'clang' && matrix.arch == 'x86_64'
       run: |
         wget https://apt.llvm.org/llvm.sh
         chmod +x llvm.sh
         sudo ./llvm.sh 17
         
-    - name: Configure CMake
+    - name: Configure CMake (Native)
+      if: matrix.arch == 'x86_64' || runner.os != 'Linux'
       env:
         CC: ${{ matrix.cc }}
         CXX: ${{ matrix.cxx }}
@@ -76,9 +85,36 @@ jobs:
         -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
         -DBEAST_BUILD_TESTS=ON
 
-    - name: Build
+    - name: Build (Native)
+      if: matrix.arch == 'x86_64' || runner.os != 'Linux'
       run: cmake --build build --config ${{ matrix.build_type }} -j4
 
-    - name: Test
+    - name: Test (Native)
+      if: matrix.arch == 'x86_64' || runner.os != 'Linux'
       working-directory: build
       run: ctest -C ${{ matrix.build_type }} --output-on-failure
+
+    # ── AARCH64 (ARM Linux) QEMU Emulation ────────────────────────────────────
+    
+    - name: Run aarch64 Build & Test (QEMU)
+      if: runner.os == 'Linux' && matrix.arch == 'aarch64'
+      uses: uraimo/run-on-arch-action@v2
+      with:
+        arch: aarch64
+        distro: ubuntu22.04
+        githubToken: ${{ github.token }}
+        install: |
+          apt-get update
+          apt-get install -y cmake build-essential gcc-12 g++-12 clang-15
+        run: |
+          if [ "${{ matrix.compiler }}" = "gcc" ]; then
+            export CC=gcc-12
+            export CXX=g++-12
+          else
+            export CC=clang-15
+            export CXX=clang++-15
+          fi
+          cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DBEAST_BUILD_TESTS=ON
+          cmake --build build --config ${{ matrix.build_type }} -j4
+          cd build && ctest -C ${{ matrix.build_type }} --output-on-failure
+
