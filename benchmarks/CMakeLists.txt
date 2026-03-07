@@ -145,6 +145,7 @@ target_link_libraries(bench_all PRIVATE
     nlohmann_json::nlohmann_json
     yyjson
 )
+target_include_directories(bench_all PRIVATE ${rapidjson_SOURCE_DIR}/include)
 
 if(BEAST_BUILD_GLAZE)
     target_link_libraries(bench_all PRIVATE glaze::glaze)

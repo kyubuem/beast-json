@@ -15,6 +15,9 @@
 #include <glaze/glaze.hpp>
 #endif
 #include <nlohmann/json.hpp>
+#include <rapidjson/document.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 #include <yyjson.h>
 
 #include <cstring>
@@ -44,8 +47,8 @@ static void run_file(const std::string &exe_path, const std::string &lib_filter,
               << "  Iterations: " << N << "\n";
     bench::print_table_header();
 
-    std::vector<std::string> libs = {"beast::lazy", "yyjson", "Glaze DOM",
-                                     "nlohmann"};
+    std::vector<std::string> libs = {"beast::lazy", "yyjson", "RapidJSON",
+                                     "Glaze DOM", "nlohmann"};
     for (const auto &lib : libs) {
 #ifndef BEAST_HAS_GLAZE
       if (lib == "Glaze DOM")
@@ -80,7 +83,6 @@ static void run_file(const std::string &exe_path, const std::string &lib_filter,
     for (size_t i = 0; i < N; ++i)
       beast::parse(ctx, content);
     double p_ns = pt.elapsed_ns() / N;
-    double p_cns = pt.elapsed_cpu_ns() / N;
 
     double s_ns = 0.0;
     bool ok = true;
@@ -101,7 +103,7 @@ static void run_file(const std::string &exe_path, const std::string &lib_filter,
       }
     }
 
-    bench::Result{"beast::lazy", p_ns, p_cns, s_ns, ok}.print();
+    bench::Result{"beast::lazy", p_ns, s_ns, ok}.print();
   }
 
   // ── 2. yyjson ────────────────────────────────────────────────────────────
@@ -113,7 +115,6 @@ static void run_file(const std::string &exe_path, const std::string &lib_filter,
       yyjson_doc_free(d);
     }
     double p_ns = pt.elapsed_ns() / N;
-    double p_cns = pt.elapsed_cpu_ns() / N;
 
     double s_ns = 0.0;
     if (!parse_only) {
@@ -128,10 +129,37 @@ static void run_file(const std::string &exe_path, const std::string &lib_filter,
       yyjson_doc_free(d);
     }
 
-    bench::Result{"yyjson", p_ns, p_cns, s_ns, true}.print();
+    bench::Result{"yyjson", p_ns, s_ns, true}.print();
   }
 
-  // ── 3. Glaze (DOM glz::json_t) ───────────────────────────────────────────
+  // ── 3. RapidJSON ─────────────────────────────────────────────────────────
+  if (lib_filter == "RapidJSON") {
+    bench::Timer pt, st;
+    pt.start();
+    for (size_t i = 0; i < N; ++i) {
+      rapidjson::Document d;
+      d.Parse(content.c_str());
+    }
+    double p_ns = pt.elapsed_ns() / N;
+
+    double s_ns = 0.0;
+    if (!parse_only) {
+      rapidjson::Document d;
+      d.Parse(content.c_str());
+      rapidjson::StringBuffer buffer;
+      st.start();
+      for (size_t i = 0; i < N; ++i) {
+        buffer.Clear();
+        rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+        d.Accept(writer);
+      }
+      s_ns = st.elapsed_ns() / N;
+    }
+
+    bench::Result{"RapidJSON", p_ns, s_ns, true}.print();
+  }
+
+  // ── 4. Glaze (DOM glz::json_t) ───────────────────────────────────────────
 #ifdef BEAST_HAS_GLAZE
   if (lib_filter == "Glaze DOM") {
     bench::Timer pt, st;
@@ -142,7 +170,6 @@ static void run_file(const std::string &exe_path, const std::string &lib_filter,
       (void)ec;
     }
     double p_ns = pt.elapsed_ns() / N;
-    double p_cns = pt.elapsed_cpu_ns() / N;
 
     double s_ns = 0.0;
     if (!parse_only) {
@@ -157,18 +184,17 @@ static void run_file(const std::string &exe_path, const std::string &lib_filter,
       s_ns = st.elapsed_ns() / N;
     }
 
-    bench::Result{"Glaze DOM", p_ns, p_cns, s_ns, true}.print();
+    bench::Result{"Glaze DOM", p_ns, s_ns, true}.print();
   }
 #endif
 
-  // ── 4. nlohmann/json (baseline) ──────────────────────────────────────────
+  // ── 5. nlohmann/json (baseline) ──────────────────────────────────────────
   if (lib_filter == "nlohmann") {
     bench::Timer pt, st;
     pt.start();
     for (size_t i = 0; i < N; ++i)
       (void)nlohmann::json::parse(content);
     double p_ns = pt.elapsed_ns() / N;
-    double p_cns = pt.elapsed_cpu_ns() / N;
 
     double s_ns = 0.0;
     if (!parse_only) {
@@ -179,7 +205,7 @@ static void run_file(const std::string &exe_path, const std::string &lib_filter,
       s_ns = st.elapsed_ns() / N;
     }
 
-    bench::Result{"nlohmann", p_ns, p_cns, s_ns, true}.print();
+    bench::Result{"nlohmann", p_ns, s_ns, true}.print();
   }
 }
 
