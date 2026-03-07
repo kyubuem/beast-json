@@ -144,6 +144,7 @@ target_link_libraries(bench_all PRIVATE
     beast_json::beast_json
     nlohmann_json::nlohmann_json
     yyjson
+    simdjson
 )
 target_include_directories(bench_all PRIVATE ${rapidjson_SOURCE_DIR}/include)
 

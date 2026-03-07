@@ -18,6 +18,7 @@
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
+#include <simdjson.h>
 #include <yyjson.h>
 
 #include <cstring>
@@ -47,8 +48,8 @@ static void run_file(const std::string &exe_path, const std::string &lib_filter,
               << "  Iterations: " << N << "\n";
     bench::print_table_header();
 
-    std::vector<std::string> libs = {"beast::lazy", "yyjson", "RapidJSON",
-                                     "Glaze DOM", "nlohmann"};
+    std::vector<std::string> libs = {"beast::lazy", "simdjson",  "yyjson",
+                                     "RapidJSON",   "Glaze DOM", "nlohmann"};
     for (const auto &lib : libs) {
 #ifndef BEAST_HAS_GLAZE
       if (lib == "Glaze DOM")
@@ -104,6 +105,33 @@ static void run_file(const std::string &exe_path, const std::string &lib_filter,
     }
 
     bench::Result{"beast::lazy", p_ns, s_ns, ok}.print();
+  }
+
+  // ── 1.5 simdjson ─────────────────────────────────────────────────────────
+  if (lib_filter == "simdjson") {
+    simdjson::padded_string padded(content);
+    simdjson::dom::parser parser;
+
+    bench::Timer pt, st;
+    pt.start();
+    for (size_t i = 0; i < N; ++i) {
+      auto doc = parser.parse(padded);
+      (void)doc;
+    }
+    double p_ns = pt.elapsed_ns() / N;
+
+    double s_ns = 0.0;
+    if (!parse_only) {
+      auto doc = parser.parse(padded);
+      std::string out;
+      st.start();
+      for (size_t i = 0; i < N; ++i) {
+        out = simdjson::minify(doc);
+      }
+      s_ns = st.elapsed_ns() / N;
+    }
+
+    bench::Result{"simdjson", p_ns, s_ns, true}.print();
   }
 
   // ── 2. yyjson ────────────────────────────────────────────────────────────
