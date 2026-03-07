@@ -28,9 +28,9 @@ jobs:
         exclude:
           # Exclude invalid architecture combinations
           - os: macos-latest
-            arch: aarch64 # macos-latest is inherently ARM, don't double dip/emulate
+            arch: x86_64 # macos-latest is ARM (M1/M2/M3), exclude x86_64
           - os: macos-13
-            arch: aarch64
+            arch: aarch64 # macos-13 is Intel, exclude aarch64
           - os: windows-latest
             arch: aarch64
           # Exclude combinations that don't make sense
@@ -83,16 +83,29 @@ jobs:
       run: >
         cmake -B build
         -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
-        -DBEAST_BUILD_TESTS=ON
+        -DBEAST_JSON_BUILD_TESTS=ON
 
     - name: Build (Native)
-      if: matrix.arch == 'x86_64' || runner.os != 'Linux'
+      if: runner.os != 'Linux' || matrix.arch == 'x86_64'
       run: cmake --build build --config ${{ matrix.build_type }} -j4
 
     - name: Test (Native)
-      if: matrix.arch == 'x86_64' || runner.os != 'Linux'
+      if: runner.os != 'Linux' || matrix.arch == 'x86_64'
       working-directory: build
       run: ctest -C ${{ matrix.build_type }} --output-on-failure
+
+    - name: Run & Export Benchmarks (Native)
+      if: matrix.build_type == 'Release' && (runner.os != 'Linux' || matrix.arch == 'x86_64') && ((runner.os == 'Linux' && matrix.compiler == 'clang') || (runner.os == 'macOS' && matrix.compiler == 'apple-clang') || (runner.os == 'Windows' && matrix.compiler == 'msvc'))
+      working-directory: build/benchmarks
+      run: |
+        ./bench_all --all > benchmark_${{ matrix.os }}_${{ matrix.arch }}.txt || echo "Benchmark failed or missing"
+
+    - name: Upload Benchmark Artifacts
+      if: matrix.build_type == 'Release' && (runner.os != 'Linux' || matrix.arch == 'x86_64') && ((runner.os == 'Linux' && matrix.compiler == 'clang') || (runner.os == 'macOS' && matrix.compiler == 'apple-clang') || (runner.os == 'Windows' && matrix.compiler == 'msvc'))
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-${{ matrix.os }}-${{ matrix.arch }}
+        path: build/benchmarks/benchmark_${{ matrix.os }}_${{ matrix.arch }}.txt
 
     # ── AARCH64 (ARM Linux) QEMU Emulation ────────────────────────────────────
     
@@ -114,7 +127,18 @@ jobs:
             export CC=clang-15
             export CXX=clang++-15
           fi
-          cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DBEAST_BUILD_TESTS=ON
+          cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DBEAST_JSON_BUILD_TESTS=ON
           cmake --build build --config ${{ matrix.build_type }} -j4
           cd build && ctest -C ${{ matrix.build_type }} --output-on-failure
+          if [ "${{ matrix.build_type }}" = "Release" ] && [ "${{ matrix.compiler }}" = "clang" ]; then
+            cd benchmarks
+            ./bench_all --all > benchmark_${{ matrix.os }}_aarch64.txt || true
+          fi
+
+    - name: Upload QEMU Benchmark Artifacts
+      if: runner.os == 'Linux' && matrix.arch == 'aarch64' && matrix.build_type == 'Release' && matrix.compiler == 'clang'
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-${{ matrix.os }}-aarch64-qemu
+        path: build/benchmarks/benchmark_${{ matrix.os }}_aarch64.txt
 
