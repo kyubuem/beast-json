@@ -10,8 +10,9 @@
 5. [Auto-Serialization Macro](#auto-serialization-macro)
 6. [RFC 8259 Validator](#rfc-8259-validator)
 7. [Language Bindings](#language-bindings)
-8. [Optimization Optimization Failures & Lessons](#optimization-failures--lessons)
+8. [Optimization Failures & Lessons](#optimization-failures--lessons)
 9. [Development Roadmap & History](#development-roadmap--history)
+10. [Security & Memory-Safety Hardening](#security--memory-safety-hardening)
 
 ---
 

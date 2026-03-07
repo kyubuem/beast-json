@@ -12,9 +12,9 @@
 
 ---
 
-**Beast JSON** is a bleeding-edge, lazy-DOM C++20 JSON library engineered to be the absolute fastest modern JSON parser and serializer in the world. Designed for latency-critical applications, Game Engines, High-Frequency Trading systems, and extreme throughput web servers.
+**Beast JSON** is a bleeding-edge, lazy-DOM C++20 JSON library engineered to be the absolute fastest **C++ JSON parser and serializer** in the world. Designed for latency-critical applications, Game Engines, High-Frequency Trading systems, and extreme throughput web servers.
 
-By fully leveraging **C++20 Concepts**, **SIMD (AVX-512, NEON)**, **SWAR (SIMD Within A Register)**, and a **Zero-Allocation Array-Backed Tape DOM**, Beast JSON fundamentally changes how JSON is processed, destroying traditional tree-based DOM performance limits while retaining a beautifully simple API.
+By fully leveraging **C++20 Concepts**, **SIMD (AVX-512, NEON)**, **SWAR (SIMD Within A Register)**, and a **Zero-Allocation Array-Backed Tape DOM**, Beast JSON fundamentally changes how JSON is processed. It destroys traditional tree-based DOM performance limits while retaining a beautifully simple API, cementing itself as the ultimate **C++20 JSON library**.
 
 ## 🚀 Features at a Glance
 
@@ -142,10 +142,10 @@ target_link_libraries(my_app PRIVATE beast_json)
 ```
 
 Requires a C++20 compliant compiler:
-* GCC 11+
-* Clang 13+
-* Apple Clang 14+
-* MSVC 19.30+
+* **GCC** 11+
+* **Clang** 13+
+* **Apple Clang** 14+
+* **MSVC** 19.30+
 
 ---
 
@@ -160,7 +160,7 @@ For an extensive dive into Beast's SIMD Two-Phase Pipeline and Key-Length Cachin
 
 ---
 
-## � Commitment to Open Source (OSI)
+## 🤝 Commitment to Open Source (OSI)
 
 Beast JSON is developed in strict alignment with the principles of the **Open Source Initiative (OSI)**. 
 
